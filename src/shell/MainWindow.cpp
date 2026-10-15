@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "infra/Log.h"
+#include "core/SessionManager.h"
 #include "shell/MenuBuilder.h"
 #include "shell/TabBar.h"
 
@@ -158,7 +159,10 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             RebuildAccelerators();
 
             ::DragAcceptFiles(hwnd_, TRUE);
-            EnsureAtLeastOneDocument();
+            // 优先恢复上次会话；没有可用会话时才给一个空白文档
+            if (!RestoreSession()) {
+                EnsureAtLeastOneDocument();
+            }
             return 0;
         }
         case WM_SIZE:
@@ -211,7 +215,13 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         case WM_CLOSE: {
+            // 会话要在关闭文档之前取快照——CloseAllDocuments 之后就没得记了
+            const core::SessionSnapshot snapshot = BuildSessionSnapshot();
             if (CloseAllDocuments()) {
+                std::wstring error;
+                if (!core::SessionManager::Save(snapshot, &error)) {
+                    infra::LogWarn(L"session", L"会话保存失败: " + error);
+                }
                 ::DestroyWindow(hwnd_);
             }
             return 0;
@@ -538,6 +548,77 @@ void MainWindow::EnsureAtLeastOneDocument() {
     }
     SyncTabBar();
     ActivateDocument(documents_->Active() != nullptr ? documents_->Active()->buffer.id : 0);
+}
+
+core::SessionSnapshot MainWindow::BuildSessionSnapshot() const {
+    core::SessionSnapshot snapshot;
+    if (!documents_) {
+        return snapshot;
+    }
+    for (const core::BufferId id : documents_->TabOrder()) {
+        edit::Document* document = documents_->Find(id);
+        // 只记有路径的文档，见 SessionManager 的说明
+        if (document == nullptr || !document->buffer.HasPath() || !document->view) {
+            continue;
+        }
+        core::SessionDocument entry;
+        entry.filePath = document->buffer.filePath;
+        entry.caretPos = document->view->CaretPosition();
+        entry.firstVisibleLine = document->view->FirstVisibleLine();
+        entry.zoomLevel = document->view->ZoomLevel();
+        entry.isActive = (document == documents_->Active());
+        snapshot.documents.push_back(std::move(entry));
+    }
+    return snapshot;
+}
+
+bool MainWindow::RestoreSession() {
+    core::SessionSnapshot snapshot;
+    std::wstring error;
+    if (!core::SessionManager::Load(snapshot, &error)) {
+        if (!error.empty()) {
+            infra::LogInfo(L"session", L"未恢复会话: " + error);
+        }
+        return false;
+    }
+    if (snapshot.documents.empty()) {
+        return false;
+    }
+
+    edit::Document* active = nullptr;
+    int restored = 0;
+    for (const core::SessionDocument& entry : snapshot.documents) {
+        const core::OpenOutcome outcome = documents_->Open(entry.filePath);
+        if (outcome.status != core::OpenStatus::Ok &&
+            outcome.status != core::OpenStatus::AlreadyOpen) {
+            // 文件被删除或改名是常态，跳过继续恢复其余文档，不打断启动
+            infra::LogWarn(L"session", L"会话中的文件已无法打开: " + entry.filePath);
+            continue;
+        }
+        edit::Document* document = outcome.document;
+        if (document == nullptr || !document->view) {
+            continue;
+        }
+        // 先定位光标（会顺带滚动），再用记录的首可见行覆盖滚动位置
+        document->view->SetCaretPosition(entry.caretPos);
+        document->view->SetFirstVisibleLine(entry.firstVisibleLine);
+        document->view->SetZoom(entry.zoomLevel);
+        if (entry.isActive) {
+            active = document;
+        }
+        ++restored;
+    }
+    if (restored == 0) {
+        infra::LogWarn(L"session", L"会话中的所有文件都无法打开，改为新建文档");
+        return false;
+    }
+
+    SyncTabBar();
+    const core::BufferId target =
+        active != nullptr ? active->buffer.id : documents_->TabOrder().front();
+    ActivateDocument(target);
+    infra::LogInfo(L"session", L"已恢复 " + std::to_wstring(restored) + L" 个文档");
+    return true;
 }
 
 bool MainWindow::SaveDocument(edit::Document& document) {

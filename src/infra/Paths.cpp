@@ -109,4 +109,24 @@ std::filesystem::path TempDir() {
     return g_configRoot / L"tmp";
 }
 
+std::wstring NormalizePath(std::wstring_view path) {
+    if (path.empty()) {
+        return {};
+    }
+    const std::wstring input(path);
+    std::vector<wchar_t> buffer(MAX_PATH);
+    for (;;) {
+        const DWORD written = ::GetFullPathNameW(input.c_str(),
+                                                 static_cast<DWORD>(buffer.size()),
+                                                 buffer.data(), nullptr);
+        if (written == 0) {
+            return input;   // 规范化失败就原样返回，交给后续的错误处理
+        }
+        if (written < buffer.size()) {
+            return std::wstring(buffer.data(), written);
+        }
+        buffer.resize(static_cast<size_t>(written) + 1);
+    }
+}
+
 }  // namespace npcc::infra

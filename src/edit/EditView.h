@@ -95,6 +95,8 @@ public:
     int32_t SelectionByteCount() const;
     void    SetCaretPosition(int32_t position) const;
     void    SetFirstVisibleLine(int32_t line) const;
+    int32_t FirstVisibleLine() const;
+    int32_t CaretPosition() const;
     void    ScrollToLine(int32_t line) const;
 
 private:

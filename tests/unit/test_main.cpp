@@ -7,11 +7,15 @@
 #include "core/Command.h"
 #include "core/CommandRegistry.h"
 #include "core/DocumentManager.h"
+#include "core/SessionManager.h"
 #include "edit/DocBuffer.h"
 #include "edit/Encoding.h"
 #include "edit/EditView.h"
 #include "io/AtomicFile.h"
 #include "io/FileReader.h"
+#include "io/XmlFile.h"
+#include "infra/Paths.h"
+#include "infra/Xml.h"
 
 namespace {
 
@@ -299,6 +303,15 @@ int main() {
             Check(manager.Count() == 4, "重复打开不新增标签");
             Check(manager.Active() == openA.document, "重复打开会激活已有标签");
 
+            // 同一文件的不同路径写法也必须识别为同一个文档
+            const std::wstring alias = (dir / "sub" / ".." / "a.txt").wstring();
+            const auto viaAlias = manager.Open(alias);
+            Check(viaAlias.status == npcc::core::OpenStatus::AlreadyOpen,
+                  "带 .. 的等价路径被视为同一文件");
+            Check(manager.Count() == 4, "等价路径不新增标签");
+            Check(openA.document->buffer.filePath.find(L"sub") == std::wstring::npos,
+                  "存储的是规范化后的路径");
+
             // 打开不存在的文件
             const auto missing = manager.Open((dir / "no_such_file.txt").wstring());
             Check(missing.status == npcc::core::OpenStatus::NotFound, "不存在的文件返回 NotFound");
@@ -343,6 +356,181 @@ int main() {
 
         std::filesystem::remove_all(dir, ec);
         ::DestroyWindow(host);
+    }
+
+    // ---------------------------------------------------------------- XML
+    Section("Xml 解析与序列化");
+    {
+        const char* source =
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<!-- 这是注释 -->\n"
+            "<Config schemaVersion=\"2\" name=\"notepadcc\">\n"
+            "  <General theme=\"Dark\" width=\"1200\"/>\n"
+            "  <Docs>\n"
+            "    <Doc path=\"D:\\工作\\a b.txt\" caret=\"12\"/>\n"
+            "    <Doc path=\"&lt;escape&gt; &amp; &quot;quoted&quot;\"/>\n"
+            "    <Doc path=\"版权 © 中文\">文本内容 &lt;tag&gt;</Doc>\n"
+            "  </Docs>\n"
+            "</Config>\n";
+
+        npcc::infra::XmlDocument document;
+        std::wstring error;
+        Check(npcc::infra::XmlDocument::Parse(source, document, &error), "解析合法 XML 成功");
+
+        const npcc::infra::XmlElement* root = document.Root();
+        Check(root != nullptr && root->name == L"Config", "根元素名正确");
+        Check(root != nullptr && root->AttributeInt(L"schemaVersion", 0) == 2, "整数属性读取");
+        Check(root != nullptr && root->AttributeOr(L"name", L"") == L"notepadcc", "字符串属性读取");
+        Check(root != nullptr && root->AttributeInt(L"missing", 42) == 42, "缺失属性取默认值");
+        Check(root != nullptr && root->Attribute(L"nothing") == nullptr, "缺失属性返回空指针");
+
+        const npcc::infra::XmlElement* general = root->Child(L"General");
+        Check(general != nullptr && general->AttributeOr(L"theme", L"") == L"Dark",
+              "子元素属性读取");
+        Check(general != nullptr && general->children.empty(), "自闭合元素没有子节点");
+
+        const npcc::infra::XmlElement* docs = root->Child(L"Docs");
+        const auto entries = docs != nullptr ? docs->Children(L"Doc")
+                                             : std::vector<const npcc::infra::XmlElement*>{};
+        Check(entries.size() == 3, "重复子元素全部取出");
+        Check(entries.size() > 0 &&
+                  entries[0]->AttributeOr(L"path", L"") == L"D:\\工作\\a b.txt",
+              "反斜杠与空格在属性中保持不变");
+        Check(entries.size() > 1 &&
+                  entries[1]->AttributeOr(L"path", L"") == L"<escape> & \"quoted\"",
+              "实体解码正确");
+        Check(entries.size() > 2 && entries[2]->text == L"文本内容 <tag>", "文本节点实体解码");
+        Check(entries.size() > 2 && entries[2]->AttributeOr(L"path", L"") == L"版权 © 中文",
+              "非 ASCII 属性值正确");
+        Check(docs != nullptr && docs->Child(L"NoSuch") == nullptr, "查找不存在的子元素返回空");
+
+        // 往返：序列化后再解析，结构应保持一致
+        const std::string serialized = document.ToUtf8();
+        Check(serialized.find("\r\n") != std::string::npos, "序列化带行尾");
+        npcc::infra::XmlDocument again;
+        Check(npcc::infra::XmlDocument::Parse(serialized, again, &error), "重新解析序列化结果成功");
+        const npcc::infra::XmlElement* rootAgain = again.Root();
+        Check(rootAgain != nullptr && rootAgain->Child(L"Docs") != nullptr, "往返后子结构完整");
+        Check(rootAgain != nullptr && rootAgain->Child(L"Docs")->Children(L"Doc").size() == 3,
+              "往返后重复子元素数量不变");
+        Check(rootAgain != nullptr &&
+                  rootAgain->Child(L"Docs")->Children(L"Doc")[1]->AttributeOr(L"path", L"") ==
+                      L"<escape> & \"quoted\"",
+              "往返后转义字符保持一致");
+
+        // 边界与错误
+        const std::string withCdata =
+            "<Root><A><![CDATA[原样保留 <tag> & 符号]]></A></Root>";
+        npcc::infra::XmlDocument cdata;
+        Check(npcc::infra::XmlDocument::Parse(withCdata, cdata, &error), "CDATA 解析成功");
+        Check(cdata.Root() != nullptr && cdata.Root()->Child(L"A") != nullptr &&
+                  cdata.Root()->Child(L"A")->text == L"原样保留 <tag> & 符号",
+              "CDATA 内容不被解码");
+
+        const char* broken[] = {
+            "<Root><A></Root>",              // 结束标签不匹配
+            "<Root><A></A>",                 // 根元素未闭合
+            "<Root attr=value></Root>",      // 属性值缺少引号
+            "<Root/><Extra/>",               // 根元素之后有多余内容
+            "   ",                           // 空内容
+            "<Root>&nosuch;</Root>",         // 未知实体的处理见下（应被当作字面量，不算错误）
+        };
+        for (size_t i = 0; i < 5; ++i) {
+            npcc::infra::XmlDocument bad;
+            error.clear();
+            const bool ok = npcc::infra::XmlDocument::Parse(broken[i], bad, &error);
+            Check(!ok, "非法 XML 应当解析失败");
+            Check(!error.empty(), "失败时给出错误说明");
+        }
+        {
+            npcc::infra::XmlDocument unknown;
+            Check(npcc::infra::XmlDocument::Parse(broken[5], unknown, &error),
+                  "未知实体按字面量处理，不视为错误");
+        }
+
+        // 文件往返（含原子写盘）
+        const std::filesystem::path dir =
+            std::filesystem::temp_directory_path() / "notepadcc_xml_test";
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        const std::filesystem::path file = dir / "round.xml";
+        Check(npcc::io::SaveXmlFile(file.wstring(), document, &error), "写入 XML 文件成功");
+        npcc::infra::XmlDocument loaded;
+        Check(npcc::io::LoadXmlFile(file.wstring(), loaded, &error),
+              "从文件读回 XML 成功");
+        Check(loaded.Root() != nullptr &&
+                  loaded.Root()->Child(L"Docs")->Children(L"Doc").size() == 3,
+              "文件往返后内容完整");
+        std::filesystem::remove_all(dir, ec);
+    }
+
+    // ---------------------------------------------------------------- 会话
+    Section("SessionManager");
+    {
+        // 会话路径来自配置根目录，先按便携模式初始化，避免写到用户的 %APPDATA%
+        npcc::infra::InitializePaths(true);
+        const std::wstring path = npcc::core::SessionManager::SessionPath();
+        Check(!path.empty(), "会话路径非空");
+        Check(path.find(L"session.xml") != std::wstring::npos, "会话文件名正确");
+
+        std::error_code ec;
+        std::filesystem::remove(path, ec);   // 清掉可能存在的旧会话
+
+        npcc::core::SessionSnapshot empty;
+        std::wstring error;
+        Check(!npcc::core::SessionManager::Load(empty, &error), "会话文件不存在时返回失败");
+        Check(!error.empty(), "失败时给出原因");
+
+        npcc::core::SessionSnapshot snapshot;
+        snapshot.documents.push_back(npcc::core::SessionDocument{
+            L"D:\\工程\\main.cpp", 128, 30, 2, false});
+        snapshot.documents.push_back(npcc::core::SessionDocument{
+            L"D:\\工程\\含中文 与空格.txt", 7, 0, 0, true});
+        Check(npcc::core::SessionManager::Save(snapshot, &error), "保存会话成功");
+        Check(std::filesystem::exists(path), "会话文件已落盘");
+
+        npcc::core::SessionSnapshot reloaded;
+        Check(npcc::core::SessionManager::Load(reloaded, &error), "重新加载会话成功");
+        Check(reloaded.documents.size() == 2, "文档条目数量一致");
+        if (reloaded.documents.size() == 2) {
+            Check(reloaded.documents[0].filePath == L"D:\\工程\\main.cpp", "路径往返一致");
+            Check(reloaded.documents[0].caretPos == 128, "光标位置往返一致");
+            Check(reloaded.documents[0].firstVisibleLine == 30, "首可见行往返一致");
+            Check(reloaded.documents[0].zoomLevel == 2, "缩放级别往返一致");
+            Check(!reloaded.documents[0].isActive, "非活动标记往返一致");
+            Check(reloaded.documents[1].isActive, "活动标记往返一致");
+            Check(reloaded.documents[1].filePath == L"D:\\工程\\含中文 与空格.txt",
+                  "中文与空格路径往返一致");
+        }
+
+        // 来自更新版本的会话文件应当被拒绝，而不是按错误结构猜测
+        {
+            npcc::infra::XmlDocument future;
+            npcc::infra::XmlElementPtr root = future.CreateRoot(L"Session");
+            root->SetAttributeInt(L"schemaVersion", 99);
+            root->AddChild(L"Doc")->SetAttribute(L"path", L"x");
+            Check(npcc::io::SaveXmlFile(path, future, &error), "写入高版本会话文件");
+            npcc::core::SessionSnapshot rejected;
+            Check(!npcc::core::SessionManager::Load(rejected, &error),
+                  "高版本会话文件被拒绝");
+        }
+
+        // 空路径条目应被忽略
+        {
+            npcc::infra::XmlDocument doc;
+            npcc::infra::XmlElementPtr root = doc.CreateRoot(L"Session");
+            root->SetAttributeInt(L"schemaVersion", 1);
+            root->AddChild(L"Doc")->SetAttribute(L"path", L"");
+            root->AddChild(L"Doc")->SetAttribute(L"path", L"keep.txt");
+            Check(npcc::io::SaveXmlFile(path, doc, &error), "写入含空路径的会话文件");
+            npcc::core::SessionSnapshot parsed;
+            Check(npcc::core::SessionManager::Load(parsed, &error), "加载含空路径的会话");
+            Check(parsed.documents.size() == 1, "空路径条目被忽略");
+            Check(parsed.documents.size() == 1 && parsed.documents[0].filePath == L"keep.txt",
+                  "保留有效条目");
+        }
+
+        std::filesystem::remove(path, ec);
     }
 
     std::printf("\n结果: %d 项检查, %d 项失败\n", g_checks, g_failures);

@@ -306,6 +306,14 @@ void EditView::SetFirstVisibleLine(int32_t line) const {
     Send(SCI_SETFIRSTVISIBLELINE, static_cast<uintptr_t>(line));
 }
 
+int32_t EditView::FirstVisibleLine() const {
+    return static_cast<int32_t>(Send(SCI_GETFIRSTVISIBLELINE));
+}
+
+int32_t EditView::CaretPosition() const {
+    return static_cast<int32_t>(Send(SCI_GETCURRENTPOS));
+}
+
 void EditView::ScrollToLine(int32_t line) const {
     Send(SCI_GOTOLINE, static_cast<uintptr_t>(line));
 }

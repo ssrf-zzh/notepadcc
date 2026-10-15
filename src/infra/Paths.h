@@ -1,6 +1,8 @@
 #pragma once
 
 #include <filesystem>
+#include <string>
+#include <string_view>
 
 namespace npcc::infra {
 
@@ -16,5 +18,9 @@ const std::filesystem::path& ConfigRoot();
 std::filesystem::path LogDir();
 std::filesystem::path BackupDir();
 std::filesystem::path TempDir();
+
+// 把路径规范化为绝对形式（解析 . 与 ..）。不要求文件存在。
+// 用途：会话里存绝对路径，以及识别"同一文件的不同写法"。
+std::wstring NormalizePath(std::wstring_view path);
 
 }  // namespace npcc::infra

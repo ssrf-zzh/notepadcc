@@ -6,6 +6,7 @@
 
 #include "edit/Encoding.h"
 #include "infra/Log.h"
+#include "infra/Paths.h"
 #include "io/AtomicFile.h"
 #include "io/FileReader.h"
 
@@ -87,11 +88,15 @@ edit::Document* DocumentManager::CreateUntitled() {
 OpenOutcome DocumentManager::Open(const std::wstring& path) {
     OpenOutcome outcome;
 
+    // 统一成绝对路径再比较与存储：否则会话换工作目录就失效，
+    // 而且同一个文件换个写法就会被当成两个文档（两份内容各自演化，很危险）。
+    const std::wstring target = infra::NormalizePath(path);
+
     // 已经打开过就直接激活，不再读盘（避免同一文件两份不同内容的缓冲区）
     for (const auto& existing : documents_) {
         if (existing->buffer.HasPath() &&
-            ::CompareStringOrdinal(existing->buffer.filePath.c_str(), -1, path.c_str(), -1, TRUE) ==
-                CSTR_EQUAL) {
+            ::CompareStringOrdinal(existing->buffer.filePath.c_str(), -1, target.c_str(), -1,
+                                   TRUE) == CSTR_EQUAL) {
             outcome.document = existing.get();
             outcome.status = OpenStatus::AlreadyOpen;
             Activate(existing.get());
@@ -99,7 +104,7 @@ OpenOutcome DocumentManager::Open(const std::wstring& path) {
         }
     }
 
-    const io::ReadResult read = io::ReadWholeFile(path);
+    const io::ReadResult read = io::ReadWholeFile(target);
     if (!read.ok) {
         outcome.message = read.message;
         if (read.tooLarge) {
@@ -116,8 +121,8 @@ OpenOutcome DocumentManager::Open(const std::wstring& path) {
 
     auto document = std::make_unique<edit::Document>();
     document->buffer.id = static_cast<BufferId>(nextBufferId_++);
-    document->buffer.filePath = path;
-    document->buffer.displayName = FileNameOf(path);
+    document->buffer.filePath = target;
+    document->buffer.displayName = FileNameOf(target);
     document->buffer.isUntitled = false;
     document->buffer.isModified = false;
 
@@ -139,14 +144,14 @@ OpenOutcome DocumentManager::Open(const std::wstring& path) {
                                     : edit::kCodePageUtf8);
     document->view->SetEolMode(document->buffer.eol);
     document->view->SetText(loaded.editorBytes);
-    document->view->ApplyLanguageForPath(path);
+    document->view->ApplyLanguageForPath(target);
     document->view->ClearUndoBuffer();
     document->view->MarkSavePoint();
     document->view->SetVisible(false);
 
     edit::Document* added = AddDocument(std::move(document));
     Activate(added);
-    infra::LogInfo(L"file", L"已打开: " + path);
+    infra::LogInfo(L"file", L"已打开: " + target);
     outcome.document = added;
     outcome.status = OpenStatus::Ok;
     return outcome;
@@ -165,6 +170,7 @@ SaveOutcome DocumentManager::SaveAs(edit::Document& document, const std::wstring
         outcome.message = L"文档视图无效，无法保存。";
         return outcome;
     }
+    const std::wstring target = infra::NormalizePath(path);
 
     std::string editorBytes = document.view->GetAllText();
     if (document.buffer.eol != edit::EolMode::Mixed) {
@@ -176,21 +182,21 @@ SaveOutcome DocumentManager::SaveAs(edit::Document& document, const std::wstring
         return outcome;
     }
 
-    const io::WriteResult result = io::WriteFileAtomic(path, outBytes);
+    const io::WriteResult result = io::WriteFileAtomic(target, outBytes);
     if (!result.ok) {
         outcome.message = result.message;
         return outcome;
     }
 
-    const bool pathChanged = !document.buffer.HasPath() || document.buffer.filePath != path;
-    document.buffer.filePath = path;
-    document.buffer.displayName = FileNameOf(path);
+    const bool pathChanged = !document.buffer.HasPath() || document.buffer.filePath != target;
+    document.buffer.filePath = target;
+    document.buffer.displayName = FileNameOf(target);
     document.buffer.isUntitled = false;
     document.buffer.isModified = false;
     document.view->MarkSavePoint();
     if (pathChanged) {
         // 扩展名可能变了，重新按新路径识别语言
-        document.view->ApplyLanguageForPath(path);
+        document.view->ApplyLanguageForPath(target);
     }
     outcome.ok = true;
     return outcome;

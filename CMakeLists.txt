@@ -103,12 +103,15 @@ target_compile_definitions(lexilla PRIVATE NDEBUG)
 set(NPCC_CORE_SOURCES
     src/core/CommandRegistry.cpp
     src/core/DocumentManager.cpp
+    src/core/SessionManager.cpp
     src/edit/EditView.cpp
     src/edit/Encoding.cpp
     src/infra/Log.cpp
     src/infra/Paths.cpp
+    src/infra/Xml.cpp
     src/io/AtomicFile.cpp
     src/io/FileReader.cpp
+    src/io/XmlFile.cpp
     src/shell/MainWindow.cpp
     src/shell/MenuBuilder.cpp
     src/shell/StatusBar.cpp

@@ -7,6 +7,7 @@
 
 #include "core/CommandRegistry.h"
 #include "core/DocumentManager.h"
+#include "core/SessionManager.h"
 #include "edit/Document.h"
 #include "edit/EditView.h"
 #include "shell/StatusBar.h"
@@ -63,6 +64,8 @@ private:
     bool CloseRightOf(core::BufferId anchor);
     void ActivateDocument(core::BufferId id);
     void EnsureAtLeastOneDocument();
+    bool RestoreSession();
+    core::SessionSnapshot BuildSessionSnapshot() const;
     edit::Document* DocumentOfView(HWND view) const;
     void HandleTabBarNotify(const TabBarNotify& notification);
     void HandleEditorNotify(const NMHDR& header);
