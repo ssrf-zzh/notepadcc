@@ -42,27 +42,44 @@ struct BuiltinLanguage {
     bool           foldable;
 };
 
+constexpr const char* kCppKeywords =
+    "alignas alignof auto bool break case catch char class const constexpr continue default "
+    "delete do double else enum explicit extern false float for friend goto if inline int long "
+    "mutable namespace new noexcept nullptr operator private protected public register return "
+    "short signed sizeof static struct switch template this thread_local throw true try typedef "
+    "typename union unsigned using virtual void volatile while wchar_t";
+
+constexpr const char* kJsKeywords =
+    "async await break case catch class const continue debugger default delete do else export "
+    "extends false finally for function if import in instanceof let new null return super switch "
+    "this throw true try typeof undefined var void while with yield";
+
+constexpr const char* kTypeScriptKeywords =
+    "abstract any as async await boolean break case catch class const constructor continue "
+    "declare default delete do else enum export extends false finally for from function if "
+    "implements import in instanceof interface let module namespace new null number object "
+    "private protected public readonly return static string super switch this throw true try "
+    "type typeof undefined var void while with yield";
+
 const BuiltinLanguage kBuiltinLanguages[] = {
-    {L"cpp", "cpp", "alignas alignof auto bool break case catch class const constexpr continue "
-                   "default delete do double else enum explicit extern false float for friend goto "
-                   "if inline int long namespace new nullptr operator private protected public "
-                   "return short signed sizeof static struct switch template this throw true try "
-                   "typedef typename union unsigned using virtual void volatile while",
-     L"C/C++", true},
-    {L"c",   "cpp", nullptr, L"C/C++", true},
-    {L"h",   "cpp", nullptr, L"C/C++", true},
-    {L"hpp", "cpp", nullptr, L"C/C++", true},
+    // 同一族语言共用一份关键字表：写成 nullptr 的话关键字根本不会被着色
+    // （词法器只认 SCI_SETKEYWORDS 给的那几组词），.h 与 .ts 就是这么被漏掉的。
+    {L"cpp", "cpp", kCppKeywords, L"C/C++", true},
+    {L"c",   "cpp", kCppKeywords, L"C/C++", true},
+    {L"h",   "cpp", kCppKeywords, L"C/C++", true},
+    {L"hpp", "cpp", kCppKeywords, L"C/C++", true},
     {L"py",  "python",
      "and as assert async await break class continue def del elif else except False finally for "
      "from global if import in is lambda None nonlocal not or pass raise return True try while "
      "with yield",
      L"Python", true},
-    {L"js",  "javascript",
-     "async await break case catch class const continue debugger default delete do else export "
-     "extends false finally for function if import in instanceof let new null return super switch "
-     "this throw true try typeof undefined var void while with yield",
-     L"JavaScript", true},
-    {L"ts",  "cpp", nullptr, L"TypeScript", true},
+    // 注意：Lexilla 里**没有** "javascript" 这个词法器（本版实测 CreateLexer 返回空，
+    // 结果是 JS 文件连注释都不着色、也没法折叠）。业界通行做法是用 cpp 词法器
+    // 配一套 JavaScript 关键字，注释/字符串/数字/花括号折叠都能正常工作。
+    {L"js",  "cpp", kJsKeywords, L"JavaScript", true},
+    {L"mjs", "cpp", kJsKeywords, L"JavaScript", true},
+    {L"jsx", "cpp", kJsKeywords, L"JavaScript (JSX)", true},
+    {L"ts",  "cpp", kTypeScriptKeywords, L"TypeScript", true},
     {L"json","json", nullptr, L"JSON", true},
     {L"xml", "xml", nullptr, L"XML", true},
     {L"html","hypertext", nullptr, L"HTML", true},
@@ -80,6 +97,69 @@ const BuiltinLanguage kBuiltinLanguages[] = {
     {L"ini", "props", nullptr, L"配置文件", false},
     {L"log", "null", nullptr, L"日志", false},
 };
+
+// ---------------------------------------------------------------- 语法着色的默认配色
+//
+// 光接上词法器不等于"用户看得见颜色"：词法器只负责把每个 token 标上样式号，
+// 颜色得我们按样式号设进去。这些样式号取自 Lexilla 的 SCE_* 定义（third_party/
+// lexilla/include/SciLexer.h），**不靠记忆写数字**——写错的表现是"某个语言没颜色"，
+// 而且不报任何错。单元测试会按真实 token 位置核对颜色确实生效。
+//
+// M2 的样式配置器会在这张表之上做用户可调，所以这里只管"开箱可用"。
+struct SyntaxStyleMap {
+    const char* lexer;
+    int commentLine;    // -1 表示该语言没有这一类
+    int commentBlock;
+    int keyword;
+    int number;
+    int string;
+    int highlight;      // 语言特有的强调项：预处理、变量、属性名、键…
+    int extra;
+};
+
+constexpr int kCommentColour = 0x2E7D32;    // 注释：绿
+constexpr int kKeywordColour = 0x0000C0;    // 关键字：深蓝
+constexpr int kNumberColour = 0x986500;     // 数字：棕
+constexpr int kStringColour = 0xA31515;     // 字符串：暗红
+constexpr int kHighlightColour = 0x800080;  // 强调项：紫
+constexpr int kExtraColour = 0x266B9E;      // 次要项：蓝
+
+// 样式号对应关系（Lexilla 的 SCE_*）：
+//   cpp       : COMMENTLINE=2 COMMENT=1 WORD=5 NUMBER=4 STRING=6 PREPROCESSOR=9 CHARACTER=7
+//   python    : COMMENTLINE=1 WORD=5 NUMBER=2 STRING=3
+//   json      : LINECOMMENT=6 BLOCKCOMMENT=7 NUMBER=1 STRING=2 PROPERTYNAME=4
+//   hypertext : COMMENT=9 TAG=1 NUMBER=5 DOUBLESTRING=6 ATTRIBUTE=3 ENTITY=10
+//   css       : COMMENT=9 TAG=1 CLASS=2 VALUE=8
+//   markdown  : HEADER1=6 STRONG1=2 CODE=19 LINK=18
+//   sql       : COMMENTLINE=2 COMMENT=1 WORD=5 NUMBER=4 CHARACTER=7
+//   powershell: COMMENT=1 COMMENTSTREAM=13 KEYWORD=8 NUMBER=4 STRING=2 VARIABLE=5 CMDLET=9
+//   batch     : COMMENT=1 WORD=2
+//   props     : COMMENT=1 SECTION=2 KEY=5 DEFVAL=4
+const SyntaxStyleMap kSyntaxMaps[] = {
+    {"cpp", 2, 1, 5, 4, 6, 9, 7},
+    {"python", 1, -1, 5, 2, 3, -1, -1},
+    {"json", 6, 7, -1, 1, 2, 4, -1},
+    {"xml", 9, -1, 1, 5, 6, 3, 10},
+    {"hypertext", 9, -1, 1, 5, 6, 3, 10},
+    {"css", 9, -1, 1, -1, -1, 2, 8},
+    {"markdown", -1, -1, 6, -1, 19, 2, 18},
+    {"sql", 2, 1, 5, 4, 7, -1, -1},
+    {"powershell", 1, 13, 8, 4, 2, 5, 9},
+    {"batch", 1, -1, 2, -1, -1, -1, -1},
+    {"props", 1, -1, 2, -1, -1, 5, 4},
+};
+
+const SyntaxStyleMap* FindSyntaxMap(const char* lexerName) {
+    if (lexerName == nullptr) {
+        return nullptr;
+    }
+    for (const SyntaxStyleMap& entry : kSyntaxMaps) {
+        if (std::string_view(entry.lexer) == lexerName) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
 
 const BuiltinLanguage* FindLanguage(const std::wstring& extension, const BuiltinLanguage* fallback) {
     for (const auto& entry : kBuiltinLanguages) {
@@ -553,6 +633,25 @@ int32_t EditView::CopyTextTo(char* buffer, int32_t capacity) const {
     return copied > 0 ? static_cast<int32_t>(copied) : 0;
 }
 
+int32_t EditView::StyleAt(int32_t position) const {
+    if (position < 0 || position >= ByteLength()) {
+        return 0;
+    }
+    return static_cast<int32_t>(Send(SCI_GETSTYLEAT, static_cast<uintptr_t>(position)));
+}
+
+int32_t EditView::StyleForeColor(int32_t style) const {
+    if (style < 0) {
+        return -1;
+    }
+    return static_cast<int32_t>(
+        Send(SCI_STYLEGETFORE, static_cast<uintptr_t>(style)));
+}
+
+int32_t EditView::DefaultForeColor() const {
+    return static_cast<int32_t>(Send(SCI_STYLEGETFORE, static_cast<uintptr_t>(STYLE_DEFAULT)));
+}
+
 bool EditView::HasBookmark(int32_t line) const {
     const intptr_t mask = Send(SCI_MARKERGET, static_cast<uintptr_t>(line));
     return (mask & (1 << kMarkerBookmark)) != 0;
@@ -661,6 +760,41 @@ void EditView::SetTabWidth(int32_t width, bool useTabs) const {
     Send(SCI_SETUSETABS, useTabs ? 1u : 0u);
 }
 
+void EditView::ApplySyntaxColours(const char* lexerName) const {
+    const SyntaxStyleMap* map = FindSyntaxMap(lexerName);
+    if (map == nullptr) {
+        return;   // 没有配色表的语言用默认色，不强求
+    }
+    struct Entry {
+        int  style;
+        int  colour;
+        bool bold;
+        bool italic;
+    };
+    const Entry entries[] = {
+        {map->commentLine, kCommentColour, false, true},
+        {map->commentBlock, kCommentColour, false, true},
+        {map->keyword, kKeywordColour, true, false},
+        {map->number, kNumberColour, false, false},
+        {map->string, kStringColour, false, false},
+        {map->highlight, kHighlightColour, false, false},
+        {map->extra, kExtraColour, false, false},
+    };
+    for (const Entry& entry : entries) {
+        if (entry.style < 0) {
+            continue;
+        }
+        Send(SCI_STYLESETFORE, static_cast<uintptr_t>(entry.style),
+             static_cast<intptr_t>(entry.colour));
+        if (entry.bold) {
+            Send(SCI_STYLESETBOLD, static_cast<uintptr_t>(entry.style), 1);
+        }
+        if (entry.italic) {
+            Send(SCI_STYLESETITALIC, static_cast<uintptr_t>(entry.style), 1);
+        }
+    }
+}
+
 void EditView::ApplyLanguageForPath(const std::wstring& filePath) const {
     const BuiltinLanguage* language = FindLanguage(ExtensionOf(filePath), nullptr);
     if (language == nullptr) {
@@ -694,6 +828,7 @@ void EditView::ApplyLanguageForPath(const std::wstring& filePath) const {
         }
     }
     SetFoldingEnabled(language->foldable);
+    ApplySyntaxColours(language->lexer);
     // 语言切换后需要整体重新着色
     Send(SCI_COLOURISE, 0, -1);
 }

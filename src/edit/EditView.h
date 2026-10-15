@@ -191,6 +191,13 @@ public:
     int32_t ByteLength() const;
     int32_t CopyTextTo(char* buffer, int32_t capacity) const;
 
+    // ---- 语法着色的自检接口 ----
+    // 光"接上了词法器"不等于"用户看得见颜色"：颜色要靠给每个样式号设前景色。
+    // 这两个接口让测试能验证"某个位置的 token 确实拿到了与默认色不同的颜色"。
+    int32_t StyleAt(int32_t position) const;
+    int32_t StyleForeColor(int32_t style) const;
+    int32_t DefaultForeColor() const;
+
     // ---- 代码折叠（设计文档 2.6）----
     // 折叠层级由 Lexilla 算出来，这里只负责呈现与开关。纯文本（含超大文件模式）
     // 没有折叠可言，所以开关是按语言给的。
@@ -214,6 +221,10 @@ public:
     // Document，文本、标记、折叠状态是同一份，各自只保留自己的光标与滚动位置。
     // Scintilla 内部对 Document 做引用计数，用不着我们手工 AddRef/Release。
     bool ShareDocumentWith(const EditView& source);
+
+    // 按 lexer 名套上默认配色。样式号取自 Lexilla 的 SCE_* 定义，
+    // 是"让颜色真的看得见"的那一步（词法器本身只标样式号，不设颜色）。
+    void ApplySyntaxColours(const char* lexerName) const;
 
 private:
     HWND hwnd_ = nullptr;

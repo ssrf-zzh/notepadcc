@@ -2496,6 +2496,78 @@ int main() {
         }
     }
 
+    // ---------------------------------------------------------------- 语法着色
+    // 光"接上词法器"不等于"用户看得见颜色"：颜色要靠把样式号与颜色对应上。
+    // 这一段按**真实 token 的位置**核对：那个位置的样式号不是默认样式，
+    // 且它的前景色与默认前景色不同。样式号抄错、或者词法器名字写错（本版真发生过：
+    // Lexilla 里没有 "javascript" 词法器，JS 文件一直没有任何样式），都会被它抓住。
+    Section("语法着色（配色确实落到样式号上）");
+    {
+        struct Sample {
+            const wchar_t* path;
+            const char*    text;
+            const char*    needles[4];   // 至少要着色的 token（空串表示该项不适用）
+        };
+        const Sample samples[] = {
+            {L"D:\\t\\a.cpp", "// c\nint x = 42;\nconst char* s = \"hi\";\n",
+             {"// c", "int", "42", "hi"}},
+            {L"D:\\t\\a.h", "#include <a>\nint x;\n", {"#include", "int", "", ""}},
+            {L"D:\\t\\a.py", "def f():\n    # c\n    x = 42\n    y = \"hi\"\n",
+             {"# c", "def", "42", "hi"}},
+            {L"D:\\t\\a.js", "// c\nvar x = 42;\nvar s = \"hi\";\n", {"// c", "var", "42", "hi"}},
+            {L"D:\\t\\a.ts", "// c\nlet x = 42;\n", {"// c", "let", "42", ""}},
+            {L"D:\\t\\a.json", "{\n  \"k\": 1,\n  \"s\": \"hi\"\n}\n", {"\"k\"", "1", "hi", ""}},
+            {L"D:\\t\\a.xml", "<!-- c -->\n<a b=\"hi\">\n", {"<!-- c", "a", "b", "hi"}},
+            {L"D:\\t\\a.html", "<!-- c -->\n<p class=\"hi\">t</p>\n", {"<!-- c", "p", "class", "hi"}},
+            {L"D:\\t\\a.css", "/* c */\n.a { color: red; }\n", {"/* c", "a", "red", ""}},
+            {L"D:\\t\\a.md", "# head\n\nsee `code` here\n", {"# head", "code", "", ""}},
+            {L"D:\\t\\a.sql", "-- c\nSELECT a FROM t WHERE b = 42 AND c = 'hi';\n",
+             {"-- c", "SELECT", "42", "hi"}},
+            {L"D:\\t\\a.ps1", "# c\n$x = 42\n$s = \"hi\"\n", {"# c", "$x", "42", "hi"}},
+            {L"D:\\t\\a.bat", "REM c\nset x=42\n", {"REM c", "set", "", ""}},
+            {L"D:\\t\\a.ini", "; c\n[sec]\nkey=value\n", {"; c", "[sec]", "key", ""}},
+        };
+        const HWND colourHost = CreateHiddenHost();
+        npcc::edit::EditView view;
+        if (colourHost == nullptr) {
+            Check(false, "创建隐藏宿主窗口失败");
+        } else if (view.Create(colourHost, 940)) {
+            view.ApplyLightTheme();
+            view.SetCodePage(npcc::edit::kCodePageUtf8);
+            int checkedTokens = 0;
+            for (const Sample& sample : samples) {
+                view.SetText(sample.text);
+                view.ApplyLanguageForPath(sample.path);
+                const std::string text(sample.text);
+                const int32_t defaultFore = view.DefaultForeColor();
+                for (const char* needle : sample.needles) {
+                    if (needle == nullptr || *needle == '\0') {
+                        continue;
+                    }
+                    const std::size_t pos = text.find(needle);
+                    ++checkedTokens;
+                    if (pos == std::string::npos) {
+                        Check(false, "测试文本里找不到要检查的 token");
+                        continue;
+                    }
+                    const int32_t style = view.StyleAt(static_cast<int32_t>(pos));
+                    // 样式号 0 是默认样式；颜色与默认前景色相同也等于"没上色"
+                    const bool coloured =
+                        style != 0 && view.StyleForeColor(style) != defaultFore;
+                    if (!coloured) {
+                        std::printf("    [FAIL] %ls 的 token 「%s」没有拿到配色（样式号 %d）\n",
+                                    sample.path, needle, style);
+                    }
+                    Check(coloured, "token 拿到了与默认色不同的前景色");
+                }
+            }
+            Check(checkedTokens >= 40, "检查的 token 数量够多（不是只测了一两个）");
+            ::DestroyWindow(colourHost);
+        } else {
+            Check(false, "创建编辑控件失败");
+        }
+    }
+
     std::printf("\n结果: %d 项检查, %d 项失败\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
