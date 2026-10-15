@@ -15,4 +15,8 @@ bool ConvertToDocBytes(std::wstring_view text, bool utfMode, std::uint32_t codeP
 
 std::wstring ConvertFromDocBytes(std::string_view bytes, bool utfMode, std::uint32_t codePage);
 
+// 把文档字节转成 UTF-8。搜索结果里的行文本统一用 UTF-8 传递，
+// 界面层就不必再关心每个文件原本是什么编码。
+std::string DocBytesToUtf8(std::string_view bytes, bool utfMode, std::uint32_t codePage);
+
 }  // namespace npcc::search

@@ -14,6 +14,8 @@ enum : UINT {
     kMsgFileChanged     = WM_APP + 5,
     kMsgPluginNotify    = WM_APP + 6,
     kMsgAppActivate     = WM_APP + 7,
+    kMsgSearchFinished  = WM_APP + 8,
+    kMsgSearchWakeup    = WM_APP + 9,   // 进度更新：UI 线程收到后自己去读进度
     kMsgUserRangeStart  = WM_APP + 100, // 以下保留给外壳内部
 };
 

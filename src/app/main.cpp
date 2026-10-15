@@ -55,7 +55,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
 
     INITCOMMONCONTROLSEX controls{};
     controls.dwSize = sizeof(controls);
-    controls.dwICC = ICC_BAR_CLASSES | ICC_STANDARD_CLASSES;
+    controls.dwICC = ICC_BAR_CLASSES | ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES;
     ::InitCommonControlsEx(&controls);
 
     if (!npcc::edit::RegisterEditorClasses(instance)) {

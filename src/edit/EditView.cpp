@@ -325,6 +325,10 @@ void EditView::ScrollToLine(int32_t line) const {
     Send(SCI_GOTOLINE, static_cast<uintptr_t>(line));
 }
 
+int64_t EditView::PositionFromLine(int32_t line) const {
+    return static_cast<int64_t>(Send(SCI_POSITIONFROMLINE, static_cast<uintptr_t>(line)));
+}
+
 void EditView::SetSearchFlags(int32_t flags) const {
     Send(SCI_SETSEARCHFLAGS, static_cast<uintptr_t>(flags));
 }

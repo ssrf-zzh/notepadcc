@@ -98,6 +98,7 @@ public:
     int32_t FirstVisibleLine() const;
     int32_t CaretPosition() const;
     void    ScrollToLine(int32_t line) const;
+    int64_t PositionFromLine(int32_t line) const;
 
     // ---- 查找与替换支持（供 search 模块使用） ----
     // indicator 槽位分配见设计文档 4.1：0 当前匹配、1 全部匹配

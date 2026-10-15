@@ -2115,6 +2115,7 @@ M1 可替代
 |---|---|---|
 | 宽字符 `printf` 的 `%s` | 按标准 C 语义 `%s` 表示**窄**字符串（MSVC 恰好相反），把 `wchar_t*` 传进去只会打印出首字符。日志曾经变成 `[2] [I] [a]` | 一律写 `%ls`，并给日志格式加一条自检 |
 | 同名重载同时接受字符串与 `bool` | `SetAttribute(L"path", L"")` 里 `const wchar_t*` 转 `bool` 是**标准转换**，优于转 `wstring_view` 的用户定义转换，于是空串被静默写成 `"no"`；同理 `SetAttribute(name, L"yes")` 会递归调用自己 | 不按类型重载同名函数，改用 `SetAttributeInt` / `SetAttributeBool` 这类以名字区分的写法 |
+| 成员名撞上 Windows 宏 | `windows.h` 里有一批 `#define FindText FindTextW`、`#define GetObject GetObjectW` 之类的宏。把成员函数命名为 `FindText` 后，调用点会被预处理悄悄改写成 `FindTextW`，编译器报的是"没有成员 FindTextW"，可代码怎么看都是对的 | 成员名避开 Win32 宽字符宏族（`FindText`、`GetObject`、`LoadImage`…），或显式写成 `::FindTextW` |
 
 ## 附录 C：Windows 消息与自定义消息分配
 

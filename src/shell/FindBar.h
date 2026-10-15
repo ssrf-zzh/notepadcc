@@ -49,8 +49,10 @@ public:
 
     void SetStatus(const std::wstring& text);
     void FocusFindField();
-    std::wstring FindText() const;
-    void SetFindText(const std::wstring& text);
+    // 注意不要叫 FindText：windows.h 里有 `#define FindText FindTextW`，
+    // 那个宏会把成员名悄悄改写掉（踩过一次）。
+    std::wstring Pattern() const;
+    void SetPattern(const std::wstring& text);
 
     static bool IsFindBarControl(int controlId) {
         return controlId >= kFindBarBase && controlId <= kFindBarLimit;

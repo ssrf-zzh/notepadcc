@@ -10,6 +10,7 @@
 #include "infra/Log.h"
 #include "io/FileReader.h"
 #include "search/ByteMatcher.h"
+#include "search/TextBytes.h"
 #include "search/Wildcard.h"
 
 namespace npcc::search {
@@ -148,7 +149,9 @@ FileSearchResult ScanOneFile(const std::wstring& path, const SearchConfig& confi
         }
         LineHit hit;
         hit.line = static_cast<std::int32_t>(lineIndex + 1);
-        hit.text.assign(LineTextAt(text, lineStarts, lineIndex));
+        // 行文本统一转成 UTF-8：界面层就不必再关心每个文件原本的编码
+        hit.text = DocBytesToUtf8(LineTextAt(text, lineStarts, lineIndex), utfMode,
+                                  loaded.encoding.codePage);
         hit.matches.push_back(local);
         result.hits.push_back(std::move(hit));
     }
@@ -202,6 +205,19 @@ void EnumerateFiles(const SearchConfig& config, const FileFilter& filter,
 }  // namespace
 
 // ---------------------------------------------------------------- CrossSearchJob
+
+CrossSearchJob::~CrossSearchJob() {
+    if (!coordinator_.joinable()) {
+        return;
+    }
+    // 任务对象可能正是被协调线程自己释放的（它是线程函数的捕获之一）。
+    // 那种情况下不能 join 自己，thread 析构前 detach 即可——线程马上就结束了。
+    if (coordinator_.get_id() == std::this_thread::get_id()) {
+        coordinator_.detach();
+    } else {
+        coordinator_.join();
+    }
+}
 
 SearchProgress CrossSearchJob::Progress() const {
     std::lock_guard<std::mutex> guard(mutex_);

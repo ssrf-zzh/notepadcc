@@ -13,6 +13,8 @@
 #include "shell/StatusBar.h"
 #include "shell/TabBar.h"
 #include "shell/FindBar.h"
+#include "shell/SearchPanel.h"
+#include "search/CrossFileSearch.h"
 
 namespace npcc::shell {
 
@@ -56,6 +58,12 @@ private:
     void CommandFind(bool replaceMode);
     void CommandFindNext(bool forward);
     bool HandleFindBarCommand(int controlId);
+    void CommandFindInFiles();
+    void StartFileSearch();
+    bool HandleSearchPanelCommand(int controlId);
+    void JumpToSearchResult();
+    void FinishFileSearch(const search::SearchProgress& progress);
+    void UpdateSearchProgress();
     void CommandAbout();
 
     // ---- 文档操作 ----
@@ -85,6 +93,9 @@ private:
     TabBar                     tabBar_;
     StatusBar                  statusBar_;
     FindBar                    findBar_;
+    SearchPanel                searchPanel_;
+    std::unique_ptr<search::CrossFileSearch> crossSearch_;
+    std::shared_ptr<search::CrossSearchJob>  searchJob_;
 
     std::wstring lastDirectory_;
     bool showWhitespace_ = false;

@@ -143,6 +143,7 @@ set(NPCC_CORE_SOURCES
     src/shell/MainWindow.cpp
     src/shell/MenuBuilder.cpp
     src/shell/FindBar.cpp
+    src/shell/SearchPanel.cpp
     src/shell/StatusBar.cpp
     src/shell/TabBar.cpp)
 

@@ -12,7 +12,9 @@
 #include <vector>
 
 #include "infra/Log.h"
+#include "core/Messages.h"
 #include "core/SessionManager.h"
+#include "search/ByteMatcher.h"
 #include "shell/MenuBuilder.h"
 #include "shell/TabBar.h"
 
@@ -40,6 +42,7 @@ enum : npcc::core::CmdId {
     kCmdSearchReplace  = npcc::core::MakeCmdId(3, 2),
     kCmdSearchFindNext = npcc::core::MakeCmdId(3, 3),
     kCmdSearchFindPrev = npcc::core::MakeCmdId(3, 4),
+    kCmdSearchInFiles  = npcc::core::MakeCmdId(3, 5),
 
     kCmdViewZoomIn        = npcc::core::MakeCmdId(4, 1),
     kCmdViewZoomOut       = npcc::core::MakeCmdId(4, 2),
@@ -155,7 +158,9 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             tabBar_.Create(hwnd_, 1);
             statusBar_.Create(hwnd_, 2);
             findBar_.Create(hwnd_);
+            searchPanel_.Create(hwnd_);
             documents_ = std::make_unique<core::DocumentManager>(hwnd_);
+            crossSearch_ = std::make_unique<search::CrossFileSearch>();
 
             RegisterCommands();
             menu_ = BuildMainMenu(registry_);
@@ -187,6 +192,10 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
                 HandleFindBarCommand(controlId);
                 return 0;
             }
+            if (SearchPanel::IsSearchPanelControl(controlId) && HIWORD(wParam) == 0) {
+                HandleSearchPanelCommand(controlId);
+                return 0;
+            }
             const auto id = static_cast<core::CmdId>(controlId);
             const core::CmdContext context = Context();
             if (registry_.Execute(id, context) == core::ExecResult::NotFound) {
@@ -206,6 +215,22 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
                 return 0;
             }
             break;
+        }
+        // 后台搜索通过消息把结果递回 UI 线程；指针的所有权一并转移过来
+        case core::kMsgSearchResult: {
+            std::unique_ptr<search::FileSearchResult> result(
+                reinterpret_cast<search::FileSearchResult*>(lParam));
+            searchPanel_.AppendFileResult(*result);
+            return 0;
+        }
+        case core::kMsgSearchWakeup:
+            UpdateSearchProgress();
+            return 0;
+        case core::kMsgSearchFinished: {
+            std::unique_ptr<search::SearchProgress> progress(
+                reinterpret_cast<search::SearchProgress*>(lParam));
+            FinishFileSearch(*progress);
+            return 0;
         }
         case WM_DROPFILES: {
             const HDROP drop = reinterpret_cast<HDROP>(wParam);
@@ -227,6 +252,12 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         case WM_CLOSE: {
+            // 关窗前先让后台搜索停下来，否则回调会在窗口销毁后打到已释放的对象上
+            if (searchJob_) {
+                searchJob_->Cancel();
+                searchJob_->Wait();
+                searchJob_.reset();
+            }
             // 会话要在关闭文档之前取快照——CloseAllDocuments 之后就没得记了
             const core::SessionSnapshot snapshot = BuildSessionSnapshot();
             if (CloseAllDocuments()) {
@@ -339,6 +370,9 @@ void MainWindow::RegisterCommands() {
         needsBuffer, [this](const CmdContext&) { CommandFindNext(true); });
     add(kCmdSearchFindPrev, CmdCategory::Search, L"cmd.search.findPrev", L"查找上一个(&P)",
         needsBuffer, [this](const CmdContext&) { CommandFindNext(false); });
+    add(kCmdSearchInFiles, CmdCategory::Search, L"cmd.search.inFiles",
+        L"在文件中查找(&I)...", core::kCmdNone,
+        [this](const CmdContext&) { CommandFindInFiles(); });
 
     // ---- 视图 ----
     add(kCmdViewZoomIn, CmdCategory::View, L"cmd.view.zoomIn", L"放大(&I)",
@@ -418,6 +452,7 @@ void MainWindow::RegisterCommands() {
     registry_.BindShortcut(kCmdSearchReplace, ctrl, 'H', true);
     registry_.BindShortcut(kCmdSearchFindNext, core::kModNone, VK_F3, true);
     registry_.BindShortcut(kCmdSearchFindPrev, core::kModShift, VK_F3, true);
+    registry_.BindShortcut(kCmdSearchInFiles, ctrlShift, 'F', true);
     registry_.BindShortcut(kCmdViewZoomIn, ctrl, VK_OEM_PLUS, true);
     registry_.BindShortcut(kCmdViewZoomOut, ctrl, VK_OEM_MINUS, true);
     registry_.BindShortcut(kCmdViewZoomReset, ctrl, '0', true);
@@ -474,6 +509,12 @@ void MainWindow::LayoutChildren() const {
     }
 
     int bottomInset = statusBar_.Height();
+    if (searchPanel_.Visible() && searchPanel_.Handle() != nullptr) {
+        const int panelHeight = searchPanel_.Height();
+        ::MoveWindow(searchPanel_.Handle(), 0, client.bottom - bottomInset - panelHeight,
+                     client.right, panelHeight, TRUE);
+        bottomInset += panelHeight;
+    }
     if (findBar_.Visible() && findBar_.Handle() != nullptr) {
         const int findHeight = findBar_.Height();
         ::MoveWindow(findBar_.Handle(), 0, client.bottom - bottomInset - findHeight,
@@ -1123,6 +1164,171 @@ bool MainWindow::HandleFindBarCommand(int controlId) {
             break;
     }
     return true;   // 输入框的其它通知先不管
+}
+
+void MainWindow::CommandFindInFiles() {
+    // 查找栏与搜索面板共用底部空间，同时只显示一个
+    findBar_.Hide();
+    searchPanel_.Show();
+
+    if (edit::Document* document = ActiveDocument();
+        document != nullptr && document->buffer.HasPath()) {
+        searchPanel_.SetDirectory(core::DocumentManager::DirectoryOf(document->buffer.filePath));
+    } else if (!lastDirectory_.empty()) {
+        searchPanel_.SetDirectory(lastDirectory_);
+    }
+    if (searchPanel_.Pattern().empty()) {
+        searchPanel_.SetPattern(findBar_.Pattern());
+    }
+    searchPanel_.SetDefaultFilter();
+    LayoutChildren();
+
+    if (HWND edit = ::GetDlgItem(searchPanel_.Handle(), kSearchPanelFind); edit != nullptr) {
+        ::SetFocus(edit);
+        ::SendMessageW(edit, EM_SETSEL, 0, -1);
+    }
+}
+
+void MainWindow::StartFileSearch() {
+    search::SearchConfig config = searchPanel_.Config();
+    if (config.pattern.empty()) {
+        searchPanel_.SetStatus(L"请输入查找内容");
+        return;
+    }
+    if (config.directories.empty()) {
+        // 目录留空时回落到当前文件所在目录
+        if (edit::Document* document = ActiveDocument();
+            document != nullptr && document->buffer.HasPath()) {
+            config.directories.push_back(
+                core::DocumentManager::DirectoryOf(document->buffer.filePath));
+        }
+        if (config.directories.empty()) {
+            searchPanel_.SetStatus(L"请指定搜索目录");
+            return;
+        }
+    }
+
+    if (searchJob_) {
+        searchJob_->Cancel();
+        searchJob_->Wait();
+        searchJob_.reset();
+    }
+
+    // 模式串先单独校验一次：明显写错的正则不该丢给后台才发现
+    {
+        search::ByteMatcher probe;
+        search::SearchOutcome outcome;
+        if (!probe.Prepare(config, true, 936, outcome)) {
+            searchPanel_.SetStatus(outcome.message);
+            return;
+        }
+    }
+
+    searchPanel_.ClearResults();
+    searchPanel_.SetRunning(true);
+    searchPanel_.SetStatus(L"正在搜索…");
+
+    search::CrossSearchCallbacks callbacks;
+    // 回调发生在协调线程上，这里统一把结果 PostMessage 回 UI 线程，
+    // 指针所有权随之转移，由 UI 线程负责释放。
+    callbacks.onFileResult = [this](const search::FileSearchResult& result) {
+        auto* copy = new search::FileSearchResult(result);
+        if (::PostMessageW(hwnd_, core::kMsgSearchResult, 0, reinterpret_cast<LPARAM>(copy)) == 0) {
+            delete copy;
+        }
+    };
+    callbacks.onProgress = [this](const search::SearchProgress&) {
+        ::PostMessageW(hwnd_, core::kMsgSearchWakeup, 0, 0);
+    };
+    callbacks.onFinished = [this](const search::SearchProgress& progress) {
+        auto* copy = new search::SearchProgress(progress);
+        if (::PostMessageW(hwnd_, core::kMsgSearchFinished, 0,
+                           reinterpret_cast<LPARAM>(copy)) == 0) {
+            delete copy;
+        }
+    };
+
+    infra::LogInfo(L"search", L"在文件中查找: " + config.pattern + L" @ " +
+                                 config.directories.front() + L"，过滤 " + config.filter);
+    searchJob_ = crossSearch_->Start(config, std::move(callbacks));
+}
+
+bool MainWindow::HandleSearchPanelCommand(int controlId) {
+    switch (controlId) {
+        case kSearchPanelStart:
+            StartFileSearch();
+            return true;
+        case kSearchPanelStop:
+            if (searchJob_) {
+                searchJob_->Cancel();
+                searchPanel_.SetStatus(L"正在停止…");
+            }
+            return true;
+        case kSearchPanelClose:
+            searchPanel_.Hide();
+            LayoutChildren();
+            if (edit::Document* document = ActiveDocument();
+                document != nullptr && document->view) {
+                ::SetFocus(document->view->Handle());
+            }
+            return true;
+        case kSearchPanelList:
+            JumpToSearchResult();
+            return true;
+        default:
+            return true;   // 输入框内容变化等通知先不处理
+    }
+}
+
+void MainWindow::UpdateSearchProgress() {
+    if (!searchJob_) {
+        return;
+    }
+    const search::SearchProgress progress = searchJob_->Progress();
+    searchPanel_.SetStatus(L"正在搜索… " + std::to_wstring(progress.filesScanned) + L" / " +
+                           std::to_wstring(progress.filesTotal) + L"，命中 " +
+                           std::to_wstring(progress.hits) + L" 处");
+}
+
+void MainWindow::FinishFileSearch(const search::SearchProgress& progress) {
+    searchPanel_.SetRunning(false);
+    std::wstring text = progress.cancelled ? L"已取消：" : L"完成：";
+    text += L"扫描 " + std::to_wstring(progress.filesScanned) + L" / " +
+            std::to_wstring(progress.filesTotal) + L" 个文件，命中 " +
+            std::to_wstring(progress.hits) + L" 处，涉及 " +
+            std::to_wstring(progress.filesMatched) + L" 个文件";
+    if (progress.skippedBinary > 0) {
+        text += L"，跳过二进制 " + std::to_wstring(progress.skippedBinary) + L" 个";
+    }
+    if (progress.failedFiles > 0) {
+        text += L"，读取失败 " + std::to_wstring(progress.failedFiles) + L" 个";
+    }
+    searchPanel_.SetStatus(text);
+    infra::LogInfo(L"search", text);
+    // 释放任务；析构里会回收协调线程（此时它已经跑完）
+    searchJob_.reset();
+}
+
+void MainWindow::JumpToSearchResult() {
+    std::wstring path;
+    int line = 0;
+    if (!searchPanel_.SelectedTarget(path, line)) {
+        return;
+    }
+    const core::OpenOutcome outcome = documents_->Open(path);
+    if (outcome.status != core::OpenStatus::Ok &&
+        outcome.status != core::OpenStatus::AlreadyOpen) {
+        ::MessageBoxW(hwnd_, outcome.message.c_str(), L"打开文件失败", MB_ICONWARNING);
+        return;
+    }
+    SyncTabBar();
+    ActivateDocument(outcome.document->buffer.id);
+    if (outcome.document != nullptr && outcome.document->view && line > 0) {
+        const int32_t index = line - 1;
+        outcome.document->view->SetCaretPosition(
+            static_cast<int32_t>(outcome.document->view->PositionFromLine(index)));
+        outcome.document->view->ScrollToLine(index);
+    }
 }
 
 void MainWindow::CommandAbout() {

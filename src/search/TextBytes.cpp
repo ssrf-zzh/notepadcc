@@ -37,4 +37,26 @@ std::wstring ConvertFromDocBytes(std::string_view bytes, bool utfMode, std::uint
     return wide;
 }
 
+std::string DocBytesToUtf8(std::string_view bytes, bool utfMode, std::uint32_t codePage) {
+    if (bytes.empty()) {
+        return {};
+    }
+    if (utfMode) {
+        return std::string(bytes);
+    }
+    const std::wstring wide = ConvertFromDocBytes(bytes, false, codePage);
+    if (wide.empty()) {
+        return {};
+    }
+    const int need = ::WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()),
+                                           nullptr, 0, nullptr, nullptr);
+    if (need <= 0) {
+        return {};
+    }
+    std::string out(static_cast<size_t>(need), '\0');
+    ::WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()),
+                          out.data(), need, nullptr, nullptr);
+    return out;
+}
+
 }  // namespace npcc::search

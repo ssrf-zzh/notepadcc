@@ -303,11 +303,11 @@ void FindBar::SetStatus(const std::wstring& text) {
     }
 }
 
-std::wstring FindBar::FindText() const {
+std::wstring FindBar::Pattern() const {
     return TextOf(kFindEdit);
 }
 
-void FindBar::SetFindText(const std::wstring& text) {
+void FindBar::SetPattern(const std::wstring& text) {
     if (findEdit_ != nullptr) {
         ::SetWindowTextW(findEdit_, text.c_str());
     }

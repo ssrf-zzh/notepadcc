@@ -18,6 +18,8 @@ namespace npcc::search {
 // 一次跨文件搜索任务。Cancel() 可从任意线程调用。
 class CrossSearchJob {
 public:
+    ~CrossSearchJob();
+
     void Cancel() noexcept { cancelled_.store(true, std::memory_order_relaxed); }
     bool IsCancelled() const noexcept { return cancelled_.load(std::memory_order_relaxed); }
 
