@@ -475,6 +475,14 @@ void EditView::SetShowEol(bool enabled) const {
     Send(SCI_SETVIEWEOL, enabled ? 1u : 0u);
 }
 
+void EditView::SetIndentGuides(bool enabled) const {
+    Send(SCI_SETINDENTATIONGUIDES, enabled ? 1u : 0u);
+}
+
+void EditView::SetCaretLineVisible(bool enabled) const {
+    Send(SCI_SETCARETLINEVISIBLE, enabled ? 1u : 0u);
+}
+
 void EditView::SetWrapMode(bool enabled) const {
     Send(SCI_SETWRAPMODE, enabled ? 1u : 0u);
     Send(SCI_SETWRAPVISUALFLAGS, enabled ? 1u : 0u);

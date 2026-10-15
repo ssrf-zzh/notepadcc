@@ -68,9 +68,21 @@ PANEL_APPLY = 714
 
 CMD_REPLACE_IN_FILES = (3 << 12) | 10
 CMD_COLUMN_EDIT = (2 << 12) | 7
+CMD_PREFERENCES = (7 << 12) | 1     # CmdCategory::Settings, index 1
 
 COLUMN_TEMPLATE_EDIT = 751
 COLUMN_INSERT_BUTTON = 758
+
+PREF_TAB = 1000
+PREF_RESTORE_SESSION = 1001
+PREF_TAB_WIDTH = 1010
+PREF_SHOW_LINE_NUMBERS = 1016
+PREF_OK = 1060
+
+SCI_GETMARGINWIDTHN = 2243           # 边距 0 就是行号栏
+TCM_GETITEMCOUNT = 0x1304            # TCM_FIRST + 4
+BM_SETCHECK = 0x00F1
+BST_UNCHECKED = 0
 
 IDYES = 6
 IDOK = 1
@@ -197,24 +209,65 @@ def dump_top_level_windows():
     return result
 
 
+# MessageBox 的按钮 ID 并不总是标准的：本机实测只带"确定"的提示框里，
+# 那个"确定"按钮的 ID 是 2 而不是 IDOK(1)，只按 ID 找会找不到。
+BUTTON_LABELS = {
+    IDOK: ("确定", "OK"),
+    IDYES: ("是", "Yes"),
+    7: ("否", "No"),          # IDNO
+    2: ("取消", "Cancel"),
+}
+
+
+def find_message_button(box, command_id):
+    button = user32.GetDlgItem(box, command_id)
+    if button:
+        return button
+    wanted = BUTTON_LABELS.get(command_id)
+    if not wanted:
+        return None
+    for child in children(box):
+        if class_name(child) != "Button":
+            continue
+        text = window_text(child).replace("&", "").strip()
+        if text in wanted:
+            return child
+    return None
+
+
 def dismiss_dialog(title, command_id, timeout=6.0, quiet=False):
-    """确认框是模态的，脚本必须替用户点掉，否则后面的断言都无从谈起。"""
+    """确认框是模态的，脚本必须替用户点掉，否则后面的断言都无从谈起。
+
+    点完之后要确认它真的消失了：BM_CLICK 在对话框不是活动窗口时可能失效
+    （MSDN 明确写了），而脚本拉起的进程本来就在后台。点不动就退回键盘——
+    确认框的默认按钮就是"确定/是"（确定和是都走回车）。
+    """
+    def gone(after):
+        limit = time.time() + after
+        while time.time() < limit:
+            if not user32.FindWindowW("#32770", title):
+                time.sleep(0.2)
+                return True
+            time.sleep(0.1)
+        return not user32.FindWindowW("#32770", title)
+
     deadline = time.time() + timeout
     while time.time() < deadline:
         dialog = user32.FindWindowW("#32770", title)
         if dialog:
-            # 直接给按钮发 BM_CLICK。早先试过给对话框发 WM_COMMAND，
-            # 对替换确认框有效，对这个却点不掉——按按钮才是可靠的路子。
-            button = user32.GetDlgItem(dialog, command_id)
+            button = find_message_button(dialog, command_id)
             if button:
                 user32.SendMessageW(button, 0x00F5, 0, 0)   # BM_CLICK
-            else:
-                user32.PostMessageW(dialog, WM_COMMAND, command_id, 0)
-            time.sleep(0.4)
-            return True
+                if gone(1.5):
+                    return True
+            key = 0x0D if command_id in (IDOK, IDYES) else 0x1B   # VK_RETURN / VK_ESCAPE
+            user32.PostMessageW(dialog, 0x0100, key, 0)          # WM_KEYDOWN
+            if gone(2.0):
+                return True
+            break
         time.sleep(0.2)
     if not quiet:
-        print(f"    [诊断] 未找到标题为 {title!r} 的对话框；当前可见顶层窗口：")
+        print(f"    [诊断] 没能点掉标题为 {title!r} 的对话框；当前可见顶层窗口：")
         for cls, text in dump_top_level_windows():
             print(f"      {cls!r}  {text!r}")
     return False
@@ -524,6 +577,124 @@ def test_external_change(root):
             proc.kill()
 
 
+def test_preferences(root):
+    """首选项：开对话框 → 填非法值应被挡下 → 改成合法值 → 核对视图与磁盘配置。
+
+    这一段刻意不只看"对话框弹出来了没有"：它要确认改动真的穿透到了
+    Scintilla（行号边距宽度）并且落到了 config/config.xml。
+    切页的 TCN_SELCHANGE 走的是 WM_NOTIFY（lParam 是指针），跨进程不封送，
+    所以这里改为直接校验"打开时常规页可见、编辑页隐藏"，再直接操作控件。
+    """
+    work = os.path.join(root, "build", "prefs_test")
+    os.makedirs(work, exist_ok=True)
+    path = os.path.join(work, "doc.txt")
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write("one\ntwo\nthree\n")
+
+    config_path = os.path.join(root, "build", "bin", "config", "config.xml")
+    session = os.path.join(root, "build", "bin", "config", "session.xml")
+    for leftover in (config_path, session):
+        if os.path.exists(leftover):
+            os.remove(leftover)
+
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    time.sleep(4)
+    window = user32.FindWindowW("notepadccMainWindow", "notepadcc - doc.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到打开了 doc.txt 的窗口")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到可见的编辑控件")
+            return False
+
+        margin_before = user32.SendMessageW(scinti, SCI_GETMARGINWIDTHN, 0, 0)
+        if margin_before <= 0:
+            print(f"  FAIL: 默认应显示行号，行号边距宽 {margin_before}")
+            return False
+
+        user32.PostMessageW(window, WM_COMMAND, CMD_PREFERENCES, 0)
+        time.sleep(1.0)
+        dialog = user32.FindWindowW("notepadccPreferences", None)
+        if not dialog:
+            print("  FAIL: 首选项对话框没有出现")
+            return False
+        if window_text(dialog) != "首选项":
+            print(f"  FAIL: 对话框标题不对 {window_text(dialog)!r}")
+            return False
+
+        tab = user32.GetDlgItem(dialog, PREF_TAB)
+        pages = user32.SendMessageW(tab, TCM_GETITEMCOUNT, 0, 0)
+        if pages != 4:
+            print(f"  FAIL: 应有 4 个分页，实际 {pages}")
+            return False
+        if not user32.IsWindowVisible(user32.GetDlgItem(dialog, PREF_RESTORE_SESSION)):
+            print("  FAIL: 打开时常规页的控件应可见")
+            return False
+        if user32.IsWindowVisible(user32.GetDlgItem(dialog, PREF_TAB_WIDTH)):
+            print("  FAIL: 打开时编辑页的控件不应可见")
+            return False
+
+        # 非法值（制表符宽度 0）必须被挡下：弹提示，且对话框不关闭
+        if not set_text(dialog, PREF_TAB_WIDTH, "0"):
+            print("  FAIL: 找不到制表符宽度输入框")
+            return False
+        user32.PostMessageW(dialog, WM_COMMAND, PREF_OK, 0)
+        if not dismiss_dialog("首选项", IDOK):
+            print("  FAIL: 非法值没有弹出提示框")
+            return False
+        if not user32.FindWindowW("notepadccPreferences", None):
+            print("  FAIL: 值非法时对话框不应关闭")
+            return False
+
+        # 改成合法值，并顺手关掉行号
+        set_text(dialog, PREF_TAB_WIDTH, "3")
+        user32.SendMessageW(user32.GetDlgItem(dialog, PREF_SHOW_LINE_NUMBERS), BM_SETCHECK,
+                            BST_UNCHECKED, 0)
+        user32.PostMessageW(dialog, WM_COMMAND, PREF_OK, 0)
+        deadline = time.time() + 5
+        while time.time() < deadline and user32.FindWindowW("notepadccPreferences", None):
+            time.sleep(0.2)
+        if user32.FindWindowW("notepadccPreferences", None):
+            print("  FAIL: 点确定之后对话框没有关闭")
+            print(f"    制表符宽度输入框现在是 {window_text(user32.GetDlgItem(dialog, PREF_TAB_WIDTH))!r}")
+            leftover = user32.FindWindowW("#32770", "首选项")
+            if leftover:
+                for child in children(leftover):
+                    if class_name(child) == "Static" and window_text(child):
+                        print(f"    [诊断] 提示框内容 {window_text(child)!r}")
+            for cls, text in dump_top_level_windows():
+                print(f"    [诊断] 可见顶层窗口 {cls!r}  {text!r}")
+            return False
+        time.sleep(1.0)
+
+        margin_after = user32.SendMessageW(scinti, SCI_GETMARGINWIDTHN, 0, 0)
+        if margin_after != 0:
+            print(f"  FAIL: 关掉行号后行号边距应变成 0，实际 {margin_after}")
+            return False
+
+        if not os.path.exists(config_path):
+            print(f"  FAIL: 没有写出配置文件的落盘 {config_path}")
+            return False
+        with open(config_path, "r", encoding="utf-8", errors="replace") as handle:
+            config_text = handle.read()
+        for needle in ('showLineNumbers="no"', 'tabWidth="3"'):
+            if needle not in config_text:
+                print(f"  FAIL: 配置文件里没有 {needle}\n{config_text}")
+                return False
+
+        print("  首选项：4 个分页、非法值被挡下、行号边距 48 → 0、config.xml 已落盘")
+        return True
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+
 def test_find_bar(main_window, root):
     """查找栏：填词、点下一个，核对编辑器选区是否落在第一个匹配上。"""
     target = os.path.join(root, "README.md")
@@ -663,12 +834,14 @@ def run():
         failed = True
     if not test_external_change(root):
         failed = True
+    if not test_preferences(root):
+        failed = True
 
     if failed:
         print("FAIL: 界面回归未通过")
         return 1
     print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + "
-          "大文件 + 外部改动）")
+          "大文件 + 外部改动 + 首选项）")
     return 0
 
 

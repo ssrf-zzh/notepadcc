@@ -26,6 +26,13 @@ constexpr uint32_t kFallbackCodePage = 936;   // 简体中文 Windows 的默认 
 
 DocumentManager::DocumentManager(HWND viewParent) : viewParent_(viewParent) {}
 
+void DocumentManager::SetNewFileDefaults(edit::UniMode mode, edit::EolMode eol,
+                                         std::uint32_t codePage) {
+    newFileUniMode_ = mode;
+    newFileEol_ = eol;
+    newFileCodePage_ = codePage;
+}
+
 DocumentManager::~DocumentManager() {
     for (auto& document : documents_) {
         if (document && document->view) {
@@ -67,10 +74,11 @@ edit::Document* DocumentManager::CreateUntitled() {
     document->buffer.id = static_cast<BufferId>(nextBufferId_++);
     document->buffer.isUntitled = true;
     document->buffer.isModified = false;
-    document->buffer.encoding.uniMode = edit::UniMode::Utf8;
+    document->buffer.encoding.uniMode = newFileUniMode_;
+    document->buffer.encoding.codePage = newFileCodePage_;
     document->buffer.encoding.confidence = 100;
-    document->buffer.eol = edit::EolMode::Crlf;
-    document->buffer.detectedEol = edit::EolMode::Crlf;
+    document->buffer.eol = newFileEol_;
+    document->buffer.detectedEol = newFileEol_;
     document->buffer.displayName = L"新建 " + std::to_wstring(++untitledCounter_);
 
     document->view = std::make_unique<edit::EditView>();
@@ -80,7 +88,9 @@ edit::Document* DocumentManager::CreateUntitled() {
     }
     document->view->ApplyLightTheme();
     document->view->ConfigureColumnEditing();
-    document->view->SetCodePage(edit::kCodePageUtf8);
+    document->view->SetCodePage(newFileUniMode_ == edit::UniMode::Ansi
+                                    ? newFileCodePage_
+                                    : edit::kCodePageUtf8);
     document->view->SetEolMode(document->buffer.eol);
     document->view->SetText({});
     document->view->ApplyLanguageForPath(std::wstring());

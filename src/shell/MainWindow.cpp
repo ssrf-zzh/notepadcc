@@ -20,6 +20,7 @@
 #include "shell/MenuBuilder.h"
 #include "shell/TabBar.h"
 #include "shell/ColumnDialog.h"
+#include "shell/PreferencesDialog.h"
 
 namespace npcc::shell {
 namespace {
@@ -64,6 +65,8 @@ enum : npcc::core::CmdId {
 
     kCmdWindowNext = npcc::core::MakeCmdId(11, 1),
     kCmdWindowPrev = npcc::core::MakeCmdId(11, 2),
+
+    kCmdSettingsPreferences = npcc::core::MakeCmdId(7, 1),
 
     kCmdHelpAbout = npcc::core::MakeCmdId(12, 1),
 
@@ -167,11 +170,18 @@ LRESULT CALLBACK MainWindow::WndProcThunk(HWND hwnd, UINT message, WPARAM wParam
 LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
         case WM_CREATE: {
+            // 配置要在建文档之前加载：新建文档的默认编码与行尾来自它
+            std::wstring configError;
+            if (!config_.Load(&configError)) {
+                infra::LogWarn(L"config", L"配置加载失败，改用默认值: " + configError);
+            }
+
             tabBar_.Create(hwnd_, 1);
             statusBar_.Create(hwnd_, 2);
             findBar_.Create(hwnd_);
             searchPanel_.Create(hwnd_);
             documents_ = std::make_unique<core::DocumentManager>(hwnd_);
+            ApplyConfigToRuntime();
             crossSearch_ = std::make_unique<search::CrossFileSearch>();
             crossReplace_ = std::make_unique<search::CrossFileReplace>();
             // 外部改动监视：回调在监视线程上，转发回 UI 线程处理
@@ -316,6 +326,7 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             // 会话要在关闭文档之前取快照——CloseAllDocuments 之后就没得记了
             const core::SessionSnapshot snapshot = BuildSessionSnapshot();
             if (CloseAllDocuments()) {
+                config_.Flush();   // 退出前把配置落盘
                 std::wstring error;
                 if (!core::SessionManager::Save(snapshot, &error)) {
                     infra::LogWarn(L"session", L"会话保存失败: " + error);
@@ -460,6 +471,8 @@ void MainWindow::RegisterCommands() {
     add(kCmdViewToggleWrap, CmdCategory::View, L"cmd.view.toggleWrap", L"自动换行(&W)",
         core::kCmdCheckable, [this](const CmdContext&) {
             wrapEnabled_ = !wrapEnabled_;
+            config_.Edit().wrapLongLines = wrapEnabled_;
+            config_.RequestSave();
             if (edit::Document* document = documents_->Active(); document != nullptr) {
                 document->view->SetWrapMode(wrapEnabled_);
             }
@@ -467,6 +480,8 @@ void MainWindow::RegisterCommands() {
     add(kCmdViewToggleSpaces, CmdCategory::View, L"cmd.view.toggleSpaces", L"显示空白符号(&S)",
         core::kCmdCheckable, [this](const CmdContext&) {
             showWhitespace_ = !showWhitespace_;
+            config_.Edit().showWhitespace = showWhitespace_;
+            config_.RequestSave();
             if (edit::Document* document = documents_->Active(); document != nullptr) {
                 document->view->SetShowWhitespace(showWhitespace_);
             }
@@ -474,6 +489,8 @@ void MainWindow::RegisterCommands() {
     add(kCmdViewToggleEol, CmdCategory::View, L"cmd.view.toggleEol", L"显示行尾符(&E)",
         core::kCmdCheckable, [this](const CmdContext&) {
             showEol_ = !showEol_;
+            config_.Edit().showEol = showEol_;
+            config_.RequestSave();
             if (edit::Document* document = documents_->Active(); document != nullptr) {
                 document->view->SetShowEol(showEol_);
             }
@@ -481,6 +498,8 @@ void MainWindow::RegisterCommands() {
     add(kCmdViewToggleNumbers, CmdCategory::View, L"cmd.view.toggleNumbers", L"显示行号(&N)",
         core::kCmdCheckable, [this](const CmdContext&) {
             showLineNumbers_ = !showLineNumbers_;
+            config_.Edit().showLineNumbers = showLineNumbers_;
+            config_.RequestSave();
             if (edit::Document* document = documents_->Active(); document != nullptr) {
                 document->view->ShowLineNumbers(showLineNumbers_);
             }
@@ -491,6 +510,11 @@ void MainWindow::RegisterCommands() {
         core::kCmdNone, [this](const CmdContext&) { CommandNextTab(); });
     add(kCmdWindowPrev, CmdCategory::Window, L"cmd.window.prev", L"上一个标签(&P)",
         core::kCmdNone, [this](const CmdContext&) { CommandPrevTab(); });
+
+    // ---- 设置 ----
+    add(kCmdSettingsPreferences, CmdCategory::Settings, L"cmd.settings.preferences",
+        L"首选项(&P)...", core::kCmdNone,
+        [this](const CmdContext&) { CommandPreferences(); });
 
     // ---- 帮助 ----
     add(kCmdHelpAbout, CmdCategory::Help, L"cmd.help.about", L"关于 notepadcc(&A)",
@@ -545,6 +569,7 @@ void MainWindow::RegisterCommands() {
     registry_.BindShortcut(kCmdWindowPrev, ctrlShift, VK_TAB, true);
     registry_.BindShortcut(kCmdWindowNext, ctrl, VK_NEXT, false);
     registry_.BindShortcut(kCmdWindowPrev, ctrl, VK_PRIOR, false);
+    registry_.BindShortcut(kCmdSettingsPreferences, ctrl, VK_OEM_COMMA, true);
 }
 
 void MainWindow::RebuildAccelerators() {
@@ -615,12 +640,71 @@ void MainWindow::LayoutChildren() const {
     documents_->ResizeActive(viewRect);
 }
 
-void MainWindow::ApplyViewToggles(edit::EditView& view) const {
-    // 这些是控件级设置，新激活的视图需要按当前全局状态复现
-    view.SetWrapMode(wrapEnabled_);
-    view.SetShowWhitespace(showWhitespace_);
-    view.SetShowEol(showEol_);
-    view.ShowLineNumbers(showLineNumbers_);
+void MainWindow::ApplyConfigToRuntime() {
+    const core::EditConfig& edit = config_.Edit();
+    showWhitespace_ = edit.showWhitespace;
+    showEol_ = edit.showEol;
+    showLineNumbers_ = edit.showLineNumbers;
+    wrapEnabled_ = edit.wrapLongLines;
+
+    if (documents_) {
+        const core::LargeFileConfig& large = config_.LargeFile();
+        documents_->TierPolicyRef().normalMaxBytes = large.tier1MaxBytes;
+        documents_->TierPolicyRef().largeMaxBytes = large.tier2MaxBytes;
+        documents_->TierPolicyRef().refuseAboveBytes = large.refuseAboveBytes;
+
+        const core::NewFileConfig& newFile = config_.NewFile();
+        documents_->SetNewFileDefaults(newFile.defaultUniMode, newFile.defaultEol,
+                                       newFile.defaultCodePage);
+    }
+}
+
+void MainWindow::ApplyEditConfigToAllViews() const {
+    if (!documents_) {
+        return;
+    }
+    for (edit::Document* document : documents_->All()) {
+        if (document->view == nullptr) {
+            continue;
+        }
+        ApplyEditConfigToView(*document->view);
+    }
+}
+
+void MainWindow::ApplyEditConfigToView(edit::EditView& view) const {
+    const core::EditConfig& edit = config_.Edit();
+    view.SetTabWidth(static_cast<int32_t>(edit.tabWidth), !edit.tabToSpaces);
+    view.SetShowWhitespace(edit.showWhitespace);
+    view.SetShowEol(edit.showEol);
+    view.ShowLineNumbers(edit.showLineNumbers);
+    view.SetWrapMode(edit.wrapLongLines);
+    view.SetIndentGuides(edit.showIndentGuide);
+    view.SetCaretLineVisible(edit.caretLineHighlight);
+    view.SetZoom(static_cast<int32_t>(edit.zoomLevel));
+}
+
+void MainWindow::ApplyViewToggles(edit::Document& document) const {
+    // 这些是控件级设置，新激活的视图需要按当前配置复现。
+    // 注意大文件档另有降级项：直接照搬配置会把降级覆盖掉，
+    // 所以常规档才照配置来，降级档在配置之上再叠一层降级。
+    if (document.view == nullptr) {
+        return;
+    }
+    switch (document.buffer.tier) {
+        case edit::FileTier::Normal:
+            ApplyEditConfigToView(*document.view);
+            break;
+        case edit::FileTier::Large:
+            ApplyEditConfigToView(*document.view);
+            document.view->ApplyLargeFileDisplayMode();
+            break;
+        case edit::FileTier::Huge:
+            ApplyEditConfigToView(*document.view);
+            document.view->ApplyLargeFileDisplayMode();
+            document.view->SetReadOnly(true);
+            document.view->SetUndoCollection(false);
+            break;
+    }
 }
 
 void MainWindow::SyncTabBar() {
@@ -705,7 +789,7 @@ void MainWindow::ActivateDocument(core::BufferId id) {
     }
     documents_->Activate(id);
     if (edit::Document* document = documents_->Active(); document != nullptr && document->view) {
-        ApplyViewToggles(*document->view);
+        ApplyViewToggles(*document);
         ::SetFocus(document->view->Handle());
     }
     tabBar_.SetActive(id);
@@ -1761,6 +1845,26 @@ void MainWindow::JumpToSearchResult() {
             static_cast<int32_t>(outcome.document->view->PositionFromLine(index)));
         outcome.document->view->ScrollToLine(index);
     }
+}
+
+void MainWindow::CommandPreferences() {
+    if (!ShowPreferencesDialog(hwnd_, config_)) {
+        return;   // 用户取消，配置与视图都不动
+    }
+
+    // 配置变了就把运行期状态、大文件策略、新建文档默认值和新视图开关全部重算一遍。
+    ApplyConfigToRuntime();
+    if (documents_ != nullptr) {
+        for (edit::Document* document : documents_->All()) {
+            if (document != nullptr) {
+                ApplyViewToggles(*document);   // 按档位恢复，不把降级项覆盖掉
+            }
+        }
+    }
+    SyncTabBar();
+    LayoutChildren();
+    UpdateStatus();
+    ::InvalidateRect(hwnd_, nullptr, TRUE);
 }
 
 void MainWindow::CommandAbout() {

@@ -9,6 +9,7 @@
 
 #include "core/Command.h"
 #include "core/CommandRegistry.h"
+#include "core/ConfigCenter.h"
 #include "core/DocumentManager.h"
 #include "core/SessionManager.h"
 #include "edit/DocBuffer.h"
@@ -657,6 +658,132 @@ int main() {
             view->Destroy();
             ::DestroyWindow(host);
         }
+    }
+
+    // ---------------------------------------------------------------- 配置中心
+    Section("ConfigCenter（配置读写与容错）");
+    {
+        npcc::infra::InitializePaths(true);   // 会话测试里已经调用过，这里幂等
+        const std::filesystem::path path = npcc::core::ConfigCenter::Path().wstring();
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+
+        // 没有配置文件时用默认值，不算失败
+        {
+            npcc::core::ConfigCenter config;
+            std::wstring error;
+            Check(config.Load(&error), "配置文件不存在时加载成功（用默认值）");
+            Check(error.empty(), "不存在的配置不算错误");
+            Check(config.Edit().tabWidth == 4, "默认制表符宽度是 4");
+            Check(!config.Edit().showWhitespace, "默认不显示空白符号");
+            Check(config.NewFile().defaultUniMode == npcc::edit::UniMode::Utf8,
+                  "默认新建编码是 UTF-8");
+            Check(config.LargeFile().tier1MaxBytes == 8ull * 1024 * 1024,
+                  "默认大文件阈值是 8 MB");
+        }
+
+        // 改值 → 保存 → 重新加载
+        {
+            npcc::core::ConfigCenter config;
+            config.Load(nullptr);
+            config.Edit().tabWidth = 2;
+            config.Edit().showWhitespace = true;
+            config.Edit().wrapLongLines = true;
+            config.General().restoreSessionOnStart = false;
+            config.NewFile().defaultEol = npcc::edit::EolMode::Lf;
+            config.NewFile().defaultCodePage = 950;
+            config.Backup().intervalSeconds = 45;
+            config.LargeFile().tier1MaxBytes = 4ull * 1024 * 1024;
+            config.LargeFile().tier2MaxBytes = 32ull * 1024 * 1024;
+            config.LargeFile().refuseAboveBytes = 256ull * 1024 * 1024;
+            config.Search().lastFilter = L"*.rs;*.toml";
+            std::wstring error;
+            Check(config.Save(true, &error), "保存配置成功");
+            Check(std::filesystem::exists(path), "配置文件已落盘");
+
+            npcc::core::ConfigCenter reloaded;
+            Check(reloaded.Load(&error), "重新加载成功");
+            Check(reloaded.Edit().tabWidth == 2, "制表符宽度往返一致");
+            Check(reloaded.Edit().showWhitespace, "显示空白符号往返一致");
+            Check(reloaded.Edit().wrapLongLines, "自动换行往返一致");
+            Check(!reloaded.General().restoreSessionOnStart, "恢复会话开关往返一致");
+            Check(reloaded.NewFile().defaultEol == npcc::edit::EolMode::Lf, "默认行尾往返一致");
+            Check(reloaded.NewFile().defaultCodePage == 950, "默认代码页往返一致");
+            Check(reloaded.Backup().intervalSeconds == 45, "备份间隔往返一致");
+            Check(reloaded.LargeFile().tier1MaxBytes == 4ull * 1024 * 1024, "大文件阈值往返一致");
+            Check(reloaded.LargeFile().tier2MaxBytes == 32ull * 1024 * 1024,
+                  "大文件 T2 阈值往返一致");
+            Check(reloaded.Search().lastFilter == L"*.rs;*.toml", "过滤器往返一致");
+        }
+
+        // 坏配置：非法值回退默认，绝不能因此起不来
+        {
+            const std::string broken =
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<NotepadccConfig schemaVersion=\"1\">\n"
+                "  <general recentFileCount=\"999999\" restoreSessionOnStart=\"maybe\"/>\n"
+                "  <edit tabWidth=\"0\" showWhitespace=\"yes\" zoomLevel=\"abc\"/>\n"
+                "  <newFile defaultUniMode=\"Latin1\" defaultEol=\"Whatever\"/>\n"
+                "  <largeFile tier1MaxMB=\"64\" tier2MaxMB=\"8\" refuseAboveMB=\"4\"/>\n"
+                "</NotepadccConfig>\n";
+            npcc::io::WriteFileAtomic(path.wstring(), broken);
+
+            npcc::core::ConfigCenter config;
+            std::wstring error;
+            Check(config.Load(&error), "含非法值的配置仍能加载成功");
+            Check(config.Edit().tabWidth == 4, "非法制表符宽度回退默认值");
+            Check(config.Edit().showWhitespace, "合法的布尔值仍然生效");
+            Check(config.Edit().zoomLevel == 0, "非法缩放值回退默认值");
+            Check(config.General().recentFileCount == 20, "超范围的最近文件数回退默认值");
+            Check(config.General().restoreSessionOnStart, "非法布尔值回退默认值");
+            Check(config.NewFile().defaultUniMode == npcc::edit::UniMode::Utf8,
+                  "未知编码名回退默认值");
+            Check(config.NewFile().defaultEol == npcc::edit::EolMode::Crlf,
+                  "未知行尾名回退默认值");
+            Check(config.LargeFile().tier1MaxBytes == 8ull * 1024 * 1024,
+                  "阈值顺序颠倒时整组回退默认值");
+            Check(!config.Warnings().empty(), "回退过的配置项会被记录下来");
+        }
+
+        // 彻底损坏的 XML：加载失败，但不崩
+        {
+            npcc::io::WriteFileAtomic(path.wstring(), "<NotepadccConfig><edit tabWidth=");
+            npcc::core::ConfigCenter config;
+            std::wstring error;
+            Check(!config.Load(&error), "损坏的配置文件加载失败");
+            Check(!error.empty(), "失败时给出可读原因");
+        }
+
+        // 来自更新版本：拒绝，而不是按错误结构猜
+        {
+            npcc::io::WriteFileAtomic(
+                path.wstring(), "<?xml version=\"1.0\"?><NotepadccConfig schemaVersion=\"99\"/>");
+            npcc::core::ConfigCenter config;
+            std::wstring error;
+            Check(!config.Load(&error), "高版本配置被拒绝");
+            Check(!error.empty(), "拒绝时给出原因");
+        }
+
+        // 合并写盘：一秒内的第二次请求延后，Flush 才落盘
+        {
+            std::filesystem::remove(path, ec);
+            npcc::core::ConfigCenter config;
+            config.Load(nullptr);
+            config.Edit().tabWidth = 7;
+            config.RequestSave();
+            Check(!config.IsDirty(), "第一次请求就落盘了");
+            config.Edit().tabWidth = 8;
+            config.RequestSave();
+            Check(config.IsDirty(), "一秒内的第二次请求被延后");
+            config.Flush();
+            Check(!config.IsDirty(), "Flush 之后落盘完成");
+
+            npcc::core::ConfigCenter reloaded;
+            reloaded.Load(nullptr);
+            Check(reloaded.Edit().tabWidth == 8, "延后的那次改动没有丢");
+        }
+
+        std::filesystem::remove(path, ec);
     }
 
     // ---------------------------------------------------------------- XML

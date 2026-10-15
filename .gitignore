@@ -21,6 +21,8 @@
 # 编辑器与系统
 .vs/
 .vscode/
+__pycache__/
+*.pyc
 *.user
 Thumbs.db
 desktop.ini

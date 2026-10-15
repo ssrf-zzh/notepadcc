@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "core/Ids.h"
+#include "core/ConfigCenter.h"
 #include "edit/Document.h"
 #include "edit/FileTier.h"
 
@@ -42,6 +43,9 @@ public:
 
     // 大文件分档阈值（设计文档 6.1）。可配置，这里先给默认值。
     edit::TierPolicy& TierPolicyRef() noexcept { return tierPolicy_; }
+
+    // 新建文档时使用的编码与行尾（来自配置中心的"新建"分页）
+    void SetNewFileDefaults(edit::UniMode mode, edit::EolMode eol, std::uint32_t codePage);
 
     DocumentManager(const DocumentManager&) = delete;
     DocumentManager& operator=(const DocumentManager&) = delete;
@@ -105,6 +109,9 @@ private:
     int                                      nextBufferId_ = 1;   // 0 保留给"无效"
     int                                      untitledCounter_ = 0;
     edit::TierPolicy                         tierPolicy_;
+    edit::UniMode                            newFileUniMode_ = edit::UniMode::Utf8;
+    edit::EolMode                            newFileEol_ = edit::EolMode::Crlf;
+    std::uint32_t                            newFileCodePage_ = 936;
 };
 
 }  // namespace npcc::core

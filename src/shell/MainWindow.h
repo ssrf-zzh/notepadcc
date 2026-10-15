@@ -7,6 +7,7 @@
 
 #include "core/CommandRegistry.h"
 #include "core/DocumentManager.h"
+#include "core/ConfigCenter.h"
 #include "core/SessionManager.h"
 #include "edit/Document.h"
 #include "edit/EditView.h"
@@ -46,7 +47,7 @@ private:
     void UpdateStatus() const;
     void SyncTabBar();
     void SyncFileWatcher();
-    void ApplyViewToggles(edit::EditView& view) const;
+    void ApplyViewToggles(edit::Document& document) const;
     core::CmdContext Context();
 
     // ---- 命令实现 ----
@@ -70,6 +71,9 @@ private:
     void CommandClearBookmarks();
     void CommandColumnEdit();
     void CommandToggleOverwrite();
+    void ApplyConfigToRuntime();
+    void ApplyEditConfigToAllViews() const;
+    void ApplyEditConfigToView(edit::EditView& view) const;
     void HandleExternalChange(const std::wstring& path, io::FileChangeKind kind);
     void CheckActiveDocumentForExternalChange(
         io::FileChangeKind kind = io::FileChangeKind::Modified);
@@ -78,6 +82,7 @@ private:
     void JumpToSearchResult();
     void FinishFileSearch(const search::SearchProgress& progress);
     void UpdateSearchProgress();
+    void CommandPreferences();
     void CommandAbout();
 
     // ---- 文档操作 ----
@@ -103,6 +108,7 @@ private:
     HMENU                      menu_ = nullptr;
     HACCEL                     accel_ = nullptr;
     core::CommandRegistry      registry_;
+    core::ConfigCenter         config_;
     std::unique_ptr<core::DocumentManager> documents_;
     TabBar                     tabBar_;
     StatusBar                  statusBar_;

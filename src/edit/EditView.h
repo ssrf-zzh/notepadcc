@@ -88,6 +88,8 @@ public:
     void ShowLineNumbers(bool visible) const;
     void SetShowWhitespace(bool enabled) const;
     void SetShowEol(bool enabled) const;
+    void SetIndentGuides(bool enabled) const;
+    void SetCaretLineVisible(bool enabled) const;
     void SetWrapMode(bool enabled) const;
     void SetZoom(int32_t deltaSteps) const;
     int32_t ZoomLevel() const;
