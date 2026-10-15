@@ -23,6 +23,7 @@
 #include "edit/Encoding.h"
 #include "edit/FileTier.h"
 #include "edit/TextTools.h"
+#include "edit/StyleScheme.h"
 #include "edit/EditView.h"
 #include "io/AtomicFile.h"
 #include "io/FileReader.h"
@@ -2712,6 +2713,150 @@ int main() {
     // 语言定义是"用什么词法器、关键字是什么、注释符是什么"的权威来源。它现在可以
     // 被用户的 langs.xml 覆盖，所以这一段要同时钉住"内置表可用的默认值"与
     // "文件里的覆盖确实生效、没提到的语言仍用内置值"。
+    // ---------------------------------------------------------------- 样式方案
+    // 配色是"按语义角色"给的：用户想调的是"注释用什么颜色"，而不是 Lexilla 的样式号。
+    // 这一段既测数据层（覆盖、往返、坏值），也测**它真的改变渲染出来的颜色**——
+    // 只测"存取对"是不够的，配色的意义在于屏幕上看得见。
+    Section("样式方案（stylers.xml）");
+    {
+        using npcc::edit::StyleRole;
+        using npcc::edit::StyleScheme;
+
+        npcc::infra::InitializePaths(true);
+        {
+            const StyleScheme defaults = StyleScheme::Defaults();
+            Check(defaults.Role(L"cpp", StyleRole::Comment).fore == 0x2E7D32,
+                  "默认的注释色是绿");
+            Check(defaults.Role(L"cpp", StyleRole::Comment).italic, "默认注释是斜体");
+            Check(defaults.Role(L"cpp", StyleRole::Keyword).bold, "默认关键字是粗体");
+            Check(defaults.Role(L"还没见过的语言", StyleRole::Keyword).fore ==
+                      defaults.Role(L"cpp", StyleRole::Keyword).fore,
+                  "没被改过的语言用同一套默认配色");
+            Check(defaults.Fore() == 0x1E1E1E && defaults.Back() == 0xFFFFFF, "默认前景/背景");
+        }
+
+        {
+            StyleScheme scheme = StyleScheme::Defaults();
+            Check(!scheme.HasOverride(L"cpp"), "初始没有覆盖");
+            npcc::edit::RoleStyle custom;
+            custom.fore = 0xFF00FF;
+            custom.bold = false;
+            custom.italic = false;
+            scheme.SetRole(L"cpp", StyleRole::Comment, custom);
+            Check(scheme.HasOverride(L"cpp"), "设置之后有覆盖");
+            Check(scheme.Role(L"cpp", StyleRole::Comment).fore == 0xFF00FF, "覆盖生效");
+            Check(scheme.Role(L"python", StyleRole::Comment).fore == 0x2E7D32,
+                  "只影响指定的语言");
+            Check(scheme.Role(L"cpp", StyleRole::Keyword).fore == 0x0000C0,
+                  "同一语言里没改过的角色仍是默认值");
+            scheme.ResetLanguage(L"cpp");
+            Check(!scheme.HasOverride(L"cpp") &&
+                      scheme.Role(L"cpp", StyleRole::Comment).fore == 0x2E7D32,
+                  "恢复默认之后回到内置配色");
+        }
+
+        {
+            std::uint32_t colour = 0;
+            Check(StyleScheme::ParseColour(L"#2E7D32", colour) && colour == 0x2E7D32,
+                  "解析 #RRGGBB");
+            Check(StyleScheme::ParseColour(L"2e7d32", colour) && colour == 0x2E7D32,
+                  "不带 # 与非大写也能解析");
+            Check(!StyleScheme::ParseColour(L"#123", colour), "位数不对要拒绝");
+            Check(!StyleScheme::ParseColour(L"#GGGGGG", colour), "非十六进制要拒绝");
+            Check(!StyleScheme::ParseColour(L"", colour), "空串要拒绝");
+            Check(StyleScheme::ColourText(0x0A0B0C) == L"#0A0B0C", "颜色转文本");
+        }
+
+        // 存取往返
+        {
+            const std::filesystem::path path = StyleScheme::Path();
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+            StyleScheme scheme = StyleScheme::Defaults();
+            npcc::edit::RoleStyle custom;
+            custom.fore = 0x123456;
+            custom.bold = true;
+            custom.italic = true;
+            scheme.SetRole(L"cpp", StyleRole::Number, custom);
+            scheme.SetDefault(0x101010, 0xF0F0F0, L"Consolas", 13);
+            std::wstring error;
+            Check(scheme.Save(&error), "保存样式方案成功");
+
+            StyleScheme reloaded;
+            Check(reloaded.Load(&error), "重新加载样式方案成功");
+            Check(reloaded.Role(L"cpp", StyleRole::Number).fore == 0x123456 &&
+                      reloaded.Role(L"cpp", StyleRole::Number).bold &&
+                      reloaded.Role(L"cpp", StyleRole::Number).italic,
+                  "覆盖过的角色往返一致（含粗体斜体）");
+            Check(reloaded.Fore() == 0x101010 && reloaded.Back() == 0xF0F0F0 &&
+                      reloaded.FontSize() == 13,
+                  "默认前景/背景/字号往返一致");
+            Check(reloaded.Role(L"cpp", StyleRole::Comment).fore == 0x2E7D32,
+                  "没覆盖的角色仍是默认值");
+
+            // 坏值只跳过并记警告，不影响其余部分
+            const std::string custom2 =
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<NotepadccStyles schemaVersion=\"1\">\n"
+                "  <Language name=\"cpp\">\n"
+                "    <Style role=\"没这个角色\" fore=\"#112233\"/>\n"
+                "    <Style role=\"keyword\" fore=\"不是颜色\"/>\n"
+                "    <Style role=\"string\" fore=\"#445566\" bold=\"yes\"/>\n"
+                "  </Language>\n"
+                "</NotepadccStyles>\n";
+            Check(WriteFileDirect(path, custom2), "写入带坏值的 stylers.xml");
+            StyleScheme tolerant;
+            std::vector<std::wstring> warnings;
+            Check(tolerant.Load(&error, &warnings), "带坏值的文件仍能加载");
+            Check(warnings.size() >= 2, "认不出的角色与坏颜色都给出了警告");
+            Check(tolerant.Role(L"cpp", StyleRole::String).fore == 0x445566 &&
+                      tolerant.Role(L"cpp", StyleRole::String).bold,
+                  "同一份文件里合法的条目照常生效");
+            Check(tolerant.Role(L"cpp", StyleRole::Keyword).fore == 0x0000C0,
+                  "坏值回退到默认配色");
+
+            const std::string future =
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<NotepadccStyles schemaVersion=\"99\"/>\n";
+            Check(WriteFileDirect(path, future), "写入高版本 stylers.xml");
+            StyleScheme rejected;
+            Check(!rejected.Load(&error), "高版本 stylers.xml 被拒绝");
+            std::filesystem::remove(path, ec);
+        }
+
+        // 配色真的落到渲染上：用 cpp 的注释样式号（2）核对
+        {
+            const HWND host = CreateHiddenHost();
+            npcc::edit::EditView view;
+            if (host != nullptr && view.Create(host, 950)) {
+                npcc::edit::LanguageRegistry languages;
+                languages.Load(nullptr);
+                const npcc::edit::LanguageDef* cpp = languages.FindByExtension("cpp");
+                Check(cpp != nullptr, "找得到 cpp 语言定义");
+                if (cpp != nullptr) {
+                    view.SetCodePage(npcc::edit::kCodePageUtf8);
+                    view.SetText("// c\nint x;\n");
+
+                    view.ApplyLanguage(*cpp, nullptr);
+                    Check(view.StyleForeColor(2) == 0x2E7D32, "默认配色下注释色是绿");
+
+                    npcc::edit::StyleScheme scheme = npcc::edit::StyleScheme::Defaults();
+                    npcc::edit::RoleStyle custom;
+                    custom.fore = 0xFF00FF;
+                    scheme.SetRole(L"cpp", StyleRole::Comment, custom);
+                    view.ApplyLanguage(*cpp, &scheme);
+                    Check(view.StyleForeColor(2) == 0xFF00FF, "方案里的注释色真的生效了");
+                    Check(view.StyleForeColor(5) == 0x0000C0, "没覆盖的角色不受影响");
+                }
+            } else {
+                Check(false, "创建隐藏宿主窗口或编辑控件失败");
+            }
+            if (host != nullptr) {
+                ::DestroyWindow(host);
+            }
+        }
+    }
+
     Section("语言定义（langs.xml）");
     {
         using npcc::edit::LanguageRegistry;

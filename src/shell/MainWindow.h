@@ -14,6 +14,7 @@
 #include "edit/Document.h"
 #include "edit/EditView.h"
 #include "edit/LanguageRegistry.h"
+#include "edit/StyleScheme.h"
 #include "infra/CrashGuard.h"
 #include "shell/StatusBar.h"
 #include "shell/TabBar.h"
@@ -111,6 +112,8 @@ private:
     void CommandDecodeText(bool base64);
     void CommandToggleComment(bool block);
     void CommandExportLanguageDefs();
+    void CommandStyleConfigurator();
+    void ApplyStyleSchemeToAllViews();
     const edit::LanguageDef* ActiveLanguage() const;
     void WriteConvertBackup(const std::wstring& path) const;
     void CommandRegisterAssociations(bool registerThem);
@@ -149,6 +152,7 @@ private:
     core::ConfigCenter         config_;
     core::SnapshotStore        snapshots_;
     edit::LanguageRegistry     languages_;
+    edit::StyleScheme          styles_;
     // 启动时记录的默认快捷键表，"恢复默认"要用（见 ShortcutDialog）
     std::vector<core::ShortcutBinding> defaultShortcuts_;
     // 崩溃抢救的文档槽位。数组必须活到进程结束：崩溃处理器只持有指针。

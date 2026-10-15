@@ -93,7 +93,7 @@ edit::Document* DocumentManager::CreateUntitled() {
                                     : edit::kCodePageUtf8);
     document->view->SetEolMode(document->buffer.eol);
     document->view->SetText({});
-    document->view->ApplyLanguageForPath(std::wstring(), languages_);
+    document->view->ApplyLanguageForPath(std::wstring(), languages_, styles_);
     document->view->ClearUndoBuffer();
     document->view->MarkSavePoint();
     document->view->SetVisible(false);
@@ -247,7 +247,7 @@ bool DocumentManager::LoadInto(edit::Document& document, std::wstring& error,
 
     if (tier == edit::FileTier::Normal) {
         view.SetText(loadedBytes);
-        view.ApplyLanguageForPath(target, languages_);
+        view.ApplyLanguageForPath(target, languages_, styles_);
     } else {
         // BOM 不能交给 Scintilla：它按代码页解释缓冲区，BOM 会变成一个可见字符
         const std::size_t skip = document.buffer.encoding.hasBom ? 3u : 0u;
@@ -262,7 +262,7 @@ bool DocumentManager::LoadInto(edit::Document& document, std::wstring& error,
             document.buffer.isReadOnly = true;
         } else {
             view.ApplyLargeFileDisplayMode();
-            view.ApplyLanguageForPath(target, languages_);
+            view.ApplyLanguageForPath(target, languages_, styles_);
         }
     }
     return true;
@@ -402,7 +402,7 @@ SaveOutcome DocumentManager::SaveAs(edit::Document& document, const std::wstring
     RefreshIdentity(document);
     if (pathChanged) {
         // 扩展名可能变了，重新按新路径识别语言
-        document.view->ApplyLanguageForPath(target, languages_);
+        document.view->ApplyLanguageForPath(target, languages_, styles_);
     }
     outcome.ok = true;
     return outcome;

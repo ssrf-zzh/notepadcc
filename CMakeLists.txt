@@ -133,6 +133,7 @@ set(NPCC_CORE_SOURCES
     src/edit/EditView.cpp
     src/edit/Encoding.cpp
     src/edit/LanguageRegistry.cpp
+    src/edit/StyleScheme.cpp
     src/edit/TextTools.cpp
     src/infra/Log.cpp
     src/infra/Paths.cpp
@@ -162,6 +163,7 @@ set(NPCC_CORE_SOURCES
     src/shell/ColumnDialog.cpp
     src/shell/PreferencesDialog.cpp
     src/shell/ShortcutDialog.cpp
+    src/shell/StyleConfigDialog.cpp
     src/shell/SearchPanel.cpp
     src/shell/StatusBar.cpp
     src/shell/TabBar.cpp)

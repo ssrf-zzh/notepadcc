@@ -74,6 +74,7 @@ constexpr int kExtraColour = 0x266B9E;      // 次要项：蓝
 //   sql       : COMMENTLINE=2 COMMENT=1 WORD=5 NUMBER=4 CHARACTER=7
 //   powershell: COMMENT=1 COMMENTSTREAM=13 KEYWORD=8 NUMBER=4 STRING=2 VARIABLE=5 CMDLET=9
 //   batch     : COMMENT=1 WORD=2
+//               （批处理的"命令"是另一个样式号 5，所以 extra 指到它）
 //   props     : COMMENT=1 SECTION=2 KEY=5 DEFVAL=4
 const SyntaxStyleMap kSyntaxMaps[] = {
     {"cpp", 2, 1, 5, 4, 6, 9, 7},
@@ -85,7 +86,7 @@ const SyntaxStyleMap kSyntaxMaps[] = {
     {"markdown", -1, -1, 6, -1, 19, 2, 18},
     {"sql", 2, 1, 5, 4, 7, -1, -1},
     {"powershell", 1, 13, 8, 4, 2, 5, 9},
-    {"batch", 1, -1, 2, -1, -1, -1, -1},
+    {"batch", 1, -1, 2, -1, -1, -1, 5},
     {"props", 1, -1, 2, -1, -1, 5, 4},
 };
 
@@ -746,51 +747,72 @@ void EditView::SetTabWidth(int32_t width, bool useTabs) const {
     Send(SCI_SETUSETABS, useTabs ? 1u : 0u);
 }
 
-void EditView::ApplySyntaxColours(const char* lexerName) const {
-    const SyntaxStyleMap* map = FindSyntaxMap(lexerName);
+void EditView::ApplySchemeDefaults(const StyleScheme& scheme) const {
+    Send(SCI_STYLESETFORE, STYLE_DEFAULT, static_cast<intptr_t>(scheme.Fore()));
+    Send(SCI_STYLESETBACK, STYLE_DEFAULT, static_cast<intptr_t>(scheme.Back()));
+    // 字体名是 ASCII（方案文件里也是手写的），窄字符转换在这里是安全的
+    std::string face;
+    for (const wchar_t ch : scheme.FontFace()) {
+        face.push_back(ch < 0x80 ? static_cast<char>(ch) : '?');
+    }
+    if (face.empty()) {
+        face = "Consolas";
+    }
+    // SetDefaultFont 会 STYLECLEARALL：把默认扩到所有样式。所以必须在设角色色**之前**调用，
+    // 否则会把刚设好的角色色又抹平。
+    SetDefaultFont(face.c_str(), scheme.FontSize());
+}
+
+void EditView::ApplySyntaxColours(const LanguageDef& language, const StyleScheme& scheme) const {
+    const SyntaxStyleMap* map = FindSyntaxMap(language.lexer.c_str());
     if (map == nullptr) {
         return;   // 没有配色表的语言用默认色，不强求
     }
-    struct Entry {
-        int  style;
-        int  colour;
-        bool bold;
-        bool italic;
+    struct Slot {
+        int        style;
+        StyleRole  role;
     };
-    const Entry entries[] = {
-        {map->commentLine, kCommentColour, false, true},
-        {map->commentBlock, kCommentColour, false, true},
-        {map->keyword, kKeywordColour, true, false},
-        {map->number, kNumberColour, false, false},
-        {map->string, kStringColour, false, false},
-        {map->highlight, kHighlightColour, false, false},
-        {map->extra, kExtraColour, false, false},
+    const Slot slots[] = {
+        {map->commentLine, StyleRole::Comment}, {map->commentBlock, StyleRole::Comment},
+        {map->keyword, StyleRole::Keyword},     {map->number, StyleRole::Number},
+        {map->string, StyleRole::String},       {map->highlight, StyleRole::Highlight},
+        {map->extra, StyleRole::Extra},
     };
-    for (const Entry& entry : entries) {
-        if (entry.style < 0) {
+    for (const Slot& slot : slots) {
+        if (slot.style < 0) {
             continue;
         }
-        Send(SCI_STYLESETFORE, static_cast<uintptr_t>(entry.style),
-             static_cast<intptr_t>(entry.colour));
-        if (entry.bold) {
-            Send(SCI_STYLESETBOLD, static_cast<uintptr_t>(entry.style), 1);
-        }
-        if (entry.italic) {
-            Send(SCI_STYLESETITALIC, static_cast<uintptr_t>(entry.style), 1);
-        }
+        const RoleStyle value = scheme.Role(language.languageName, slot.role);
+        Send(SCI_STYLESETFORE, static_cast<uintptr_t>(slot.style),
+             static_cast<intptr_t>(value.fore));
+        Send(SCI_STYLESETBOLD, static_cast<uintptr_t>(slot.style), value.bold ? 1 : 0);
+        Send(SCI_STYLESETITALIC, static_cast<uintptr_t>(slot.style), value.italic ? 1 : 0);
     }
 }
 
-void EditView::ApplyLanguage(const LanguageDef& language) const {
+void EditView::ApplySyntaxColours(const char* lexerName) const {
+    // 兼容路径：只有 lexer 名、没有语言定义，用内置默认配色
+    const StyleScheme scheme = StyleScheme::Defaults();
+    LanguageDef placeholder;
+    placeholder.lexer = lexerName != nullptr ? lexerName : "";
+    ApplySyntaxColours(placeholder, scheme);
+}
+
+void EditView::ApplyLanguage(const LanguageDef& language, const StyleScheme* scheme) const {
     languageName_ = language.displayName.c_str();
     languageKey_ = language.languageName;
+    const StyleScheme& active = scheme != nullptr ? *scheme : StyleScheme::Defaults();
+    ApplySchemeDefaults(active);
     Scintilla::ILexer5* lexer = CreateLexer(language.lexer.c_str());
     Send(SCI_SETILEXER, 0, reinterpret_cast<intptr_t>(lexer));
-    for (std::size_t group = 0; group < language.keywords.size(); ++group) {
-        if (language.keywords[group].empty()) {
-            continue;
-        }
-        Send(SCI_SETKEYWORDS, group, reinterpret_cast<intptr_t>(language.keywords[group].c_str()));
+    // 每一个组都要显式设一次：词法器的关键词表是"粘在控件上"的，新语言没定义的组
+    // 如果跳过不设，就会**留着上一个语言的词表**——切换文件之后会出现"这批处理里
+    // 的 set 被当成了 SQL 关键字"这种莫名其妙的着色。
+    for (std::size_t group = 0; group < 9; ++group) {
+        const char* words = group < language.keywords.size() && !language.keywords[group].empty()
+                                ? language.keywords[group].c_str()
+                                : "";
+        Send(SCI_SETKEYWORDS, group, reinterpret_cast<intptr_t>(words));
     }
     if (language.foldable) {
         // 折叠层级是 lexer 自己算的，但要不要算得先告诉它。
@@ -810,22 +832,24 @@ void EditView::ApplyLanguage(const LanguageDef& language) const {
         }
     }
     SetFoldingEnabled(language.foldable);
-    ApplySyntaxColours(language.lexer.c_str());
+    ApplySyntaxColours(language, active);
     // 语言切换后需要整体重新着色
     Send(SCI_COLOURISE, 0, -1);
 }
 
 void EditView::ApplyLanguageForPath(const std::wstring& filePath,
-                                    const LanguageRegistry* registry) const {
+                                    const LanguageRegistry* registry,
+                                    const StyleScheme* scheme) const {
     const std::string extension = LanguageRegistry::ExtensionOfFile(filePath);
     const LanguageRegistry* source = registry != nullptr ? registry : &FallbackRegistry();
     if (const LanguageDef* language = source->FindByExtension(extension); language != nullptr) {
-        ApplyLanguage(*language);
+        ApplyLanguage(*language, scheme);
         return;
     }
     // 没有匹配的语言：退回纯文本
     languageName_ = L"纯文本";
     languageKey_ = L"null";
+    ApplySchemeDefaults(scheme != nullptr ? *scheme : StyleScheme::Defaults());
     Scintilla::ILexer5* plain = CreateLexer("null");
     Send(SCI_SETILEXER, 0, reinterpret_cast<intptr_t>(plain));
     SetFoldingEnabled(false);

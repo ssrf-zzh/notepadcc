@@ -126,6 +126,7 @@ CMD_TOOL_BASE64_DECODE = (14 << 12) | 24
 CMD_TOOL_TOGGLE_COMMENT = (14 << 12) | 27
 CMD_TOOL_BLOCK_COMMENT = (14 << 12) | 28
 CMD_TOOL_EXPORT_LANGS = (14 << 12) | 29
+CMD_TOOL_STYLE_CONFIG = (14 << 12) | 30
 
 COLUMN_TEMPLATE_EDIT = 751
 COLUMN_INSERT_BUTTON = 758
@@ -153,6 +154,7 @@ SCI_GETLINECOUNT = 2154
 SCI_VISIBLEFROMDOCLINE = 2220
 SCI_GETFOLDLEVEL = 2223
 SCI_GETFOLDEXPANDED = 2230
+SCI_STYLEGETFORE = 2481
 SC_FOLDLEVELHEADERFLAG = 0x2000
 SCI_GETFIRSTVISIBLELINE = 2152
 SCI_GETMODIFY = 2159
@@ -927,6 +929,117 @@ def appdata_snapshot():
         for name in names:
             found.append(os.path.relpath(os.path.join(base, name), target))
     return sorted(found)
+
+
+def test_style_scheme(root):
+    """样式方案：配色能按语言调、能落盘、改完重启真的改变渲染。
+
+    最后一步是这一段的关键：手写一份 stylers.xml 把 cpp 的注释色调成 #FF00FF，
+    重启后直接读 Scintilla 里注释样式的实际前景色来核对。只测"文件写出来了"是不够的，
+    配色的意义在于屏幕上看得见。
+    """
+    work = os.path.join(root, "build", "styles_test")
+    os.makedirs(work, exist_ok=True)
+    path = os.path.join(work, "sample.cpp")
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write("// 注释\nint a = 1;\n")
+
+    cfg = os.path.join(root, "build", "bin", "config")
+    styles = os.path.join(cfg, "stylers.xml")
+    langs = os.path.join(cfg, "langs.xml")
+    for name in ("config.xml", "session.xml", "stylers.xml", "langs.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - sample.cpp")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到可见的编辑控件")
+            return False
+        # cpp 的行注释是样式 2（Lexilla 的 SCE_C_COMMENTLINE）
+        if user32.SendMessageW(scinti, SCI_STYLEGETFORE, 2, 0) != 0x2E7D32:
+            print(f"  FAIL: 默认注释色应当是内置的绿 #2E7D32，实际 "
+                  f"0x{user32.SendMessageW(scinti, SCI_STYLEGETFORE, 2, 0):06X}")
+            return False
+
+        # 打开样式配置器，直接点确定（不改颜色）：核对对话框能起来、确定能落盘
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_STYLE_CONFIG, 0)
+        time.sleep(1.0)
+        dialog = user32.FindWindowW("notepadccStyleConfig", None)
+        if not dialog:
+            print("  FAIL: 样式配置器没有出现")
+            return False
+        if window_text(dialog) != "样式配置器":
+            print(f"  FAIL: 对话框标题不对 {window_text(dialog)!r}")
+            return False
+        user32.PostMessageW(dialog, WM_COMMAND, 1271, 0)   # 确定
+        deadline = time.time() + 5
+        while time.time() < deadline and user32.FindWindowW("notepadccStyleConfig", None):
+            time.sleep(0.2)
+        if user32.FindWindowW("notepadccStyleConfig", None):
+            print("  FAIL: 点确定之后样式配置器没有关闭")
+            return False
+        time.sleep(0.5)
+        if not os.path.exists(styles):
+            print(f"  FAIL: 确定之后没有写出 {styles}")
+            return False
+        with open(styles, "r", encoding="utf-8", errors="replace") as handle:
+            saved = handle.read()
+        if '<Style role="comment"' not in saved:
+            print(f"  FAIL: stylers.xml 里没有注释角色的条目\n{saved[:300]}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    # 手写一份配色 → 重启 → 直接读渲染用的样式色
+    custom = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<NotepadccStyles schemaVersion="1">\n'
+        '  <Language name="cpp">\n'
+        '    <Style role="comment" fore="#FF00FF" bold="yes" italic="no"/>\n'
+        '  </Language>\n'
+        '</NotepadccStyles>\n'
+    )
+    with open(styles, "w", encoding="utf-8", newline="") as handle:
+        handle.write(custom)
+
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - sample.cpp")
+    try:
+        if not window:
+            print("  FAIL: 改完配色之后重启找不到窗口")
+            return False
+        scinti = visible_scintilla(window)
+        actual = user32.SendMessageW(scinti, SCI_STYLEGETFORE, 2, 0)
+        if actual != 0xFF00FF:
+            print(f"  FAIL: 自定义配色应当生效（注释色 #FF00FF），实际 0x{actual:06X}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        for name in ("config.xml", "session.xml", "stylers.xml", "langs.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    print("  样式方案：配置器能起来并落盘、手写配色重启后真的改变了注释色")
+    return True
 
 
 def test_language_defs(root):
@@ -2493,6 +2606,8 @@ def run():
         failed = True
     if not test_language_defs(root):
         failed = True
+    if not test_style_scheme(root):
+        failed = True
     if not test_associated_commands(root):
         failed = True
     if not test_portable_package(root):
@@ -2503,7 +2618,7 @@ def run():
         return 1
     print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + "
           "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + "
-          "编码转换 + 单实例 + 工具菜单 + 语言定义 + 文件关联 + 绿色打包）")
+          "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + 文件关联 + 绿色打包）")
     return 0
 
 

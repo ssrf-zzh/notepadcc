@@ -26,6 +26,7 @@
 #include "shell/ColumnDialog.h"
 #include "shell/PreferencesDialog.h"
 #include "shell/ShortcutDialog.h"
+#include "shell/StyleConfigDialog.h"
 #include "core/ShortcutStore.h"
 #include "infra/SingleInstance.h"
 #include "infra/FileAssociation.h"
@@ -123,6 +124,7 @@ enum : npcc::core::CmdId {
     kCmdToolToggleComment   = npcc::core::MakeCmdId(14, 27),
     kCmdToolBlockComment    = npcc::core::MakeCmdId(14, 28),
     kCmdToolExportLanguages = npcc::core::MakeCmdId(14, 29),
+    kCmdToolStyleConfigurator = npcc::core::MakeCmdId(14, 30),
 
     kCmdWindowNext = npcc::core::MakeCmdId(11, 1),
     kCmdWindowPrev = npcc::core::MakeCmdId(11, 2),
@@ -251,6 +253,11 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
                 infra::LogWarn(L"langs", L"语言定义加载失败，改用内置表: " + languageError);
             }
             documents_->SetLanguages(&languages_);
+            std::wstring styleError;
+            if (!styles_.Load(&styleError)) {
+                infra::LogWarn(L"styles", L"样式方案加载失败，改用默认配色: " + styleError);
+            }
+            documents_->SetStyles(&styles_);
             ApplyConfigToRuntime();
             crossSearch_ = std::make_unique<search::CrossFileSearch>();
             crossReplace_ = std::make_unique<search::CrossFileReplace>();
@@ -910,6 +917,9 @@ void MainWindow::RegisterCommands() {
     add(kCmdToolExportLanguages, CmdCategory::Tools, L"cmd.tool.exportLanguages",
         L"导出语言定义到配置目录", core::kCmdNone,
         [this](const CmdContext&) { CommandExportLanguageDefs(); });
+    add(kCmdToolStyleConfigurator, CmdCategory::Tools, L"cmd.tool.styleConfigurator",
+        L"样式配置器（配色）(&S)...", core::kCmdNone,
+        [this](const CmdContext&) { CommandStyleConfigurator(); });
 
     // ---- 窗口 ----
     add(kCmdWindowNext, CmdCategory::Window, L"cmd.window.next", L"下一个标签(&N)",
@@ -2759,6 +2769,37 @@ void MainWindow::CommandToggleComment(bool block) {
         L"注释/取消注释");
 }
 
+void MainWindow::ApplyStyleSchemeToAllViews() {
+    if (documents_ == nullptr) {
+        return;
+    }
+    for (edit::Document* document : documents_->All()) {
+        if (document == nullptr || document->view == nullptr) {
+            continue;
+        }
+        document->view->ApplyLanguageForPath(document->buffer.filePath, &languages_, &styles_);
+    }
+    // 克隆视图是独立的 Scintilla 控件，也得重新上色
+    if (edit::EditView* clone = SecondaryView(); clone != nullptr && clone->Valid()) {
+        if (edit::Document* active = documents_->Active(); active != nullptr) {
+            clone->ApplyLanguageForPath(active->buffer.filePath, &languages_, &styles_);
+        }
+    }
+}
+
+void MainWindow::CommandStyleConfigurator() {
+    if (!ShowStyleConfigurator(hwnd_, languages_, styles_)) {
+        return;   // 取消：什么都不动
+    }
+    ApplyStyleSchemeToAllViews();
+    std::wstring error;
+    if (!styles_.Save(&error)) {
+        infra::LogWarn(L"styles", L"样式方案保存失败: " + error);
+        ::MessageBoxW(hwnd_, (L"配色已应用，但写入 stylers.xml 失败：\n" + error).c_str(),
+                      L"保存样式方案失败", MB_ICONWARNING);
+    }
+}
+
 void MainWindow::CommandExportLanguageDefs() {
     const std::filesystem::path path = edit::LanguageRegistry::Path();
     const bool exists = ::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
@@ -2972,7 +3013,7 @@ void MainWindow::SyncSplitView() {
     // 克隆视图是独立的 Scintilla 控件：显示开关、字号缩放、语法着色都得再来一遍，
     // 否则它会用一份默认样式显示同一份文档，看起来像另一个程序。
     ApplyEditConfigToView(*clone);
-    clone->ApplyLanguageForPath(document->buffer.filePath, &languages_);
+    clone->ApplyLanguageForPath(document->buffer.filePath, &languages_, &styles_);
     clone->SetFirstVisibleLine(document->view->FirstVisibleLine());
 }
 

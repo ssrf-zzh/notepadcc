@@ -11,6 +11,7 @@
 #include "edit/Document.h"
 #include "edit/FileTier.h"
 #include "edit/LanguageRegistry.h"
+#include "edit/StyleScheme.h"
 
 namespace npcc::core {
 
@@ -51,6 +52,8 @@ public:
     // 语言定义（可被用户的 langs.xml 覆盖）。为空时用内置表。
     // 只持有指针：语言表的生命周期由外壳负责。
     void SetLanguages(const edit::LanguageRegistry* languages) noexcept { languages_ = languages; }
+    // 样式方案（用户可调的配色）。为空时用内置默认配色。
+    void SetStyles(const edit::StyleScheme* styles) noexcept { styles_ = styles; }
 
     DocumentManager(const DocumentManager&) = delete;
     DocumentManager& operator=(const DocumentManager&) = delete;
@@ -132,6 +135,7 @@ private:
     edit::EolMode                            newFileEol_ = edit::EolMode::Crlf;
     std::uint32_t                            newFileCodePage_ = 936;
     const edit::LanguageRegistry*            languages_ = nullptr;
+    const edit::StyleScheme*                 styles_ = nullptr;
 };
 
 }  // namespace npcc::core

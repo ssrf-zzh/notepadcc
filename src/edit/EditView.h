@@ -10,6 +10,7 @@
 
 #include "edit/Encoding.h"
 #include "edit/LanguageRegistry.h"
+#include "edit/StyleScheme.h"
 
 namespace npcc::edit {
 
@@ -102,9 +103,11 @@ public:
     // ---- 词法着色：按扩展名套用内置语言表（M1 会替换为 lang/ 模块的语言定义加载器） ----
     // 按扩展名套用语言。registry 为空时用内置语言表（单元测试与老调用点走这条路）。
     void ApplyLanguageForPath(const std::wstring& filePath,
-                              const LanguageRegistry* registry = nullptr) const;
+                              const LanguageRegistry* registry = nullptr,
+                              const StyleScheme* scheme = nullptr) const;
     // 直接按语言定义套用（应用侧走这条：定义来自用户可编辑的 langs.xml）
-    void ApplyLanguage(const LanguageDef& language) const;
+    // scheme 为空时用内置默认配色
+    void ApplyLanguage(const LanguageDef& language, const StyleScheme* scheme = nullptr) const;
     const std::wstring& LanguageName() const noexcept { return languageKey_; }
     const wchar_t* CurrentLanguageName() const noexcept { return languageName_; }
 
@@ -232,6 +235,9 @@ public:
     // 按 lexer 名套上默认配色。样式号取自 Lexilla 的 SCE_* 定义，
     // 是"让颜色真的看得见"的那一步（词法器本身只标样式号，不设颜色）。
     void ApplySyntaxColours(const char* lexerName) const;
+    void ApplySyntaxColours(const LanguageDef& language, const StyleScheme& scheme) const;
+    // 套用方案里的前景/背景/字体/字号（会先把默认样式扩散到全部样式）
+    void ApplySchemeDefaults(const StyleScheme& scheme) const;
 
     // 行尾转换：既改"以后新输入用什么行尾"，也把现有行尾一次性换掉
     void ConvertLineEndings(EolMode eol) const;
