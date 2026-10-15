@@ -15,6 +15,7 @@
 #include "core/SessionManager.h"
 #include "core/ShortcutStore.h"
 #include "core/SnapshotStore.h"
+#include "infra/SingleInstance.h"
 #include "edit/DocBuffer.h"
 #include "edit/ColumnEdit.h"
 #include "edit/ColumnText.h"
@@ -2504,6 +2505,25 @@ int main() {
     // ---------------------------------------------------------------- 编码转换
     // 转换是不可逆的高风险操作，逻辑必须能单独测：能不能转、转出来的字节对不对、
     // 表示不了的字符有没有被**发现**（而不是静默变成 '?'）。
+    // ---------------------------------------------------------------- 单实例交接
+    // 两个进程之间的交接只能靠一段自定格式的字节流，所以至少把打包/解析单独测了：
+    // 路径里有空格、中文、反斜杠都不能出错。
+    Section("单实例交接（路径打包与解析）");
+    {
+        const std::vector<std::wstring> paths = {
+            L"D:\\工程 目录\\含 空格 的文件.txt",
+            L"C:\\a.cpp",
+            L"\\\\server\\share\\x.md",
+        };
+        const std::string packed = npcc::infra::PackPaths(paths);
+        const std::vector<std::wstring> unpacked = npcc::infra::UnpackPaths(packed);
+        Check(unpacked.size() == paths.size(), "路径条数往返一致");
+        Check(unpacked == paths, "路径内容逐条往返一致（空格、中文、UNC 都不出错）");
+        Check(npcc::infra::UnpackPaths("").empty(), "空载荷解析出空列表");
+        Check(npcc::infra::UnpackPaths(std::string("\0\0", 2)).empty(), "只有收尾符也算空");
+        Check(npcc::infra::PackPaths({}).size() >= sizeof(wchar_t), "空列表也有收尾符");
+    }
+
     Section("编码转换（转为 ANSI / UTF-8 / UTF-16）");
     {
         using npcc::edit::ConvertResult;

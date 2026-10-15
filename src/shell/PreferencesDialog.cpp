@@ -24,6 +24,7 @@ enum PrefControl : int {
     // 常规
     kPrefRestoreSession = 1001,
     kPrefRecentCount    = 1002,
+    kPrefMultiInstance  = 1003,
 
     // 编辑
     kPrefTabWidth        = 1010,
@@ -188,6 +189,8 @@ HWND PreferencesDialog::Combo(int id, const wchar_t* const* items, int count) {
 void PreferencesDialog::BuildGeneralPage() {
     const int page = 0;
     Row(page, nullptr, Check(kPrefRestoreSession, L"启动时恢复上次打开的会话"));
+    Row(page, nullptr,
+        Check(kPrefMultiInstance, L"允许同时运行多个实例（默认关闭：再启动会把文件交给已在跑的实例）"));
     Row(page, Label(L"最近文件条数（0~100）："), Edit(kPrefRecentCount, L"20"), Scale(90));
 }
 
@@ -385,6 +388,7 @@ void PreferencesDialog::LoadFromConfig() {
     const core::ConfigCenter& config = *config_;
 
     SetChecked(kPrefRestoreSession, config.General().restoreSessionOnStart);
+    SetChecked(kPrefMultiInstance, config.General().multiInstance);
     SetInt(kPrefRecentCount, static_cast<int>(config.General().recentFileCount));
 
     const core::EditConfig& edit = config.Edit();
@@ -490,6 +494,7 @@ bool PreferencesDialog::StoreToConfig(std::wstring& error, int& badControlId) {
     }
 
     config.General().restoreSessionOnStart = IsChecked(kPrefRestoreSession);
+    config.General().multiInstance = IsChecked(kPrefMultiInstance);
     config.General().recentFileCount = recentCount;
 
     core::EditConfig& edit = config.Edit();

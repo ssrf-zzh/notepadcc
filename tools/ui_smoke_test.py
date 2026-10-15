@@ -189,6 +189,20 @@ def visible_scintilla(main_window):
     return None
 
 
+def main_windows():
+    """当前所有可见的主窗口（单实例测试要数窗口个数）。"""
+    found = []
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def callback(hwnd, _):
+        if user32.IsWindowVisible(hwnd) and class_name(hwnd) == "notepadccMainWindow":
+            found.append(hwnd)
+        return True
+
+    user32.EnumWindows(callback_type(callback), 0)
+    return found
+
+
 def wait_until_equal(reader, first, second, timeout=4.0):
     """等两个视图的同一个读数收敛到一致。
 
@@ -825,6 +839,80 @@ def test_folding(root):
                 os.remove(target)
 
     print("  代码折叠：边距与层级正确、折叠/展开命令生效、折叠状态随会话恢复")
+    return True
+
+
+def test_single_instance(root):
+    """单实例：第二个实例把文件交给已在跑的那个，然后自己退出。
+
+    核对的是"窗口个数"与"标题"——只看第二个进程退没退，不足以说明文件真的交到了对方手里。
+    """
+    work = os.path.join(root, "build", "instance_test")
+    os.makedirs(work, exist_ok=True)
+    first = os.path.join(work, "first.txt")
+    second = os.path.join(work, "second.txt")
+    for target, text in ((first, "first file\n"), (second, "second file\n")):
+        with open(target, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+
+    cfg = os.path.join(root, "build", "bin", "config")
+    for name in ("config.xml", "session.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    primary = subprocess.Popen([exe, "-portable", first], cwd=root)
+    handoff = None
+    extra = None
+    try:
+        window = wait_for_main_window("notepadcc - first.txt")
+        if not window:
+            print("  FAIL: 第一个实例没起来")
+            return False
+
+        handoff = subprocess.Popen([exe, "-portable", second], cwd=root)
+        deadline = time.time() + 25
+        while time.time() < deadline and handoff.poll() is None:
+            time.sleep(0.3)
+        if handoff.poll() is None:
+            print("  FAIL: 第二个实例应当转交文件后自己退出，但它还活着")
+            return False
+        if handoff.poll() != 0:
+            print(f"  FAIL: 第二个实例的退出码应当是 0，实际 {handoff.poll()}")
+            return False
+        if not wait_for_main_window("notepadcc - second.txt", timeout=15.0):
+            print("  FAIL: 第一个实例没有打开转交过来的文件")
+            return False
+        if len(main_windows()) != 1:
+            print(f"  FAIL: 单实例模式下应当只有 1 个主窗口，实际 {len(main_windows())}")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None or "second file" not in scinti_text(scinti):
+            print("  FAIL: 转交过来的文件内容没有显示出来")
+            return False
+
+        extra = subprocess.Popen([exe, "-portable", "--multi-instance", first], cwd=root)
+        deadline = time.time() + 25
+        while time.time() < deadline and len(main_windows()) < 2:
+            time.sleep(0.3)
+        if len(main_windows()) != 2:
+            print(f"  FAIL: 允许多开时应当有 2 个主窗口，实际 {len(main_windows())}")
+            return False
+    finally:
+        for child in main_windows():
+            user32.PostMessageW(child, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+        time.sleep(2)
+        for child in (primary, handoff, extra):
+            if child is not None and child.poll() is None:
+                child.kill()
+        for name in ("config.xml", "session.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    print("  单实例：第二个实例转交文件后退出、只有一个窗口；--multi-instance 时各开各的")
     return True
 
 
@@ -1916,12 +2004,15 @@ def run():
         failed = True
     if not test_encoding_convert(root):
         failed = True
+    if not test_single_instance(root):
+        failed = True
 
     if failed:
         print("FAIL: 界面回归未通过")
         return 1
     print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + "
-          "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + 编码转换）")
+          "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + "
+          "编码转换 + 单实例）")
     return 0
 
 

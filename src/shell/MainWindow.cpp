@@ -24,6 +24,7 @@
 #include "shell/PreferencesDialog.h"
 #include "shell/ShortcutDialog.h"
 #include "core/ShortcutStore.h"
+#include "infra/SingleInstance.h"
 
 namespace npcc::shell {
 namespace {
@@ -234,6 +235,8 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             RebuildAccelerators();
 
             ::DragAcceptFiles(hwnd_, TRUE);
+            // 单实例交接：告诉它文件该往哪儿送（可能已经有排队的了）
+            infra::SetSingleInstanceTarget(hwnd_);
             // 优先恢复上次会话；没有可用会话时才给一个空白文档
             if (!RestoreSession()) {
                 EnsureAtLeastOneDocument();
@@ -413,6 +416,37 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         case core::kMsgStartupRecovery:
             CheckStartupRecovery();
+            return 0;
+        case core::kMsgOpenFiles: {
+            // 别的实例把文件交过来了（或者刚启动时被双击了文件）
+            const std::vector<std::wstring> pending = infra::TakePendingFiles();
+            for (const std::wstring& path : pending) {
+                const core::OpenOutcome outcome = documents_->Open(path);
+                if (outcome.status != core::OpenStatus::Ok &&
+                    outcome.status != core::OpenStatus::AlreadyOpen) {
+                    infra::LogWarn(L"file", L"打开失败: " + path + L" / " + outcome.message);
+                    ::MessageBoxW(hwnd_, outcome.message.c_str(), L"打开文件失败", MB_ICONWARNING);
+                    continue;
+                }
+                lastDirectory_ = core::DocumentManager::DirectoryOf(path);
+            }
+            SyncTabBar();
+            if (edit::Document* document = documents_->Active(); document != nullptr) {
+                ActivateDocument(document->buffer.id);
+            }
+            // 用户刚双击了一个文件，把窗口提到前面来
+            if (::IsIconic(hwnd_) != 0) {
+                ::ShowWindow(hwnd_, SW_RESTORE);
+            }
+            ::SetForegroundWindow(hwnd_);
+            return 0;
+        }
+        case core::kMsgAppActivate:
+            // 另一个实例只是又一次被启动（没带文件）：把本窗口提到前面
+            if (::IsIconic(hwnd_) != 0) {
+                ::ShowWindow(hwnd_, SW_RESTORE);
+            }
+            ::SetForegroundWindow(hwnd_);
             return 0;
         case WM_TIMER:
             if (wParam == kTimerAutosave) {

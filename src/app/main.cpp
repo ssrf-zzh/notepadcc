@@ -10,6 +10,8 @@
 #include "infra/CrashGuard.h"
 #include "infra/Log.h"
 #include "infra/Paths.h"
+#include "infra/SingleInstance.h"
+#include "core/ConfigCenter.h"
 #include "shell/MainWindow.h"
 
 namespace {
@@ -17,6 +19,8 @@ namespace {
 struct StartupOptions {
     bool                      portable = false;
     bool                      crashTest = false;   // 自检开关：故意崩一次，验证崩溃处理
+    bool                      multiInstance = false;   // 命令行强制多开（覆盖配置）
+    bool                      multiInstanceSet = false;
     std::vector<std::wstring> filesToOpen;
 };
 
@@ -35,6 +39,11 @@ StartupOptions ParseCommandLine() {
         }
         if (argument == L"--crash-test") {
             options.crashTest = true;
+            continue;
+        }
+        if (argument == L"--multi-instance") {
+            options.multiInstance = true;
+            options.multiInstanceSet = true;
             continue;
         }
         if (!argument.empty() && argument[0] == L'-') {
@@ -58,6 +67,23 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     // 越早安装越好：窗口还没建起来时崩了，同样要留下崩溃报告与转储
     npcc::infra::crashguard::Install(npcc::infra::BackupDir().wstring().c_str());
     npcc::infra::LogInfo(L"app", L"notepadcc 启动");
+
+    // 单实例判定必须在建窗口之前：晚一步就可能出现"两个窗口同时起来"。
+    // 配置要读一次才知道用户选的是单开还是多开——这里单独加载一份配置，
+    // 只取这一个开关；主窗口那边还会再加载一次（文件很小，读两遍没有负担）。
+    bool multiInstance = options.multiInstance;
+    if (!options.multiInstanceSet) {
+        npcc::core::ConfigCenter early;
+        early.Load(nullptr);
+        multiInstance = early.General().multiInstance;
+    }
+    if (!npcc::infra::ClaimSingleInstance(npcc::shell::MainWindow::kClassName, options.filesToOpen,
+                                          multiInstance)) {
+        // 参数已经交给已在跑的那个实例了，本进程的活干完了
+        npcc::infra::LogInfo(L"app", L"已有实例在运行，本次启动只做文件转交");
+        npcc::infra::ShutdownLogging();
+        return 0;
+    }
 
     ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
