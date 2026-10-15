@@ -12,6 +12,23 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# 产物必须自带 C 运行库：便携版要求"解压即用"，不能依赖 VC++ 可再发行组件。
+# MinGW 侧由 -static 达成，MSVC 侧用 /MT。
+if (MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
+# 统一输出到 bin/。多配置生成器（Visual Studio）默认会追加 Release/ 之类的子目录，
+# 这里显式抹平，让 MSVC 与 MinGW 的产物路径一致，脚本与文档都不必分叉。
+function(npcc_flat_output target)
+    set_target_properties(${target} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    foreach(config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+        set_target_properties(${target} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY_${config} "${CMAKE_BINARY_DIR}/bin")
+    endforeach()
+endfunction()
+
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
@@ -117,6 +134,11 @@ target_link_libraries(notepadcc PRIVATE notepadcc_core npcc_app_options)
 
 if (CMAKE_RC_COMPILER_LOADED)
     target_sources(notepadcc PRIVATE res/notepadcc.rc)
+    if (MSVC)
+        # 清单由 res/notepadcc.rc 嵌入（DPI 感知 / 控件 v6 / 长路径）。
+        # MSVC 链接器默认还会自己生成一份 ID=1 的清单，两份同 ID 会触发 CVT1100。
+        target_link_options(notepadcc PRIVATE /MANIFEST:NO)
+    endif()
 else()
     message(WARNING "未找到资源编译器（windres / rc.exe），本次构建将不含图标与清单")
 endif()
@@ -126,21 +148,19 @@ if (MINGW)
     target_link_options(notepadcc PRIVATE -municode -mwindows)
 endif()
 
-# 输出目录统一，便于打包与运行
-set_target_properties(notepadcc PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
-    OUTPUT_NAME "notepadcc")
+set_target_properties(notepadcc PROPERTIES OUTPUT_NAME "notepadcc")
+npcc_flat_output(notepadcc)
 
 # ---------------------------------------------------------------- 单元测试
 option(NPCC_BUILD_TESTS "构建单元测试" ON)
 if (NPCC_BUILD_TESTS)
     add_executable(notepadcc_tests tests/unit/test_main.cpp)
     target_link_libraries(notepadcc_tests PRIVATE notepadcc_core npcc_app_options)
-    set_target_properties(notepadcc_tests PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    npcc_flat_output(notepadcc_tests)
 endif()
 
 message(STATUS "notepadcc 配置完成")
 message(STATUS "  Scintilla : ${NPCC_SCINTILLA}")
 message(STATUS "  Lexilla   : ${NPCC_LEXILLA}")
 message(STATUS "  编译器    : ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+message(STATUS "  生成器    : ${CMAKE_GENERATOR}")

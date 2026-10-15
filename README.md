@@ -21,14 +21,15 @@
 | 原子写盘（临时文件 + ReplaceFile，失败不动原文件） | 已完成 |
 | 命令行传入文件、拖放打开、便携模式 | 已完成 |
 | 单元测试（52 项检查） | 已完成 |
+| 双工具链构建 | MinGW-w64 与 MSVC 均构建通过，各自 52 项单元测试全绿、GUI 冒烟通过 |
 | 多标签、会话、查找替换、列编辑、大文件分档 | 未开始（M1） |
 
 ## 环境要求
 
 - CMake ≥ 3.25、Ninja
 - 下列任一编译器：
-  - **MinGW-w64 GCC 13+**（当前开发机使用 16.2.0，免管理员安装）
-  - **MSVC v143**（Visual Studio 2022，正式发布用）
+  - **MinGW-w64 GCC 13+**（本机已装 16.2.0，免管理员取得）
+  - **MSVC v143**（本机已装 Visual Studio 2022 Build Tools 17.14，MSVC 14.44 + Windows SDK 10.0.26100）
 - 第三方源码（Scintilla / Lexilla）不入库，首次构建前拉取
 
 免管理员的工具链获取方式（本机已装好，仅供换机参考）：
@@ -48,12 +49,25 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-若使用 MSVC，把编译器换成原生工具链即可，CMakeLists 对两者都做了适配：
+MSVC（正式发布链）**必须用 Visual Studio 生成器，不要配 Ninja**：
 
 ```powershell
-cmake -S . -B build-msvc -G Ninja -DCMAKE_BUILD_TYPE=Release `
-      -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
-cmake --build build-msvc
+cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64
+cmake --build build-msvc --config Release
+```
+
+这里有一个坑值得记下来，否则会白白踩一次：MSVC 配 Ninja 时，CMake 会把 `/showIncludes`
+的提示前缀写进 `build.ninja`，而中文版 MSVC 的前缀（`注意: 包含文件:`）在写入过程中编码
+错乱（UTF-8 字节被当成 GBK），于是 Ninja 永远匹配不上 cl 的输出，**头文件依赖全部丢失**
+——改一个 `.h` 不会触发任何重编，只有 `--clean-first` 才有效。MSBuild 用自己的 tlog 跟踪
+依赖，不受界面语言影响，所以 MSVC 侧走 VS 生成器。Ninja 留给 MinGW 用，GCC 走的是
+`-MD -MF` 真正的 depfile，没有这个问题。
+
+两个工具链的产物都落在各自的 `bin/` 下，路径一致：
+
+```
+build\bin\notepadcc.exe          # MinGW-w64（7.7 MB，静态链接）
+build-msvc\bin\notepadcc.exe     # MSVC（2.2 MB，/MT 静态 CRT）
 ```
 
 第三方源码需要可编译访问 `www.scintilla.org`。若网络受限，把两个 zip 手动放到

@@ -10,7 +10,7 @@
 | 目标架构 | **x64（Win64）**，仅提供 64 位版本，不规划 Win32/x86 目标 |
 | 编译工具链 | 双轨：MSVC v143（正式发布，`/W4 /permissive-`）＋ MinGW-w64 GCC 13+（本地开发与 CI，`-Wall -Wextra -Wpedantic`）；C++20 |
 | 编辑内核版本 | Scintilla 5.6.7 ＋ Lexilla 5.5.4（随源码固定版本） |
-| 构建系统 | CMake ≥ 3.25 ＋ Ninja |
+| 构建系统 | CMake ≥ 3.25；MinGW 侧用 Ninja，MSVC 侧用 Visual Studio 17 2022 生成器（理由见 ADR-10） |
 | 设计基线 | 《Notepad++功能全景梳理.md》（14 功能域 + P0/P1/P2 分级 + 验收自检清单） |
 | 对标策略 | 全面对标、功能全覆盖，不做功能裁剪 |
 
@@ -52,7 +52,7 @@
 | ADR-07 | 文档与视图 | 一文档多视图，视图只读共享 | 支撑"克隆到另一视图"与未来的多分屏 |
 | ADR-08 | 线程模型 | UI 单线程持有全部编辑控件，重活下沉到线程池 | Scintilla 非线程安全，这是硬约束 |
 | ADR-09 | 产品命名 | **notepadcc**（早期设计代号为 codepad++） | 用户指定；全文、代码标识、配置目录与插件 ABI 前缀已同步更名 |
-| ADR-10 | 编译工具链 | MSVC v143 与 MinGW-w64 GCC 双轨，均以 CMake 驱动 | 开发机未安装 Visual Studio（非管理员无法安装），MinGW-w64 可免管理员取得；代码不使用任一编译器专有扩展，保持两边可编译 |
+| ADR-10 | 编译工具链 | MSVC v143（正式发布）与 MinGW-w64 GCC（本地与 CI）双轨，均以 CMake 驱动；MinGW 用 Ninja，MSVC 用 Visual Studio 生成器 | 代码不使用任一编译器专有扩展，两边均已构建通过（各 52 项单元测试全绿）。MSVC 不用 Ninja 的原因：本地化 MSVC 的 `/showIncludes` 前缀在写入 `build.ninja` 时编码错乱，导致头文件依赖全部丢失、增量构建失效；MSBuild 的 tlog 机制与界面语言无关。MSVC 侧另需 `/MT` 静态 CRT 以满足便携要求 |
 
 **关于 ADR-09 的更名范围**：本次更名是彻底的，不留旧名残留，涉及以下几类实体——
 
