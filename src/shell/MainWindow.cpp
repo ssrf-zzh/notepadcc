@@ -3,26 +3,30 @@
 #include <commdlg.h>
 #include <shellapi.h>
 
+#include <algorithm>
+#include <cstring>
 #include <cwchar>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "infra/Log.h"
-#include "io/AtomicFile.h"
-#include "io/FileReader.h"
 #include "shell/MenuBuilder.h"
+#include "shell/TabBar.h"
 
 namespace npcc::shell {
 namespace {
 
 // 命令 ID：高 4 位类别 + 低 12 位序号（见 core/Ids.h 的 MakeCmdId）
 enum : npcc::core::CmdId {
-    kCmdFileNew    = npcc::core::MakeCmdId(1, 1),
-    kCmdFileOpen   = npcc::core::MakeCmdId(1, 2),
-    kCmdFileSave   = npcc::core::MakeCmdId(1, 3),
-    kCmdFileSaveAs = npcc::core::MakeCmdId(1, 4),
-    kCmdFileExit   = npcc::core::MakeCmdId(1, 5),
+    kCmdFileNew     = npcc::core::MakeCmdId(1, 1),
+    kCmdFileOpen    = npcc::core::MakeCmdId(1, 2),
+    kCmdFileSave    = npcc::core::MakeCmdId(1, 3),
+    kCmdFileSaveAs  = npcc::core::MakeCmdId(1, 4),
+    kCmdFileClose   = npcc::core::MakeCmdId(1, 5),
+    kCmdFileCloseAll= npcc::core::MakeCmdId(1, 6),
+    kCmdFileExit    = npcc::core::MakeCmdId(1, 7),
 
     kCmdEditUndo      = npcc::core::MakeCmdId(2, 1),
     kCmdEditRedo      = npcc::core::MakeCmdId(2, 2),
@@ -39,6 +43,9 @@ enum : npcc::core::CmdId {
     kCmdViewToggleEol     = npcc::core::MakeCmdId(4, 6),
     kCmdViewToggleNumbers = npcc::core::MakeCmdId(4, 7),
 
+    kCmdWindowNext = npcc::core::MakeCmdId(11, 1),
+    kCmdWindowPrev = npcc::core::MakeCmdId(11, 2),
+
     kCmdHelpAbout = npcc::core::MakeCmdId(12, 1),
 
     // Scintilla 原生命令：不新增语义，直接转发
@@ -50,19 +57,32 @@ enum : npcc::core::CmdId {
     kSciPaste     = 2179,
 };
 
-std::wstring FileNameOf(const std::wstring& path) {
-    const size_t slash = path.find_last_of(L"\\/");
-    return slash == std::wstring::npos ? path : path.substr(slash + 1);
-}
-
-std::wstring DirectoryOf(const std::wstring& path) {
-    const size_t slash = path.find_last_of(L"\\/");
-    return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
+void CopyTextToClipboard(HWND owner, const std::wstring& text) {
+    if (text.empty() || ::OpenClipboard(owner) == 0) {
+        return;
+    }
+    ::EmptyClipboard();
+    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    if (HGLOBAL memory = ::GlobalAlloc(GMEM_MOVEABLE, bytes); memory != nullptr) {
+        if (void* target = ::GlobalLock(memory); target != nullptr) {
+            std::memcpy(target, text.c_str(), bytes);
+            ::GlobalUnlock(memory);
+            if (::SetClipboardData(CF_UNICODETEXT, memory) != nullptr) {
+                memory = nullptr;   // 所有权已转移给剪贴板
+            }
+        }
+        if (memory != nullptr) {
+            ::GlobalFree(memory);
+        }
+    }
+    ::CloseClipboard();
 }
 
 }  // namespace
 
 MainWindow::~MainWindow() {
+    tabBar_.Destroy();
+    documents_.reset();
     if (accel_ != nullptr) {
         ::DestroyAcceleratorTable(accel_);
         accel_ = nullptr;
@@ -87,7 +107,7 @@ bool MainWindow::RegisterWindowClass(HINSTANCE instance) const {
     return ::RegisterClassExW(&wc) != 0;
 }
 
-bool MainWindow::Create(HINSTANCE instance, const std::wstring& initialFile) {
+bool MainWindow::Create(HINSTANCE instance, const std::vector<std::wstring>& filesToOpen) {
     instance_ = instance;
     hwnd_ = ::CreateWindowExW(0, kClassName, L"notepadcc", WS_OVERLAPPEDWINDOW,
                               CW_USEDEFAULT, CW_USEDEFAULT, 1100, 720,
@@ -95,9 +115,17 @@ bool MainWindow::Create(HINSTANCE instance, const std::wstring& initialFile) {
     if (hwnd_ == nullptr) {
         return false;
     }
-    if (!initialFile.empty()) {
-        OpenPath(initialFile);
+    for (const std::wstring& path : filesToOpen) {
+        const core::OpenOutcome outcome = documents_->Open(path);
+        if (outcome.status == core::OpenStatus::Ok || outcome.status == core::OpenStatus::AlreadyOpen) {
+            lastDirectory_ = core::DocumentManager::DirectoryOf(path);
+        } else {
+            infra::LogWarn(L"file", L"打开失败: " + path + L" / " + outcome.message);
+            ::MessageBoxW(hwnd_, outcome.message.c_str(), L"打开文件失败", MB_ICONWARNING);
+        }
     }
+    SyncTabBar();
+    ActivateDocument(documents_->Active() != nullptr ? documents_->Active()->buffer.id : 0);
     return true;
 }
 
@@ -118,9 +146,9 @@ LRESULT CALLBACK MainWindow::WndProcThunk(HWND hwnd, UINT message, WPARAM wParam
 LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
         case WM_CREATE: {
-            view_.Create(hwnd_, 1);
-            view_.ApplyLightTheme();
+            tabBar_.Create(hwnd_, 1);
             statusBar_.Create(hwnd_, 2);
+            documents_ = std::make_unique<core::DocumentManager>(hwnd_);
 
             RegisterCommands();
             menu_ = BuildMainMenu(registry_);
@@ -130,17 +158,18 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             RebuildAccelerators();
 
             ::DragAcceptFiles(hwnd_, TRUE);
-            ResetDocument();
-            LayoutChildren();
-            ::SetFocus(view_.Handle());
+            EnsureAtLeastOneDocument();
             return 0;
         }
         case WM_SIZE:
             LayoutChildren();
             return 0;
-        case WM_SETFOCUS:
-            ::SetFocus(view_.Handle());
+        case WM_SETFOCUS: {
+            if (edit::Document* document = documents_->Active(); document != nullptr && document->view) {
+                ::SetFocus(document->view->Handle());
+            }
             return 0;
+        }
         case WM_COMMAND: {
             const auto id = static_cast<core::CmdId>(LOWORD(wParam));
             const core::CmdContext context = Context();
@@ -152,51 +181,52 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         case WM_NOTIFY: {
             const auto* header = reinterpret_cast<const NMHDR*>(lParam);
-            if (header->hwndFrom != view_.Handle()) {
-                break;
+            if (header->hwndFrom == tabBar_.Handle()) {
+                HandleTabBarNotify(*reinterpret_cast<const TabBarNotify*>(lParam));
+                return 0;
             }
-            edit::EditorNotification note;
-            if (!edit::EditView::TranslateNotify(header, note)) {
-                break;
-            }
-            switch (note.event) {
-                case edit::EditorEvent::UpdateUI:
-                    UpdateStatus();
-                    break;
-                case edit::EditorEvent::SavePointLeft:
-                    doc_.isModified = true;
-                    UpdateTitle();
-                    UpdateStatus();
-                    break;
-                case edit::EditorEvent::SavePointReached:
-                    doc_.isModified = false;
-                    UpdateTitle();
-                    UpdateStatus();
-                    break;
-                default:
-                    break;
+            if (DocumentOfView(header->hwndFrom) != nullptr) {
+                HandleEditorNotify(*header);
+                return 0;
             }
             break;
         }
         case WM_DROPFILES: {
             const HDROP drop = reinterpret_cast<HDROP>(wParam);
-            if (::DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0) > 0) {
+            const UINT count = ::DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+            for (UINT i = 0; i < count && i < 32; ++i) {
                 std::vector<wchar_t> buffer(4096, L'\0');
-                if (::DragQueryFileW(drop, 0, buffer.data(),
+                if (::DragQueryFileW(drop, i, buffer.data(),
                                      static_cast<UINT>(buffer.size())) > 0) {
-                    OpenPath(buffer.data());
+                    const core::OpenOutcome outcome = documents_->Open(buffer.data());
+                    if (outcome.status != core::OpenStatus::Ok &&
+                        outcome.status != core::OpenStatus::AlreadyOpen) {
+                        ::MessageBoxW(hwnd_, outcome.message.c_str(), L"打开文件失败", MB_ICONWARNING);
+                    }
                 }
             }
             ::DragFinish(drop);
+            SyncTabBar();
+            ActivateDocument(documents_->Active() != nullptr ? documents_->Active()->buffer.id : 0);
             return 0;
         }
-        case WM_CLOSE:
-            if (ConfirmDiscardChanges()) {
+        case WM_CLOSE: {
+            if (CloseAllDocuments()) {
                 ::DestroyWindow(hwnd_);
             }
             return 0;
+        }
         case WM_DESTROY:
-            view_.Destroy();
+            // DestroyWindow 先销毁子窗口，此时编辑控件的句柄已失效：
+            // 只清空记录，不再对它们发消息（否则是对失效句柄的调用）。
+            if (documents_) {
+                for (edit::Document* document : documents_->All()) {
+                    if (document->view) {
+                        document->view->Detach();
+                    }
+                }
+            }
+            tabBar_.Destroy();
             ::PostQuitMessage(0);
             return 0;
         default:
@@ -207,9 +237,25 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
 
 core::CmdContext MainWindow::Context() {
     core::CmdContext context;
-    context.buffer = &doc_;
-    context.view = &view_;
+    if (documents_) {
+        if (edit::Document* document = documents_->Active(); document != nullptr) {
+            context.buffer = &document->buffer;
+            context.view = document->view.get();
+        }
+    }
     return context;
+}
+
+edit::Document* MainWindow::DocumentOfView(HWND view) const {
+    if (!documents_ || view == nullptr) {
+        return nullptr;
+    }
+    for (edit::Document* document : documents_->All()) {
+        if (document->view && document->view->Handle() == view) {
+            return document;
+        }
+    }
+    return nullptr;
 }
 
 void MainWindow::RegisterCommands() {
@@ -241,56 +287,74 @@ void MainWindow::RegisterCommands() {
         needsBuffer, [this](const CmdContext&) { CommandSave(); });
     add(kCmdFileSaveAs, CmdCategory::File, L"cmd.file.saveAs", L"另存为(&A)...",
         needsBuffer, [this](const CmdContext&) { CommandSaveAs(); });
+    add(kCmdFileClose, CmdCategory::File, L"cmd.file.close", L"关闭当前文档(&C)",
+        needsBuffer, [this](const CmdContext&) { CommandCloseCurrent(); });
+    add(kCmdFileCloseAll, CmdCategory::File, L"cmd.file.closeAll", L"关闭全部文档(&L)",
+        core::kCmdNone, [this](const CmdContext&) { CommandCloseAll(); });
     add(kCmdFileExit, CmdCategory::File, L"cmd.file.exit", L"退出(&X)",
         core::kCmdNone, [this](const CmdContext&) { ::PostMessageW(hwnd_, WM_CLOSE, 0, 0); });
 
     // ---- 编辑 ----
     add(kCmdEditUndo, CmdCategory::Edit, L"cmd.edit.undo", L"撤销(&U)",
-        needsWritable, [this](const CmdContext&) { view_.Send(kSciUndo); });
+        needsWritable, [this](const CmdContext& c) { c.view->Send(kSciUndo); });
     add(kCmdEditRedo, CmdCategory::Edit, L"cmd.edit.redo", L"重做(&R)",
-        needsWritable, [this](const CmdContext&) { view_.Send(kSciRedo); });
+        needsWritable, [this](const CmdContext& c) { c.view->Send(kSciRedo); });
     add(kCmdEditCut, CmdCategory::Edit, L"cmd.edit.cut", L"剪切(&T)",
-        needsWritable, [this](const CmdContext&) { view_.Send(kSciCut); });
+        needsWritable, [this](const CmdContext& c) { c.view->Send(kSciCut); });
     add(kCmdEditCopy, CmdCategory::Edit, L"cmd.edit.copy", L"复制(&C)",
-        needsBuffer, [this](const CmdContext&) { view_.Send(kSciCopy); });
+        needsBuffer, [this](const CmdContext& c) { c.view->Send(kSciCopy); });
     add(kCmdEditPaste, CmdCategory::Edit, L"cmd.edit.paste", L"粘贴(&P)",
-        needsWritable, [this](const CmdContext&) { view_.Send(kSciPaste); });
+        needsWritable, [this](const CmdContext& c) { c.view->Send(kSciPaste); });
     add(kCmdEditSelectAll, CmdCategory::Edit, L"cmd.edit.selectAll", L"全选(&L)",
-        needsBuffer, [this](const CmdContext&) { view_.Send(kSciSelectAll); });
+        needsBuffer, [this](const CmdContext& c) { c.view->Send(kSciSelectAll); });
 
     // ---- 视图 ----
     add(kCmdViewZoomIn, CmdCategory::View, L"cmd.view.zoomIn", L"放大(&I)",
-        needsBuffer, [this](const CmdContext&) { view_.SetZoom(view_.ZoomLevel() + 1); });
+        needsBuffer, [this](const CmdContext& c) { c.view->SetZoom(c.view->ZoomLevel() + 1); });
     add(kCmdViewZoomOut, CmdCategory::View, L"cmd.view.zoomOut", L"缩小(&O)",
-        needsBuffer, [this](const CmdContext&) { view_.SetZoom(view_.ZoomLevel() - 1); });
+        needsBuffer, [this](const CmdContext& c) { c.view->SetZoom(c.view->ZoomLevel() - 1); });
     add(kCmdViewZoomReset, CmdCategory::View, L"cmd.view.zoomReset", L"恢复默认缩放(&Z)",
-        needsBuffer, [this](const CmdContext&) { view_.SetZoom(0); });
+        needsBuffer, [this](const CmdContext& c) { c.view->SetZoom(0); });
     add(kCmdViewToggleWrap, CmdCategory::View, L"cmd.view.toggleWrap", L"自动换行(&W)",
         core::kCmdCheckable, [this](const CmdContext&) {
             wrapEnabled_ = !wrapEnabled_;
-            view_.SetWrapMode(wrapEnabled_);
+            if (edit::Document* document = documents_->Active(); document != nullptr) {
+                document->view->SetWrapMode(wrapEnabled_);
+            }
         });
     add(kCmdViewToggleSpaces, CmdCategory::View, L"cmd.view.toggleSpaces", L"显示空白符号(&S)",
         core::kCmdCheckable, [this](const CmdContext&) {
             showWhitespace_ = !showWhitespace_;
-            view_.SetShowWhitespace(showWhitespace_);
+            if (edit::Document* document = documents_->Active(); document != nullptr) {
+                document->view->SetShowWhitespace(showWhitespace_);
+            }
         });
     add(kCmdViewToggleEol, CmdCategory::View, L"cmd.view.toggleEol", L"显示行尾符(&E)",
         core::kCmdCheckable, [this](const CmdContext&) {
             showEol_ = !showEol_;
-            view_.SetShowEol(showEol_);
+            if (edit::Document* document = documents_->Active(); document != nullptr) {
+                document->view->SetShowEol(showEol_);
+            }
         });
     add(kCmdViewToggleNumbers, CmdCategory::View, L"cmd.view.toggleNumbers", L"显示行号(&N)",
         core::kCmdCheckable, [this](const CmdContext&) {
             showLineNumbers_ = !showLineNumbers_;
-            view_.ShowLineNumbers(showLineNumbers_);
+            if (edit::Document* document = documents_->Active(); document != nullptr) {
+                document->view->ShowLineNumbers(showLineNumbers_);
+            }
         });
+
+    // ---- 窗口 ----
+    add(kCmdWindowNext, CmdCategory::Window, L"cmd.window.next", L"下一个标签(&N)",
+        core::kCmdNone, [this](const CmdContext&) { CommandNextTab(); });
+    add(kCmdWindowPrev, CmdCategory::Window, L"cmd.window.prev", L"上一个标签(&P)",
+        core::kCmdNone, [this](const CmdContext&) { CommandPrevTab(); });
 
     // ---- 帮助 ----
     add(kCmdHelpAbout, CmdCategory::Help, L"cmd.help.about", L"关于 notepadcc(&A)",
         core::kCmdNone, [this](const CmdContext&) { CommandAbout(); });
 
-    // 勾选态统一由命令注册表回答，视图不参与判断（设计文档 1.3 规则 1）
+    // 勾选态统一由命令注册表回答（设计文档 1.3 规则 1）
     auto bindChecked = [this](core::CmdId id, std::function<bool()> predicate) {
         core::Command* command = const_cast<core::Command*>(registry_.Find(id));
         if (command != nullptr) {
@@ -302,7 +366,7 @@ void MainWindow::RegisterCommands() {
     bindChecked(kCmdViewToggleEol, [this] { return showEol_; });
     bindChecked(kCmdViewToggleNumbers, [this] { return showLineNumbers_; });
 
-    // ---- 默认快捷键（全部可在 M1 的"管理快捷键"中重绑） ----
+    // ---- 默认快捷键 ----
     const uint8_t ctrl = core::kModCtrl;
     const uint8_t ctrlShift = core::kModCtrl | core::kModShift;
     const uint8_t ctrlAlt = core::kModCtrl | core::kModAlt;
@@ -310,6 +374,8 @@ void MainWindow::RegisterCommands() {
     registry_.BindShortcut(kCmdFileOpen, ctrl, 'O', true);
     registry_.BindShortcut(kCmdFileSave, ctrl, 'S', true);
     registry_.BindShortcut(kCmdFileSaveAs, ctrlShift, 'S', true);
+    registry_.BindShortcut(kCmdFileClose, ctrl, 'W', true);
+    registry_.BindShortcut(kCmdFileCloseAll, ctrlShift, 'W', true);
     registry_.BindShortcut(kCmdEditUndo, ctrl, 'Z', true);
     registry_.BindShortcut(kCmdEditRedo, ctrl, 'Y', true);
     registry_.BindShortcut(kCmdEditCut, ctrl, 'X', true);
@@ -322,13 +388,17 @@ void MainWindow::RegisterCommands() {
     registry_.BindShortcut(kCmdViewToggleWrap, core::kModAlt, 'Z', true);
     registry_.BindShortcut(kCmdViewToggleSpaces, ctrlAlt, 'W', true);
     registry_.BindShortcut(kCmdViewToggleEol, ctrlAlt, 'E', true);
+    registry_.BindShortcut(kCmdWindowNext, ctrl, VK_TAB, true);
+    registry_.BindShortcut(kCmdWindowPrev, ctrlShift, VK_TAB, true);
+    registry_.BindShortcut(kCmdWindowNext, ctrl, VK_NEXT, false);
+    registry_.BindShortcut(kCmdWindowPrev, ctrl, VK_PRIOR, false);
 }
 
 void MainWindow::RebuildAccelerators() {
     std::vector<ACCEL> entries;
     for (const auto& binding : registry_.AllBindings()) {
         if (binding.cmdId > 0xFFFF) {
-            continue;   // ACCEL.cmd 是 WORD，超范围的命令不进加速键表
+            continue;   // ACCEL.cmd 是 WORD
         }
         ACCEL entry{};
         entry.fVirt = FVIRTKEY;
@@ -355,162 +425,143 @@ void MainWindow::RebuildAccelerators() {
 }
 
 void MainWindow::LayoutChildren() const {
+    if (!documents_) {
+        return;
+    }
     RECT client{};
     ::GetClientRect(hwnd_, &client);
     statusBar_.Resize(client);
-    RECT viewRect = client;
-    viewRect.bottom = client.bottom - statusBar_.Height();
-    if (viewRect.bottom < 0) {
-        viewRect.bottom = 0;
+
+    const int tabHeight = tabBar_.Height();
+    if (tabBar_.Handle() != nullptr) {
+        ::MoveWindow(tabBar_.Handle(), 0, 0, client.right, tabHeight, TRUE);
     }
-    view_.Resize(viewRect);
+
+    RECT viewRect{};
+    viewRect.left = 0;
+    viewRect.top = tabHeight;
+    viewRect.right = client.right;
+    viewRect.bottom = client.bottom - statusBar_.Height();
+    if (viewRect.bottom < viewRect.top) {
+        viewRect.bottom = viewRect.top;
+    }
+    documents_->ResizeActive(viewRect);
+}
+
+void MainWindow::ApplyViewToggles(edit::EditView& view) const {
+    // 这些是控件级设置，新激活的视图需要按当前全局状态复现
+    view.SetWrapMode(wrapEnabled_);
+    view.SetShowWhitespace(showWhitespace_);
+    view.SetShowEol(showEol_);
+    view.ShowLineNumbers(showLineNumbers_);
+}
+
+void MainWindow::SyncTabBar() {
+    if (!documents_) {
+        return;
+    }
+    std::vector<TabItem> items;
+    items.reserve(documents_->TabOrder().size());
+    for (const core::BufferId id : documents_->TabOrder()) {
+        edit::Document* document = documents_->Find(id);
+        if (document == nullptr) {
+            continue;
+        }
+        TabItem item;
+        item.id = id;
+        item.title = document->buffer.displayName.empty() ? L"未命名"
+                                                          : document->buffer.displayName;
+        item.modified = document->buffer.isModified;
+        item.hasPath = document->buffer.HasPath();
+        items.push_back(std::move(item));
+    }
+    const core::BufferId active =
+        documents_->Active() != nullptr ? documents_->Active()->buffer.id : 0;
+    tabBar_.SetItems(std::move(items), active);
 }
 
 void MainWindow::UpdateTitle() const {
-    std::wstring title = L"notepadcc - ";
-    title += doc_.isUntitled ? L"新建文档" : doc_.displayName;
-    if (doc_.isModified) {
-        title += L" *";
+    std::wstring title = L"notepadcc";
+    if (documents_) {
+        if (edit::Document* document = documents_->Active(); document != nullptr) {
+            title += L" - " + document->buffer.displayName;
+            if (document->buffer.isModified) {
+                title += L" *";
+            }
+        }
     }
     ::SetWindowTextW(hwnd_, title.c_str());
 }
 
 void MainWindow::UpdateStatus() const {
-    statusBar_.SetPosition(view_.CurrentLine(), view_.CurrentColumn(),
-                           view_.SelectionByteCount());
-    statusBar_.SetDocumentInfo(edit::EncodingName(doc_.encoding), edit::EolName(doc_.eol),
-                               view_.CurrentLanguageName(), doc_.isModified);
-}
-
-void MainWindow::ResetDocument() {
-    doc_ = edit::DocBuffer{};
-    doc_.id = static_cast<core::BufferId>(nextBufferId_++);
-    doc_.isUntitled = true;
-    doc_.isModified = false;
-    doc_.encoding.uniMode = edit::UniMode::Utf8;
-    doc_.encoding.confidence = 100;
-    doc_.eol = edit::EolMode::Crlf;
-
-    view_.SetCodePage(edit::kCodePageUtf8);
-    view_.SetEolMode(doc_.eol);
-    view_.SetReadOnly(false);
-    view_.SetText({});
-    view_.ApplyLanguageForPath(std::wstring());
-    view_.ClearUndoBuffer();
-    view_.MarkSavePoint();
-
-    UpdateTitle();
-    UpdateStatus();
-}
-
-bool MainWindow::OpenPath(const std::wstring& path) {
-    const io::ReadResult read = io::ReadWholeFile(path);
-    if (!read.ok) {
-        infra::LogWarn(L"file", L"打开失败: " + path + L" / " + read.message);
-        ::MessageBoxW(hwnd_, read.message.c_str(), L"打开文件失败", MB_ICONWARNING);
-        return false;
-    }
-
-    const edit::LoadResult loaded = edit::DetectAndPrepare(read.bytes, doc_.encoding.codePage);
-
-    doc_.filePath = path;
-    doc_.displayName = FileNameOf(path);
-    doc_.isUntitled = false;
-    doc_.isReadOnly = false;
-    doc_.encoding = loaded.encoding;
-    doc_.eol = loaded.eol;
-    doc_.detectedEol = loaded.eol;
-
-    view_.SetCodePage(doc_.encoding.uniMode == edit::UniMode::Ansi ? doc_.encoding.codePage
-                                                                 : edit::kCodePageUtf8);
-    view_.SetEolMode(doc_.eol);
-    view_.SetText(loaded.editorBytes);
-    view_.ApplyLanguageForPath(path);
-    view_.ClearUndoBuffer();
-    view_.MarkSavePoint();
-    view_.SetCaretPosition(0);
-    view_.SetFirstVisibleLine(0);
-
-    doc_.isModified = false;
-    lastDirectory_ = DirectoryOf(path);
-
-    infra::LogInfo(L"file", L"已打开: " + path);
-    UpdateTitle();
-    UpdateStatus();
-    return true;
-}
-
-bool MainWindow::SaveToPath(const std::wstring& path) {
-    std::string editorBytes = view_.GetAllText();
-    if (doc_.eol != edit::EolMode::Mixed) {
-        editorBytes = edit::NormalizeEol(editorBytes, doc_.eol);
-    }
-    const std::string outBytes = edit::EncodeForSave(editorBytes, doc_.encoding);
-    if (outBytes.empty() && !editorBytes.empty()) {
-        ::MessageBoxW(hwnd_, L"按当前编码转换内容失败，文件未写入。", L"保存失败", MB_ICONERROR);
-        return false;
-    }
-
-    const io::WriteResult result = io::WriteFileAtomic(path, outBytes);
-    if (!result.ok) {
-        infra::LogError(L"file", L"保存失败: " + path + L" / " + result.message);
-        ::MessageBoxW(hwnd_, result.message.c_str(), L"保存失败", MB_ICONERROR);
-        return false;
-    }
-
-    doc_.filePath = path;
-    doc_.displayName = FileNameOf(path);
-    doc_.isUntitled = false;
-    doc_.isModified = false;
-    lastDirectory_ = DirectoryOf(path);
-    view_.MarkSavePoint();
-
-    infra::LogInfo(L"file", L"已保存: " + path);
-    UpdateTitle();
-    UpdateStatus();
-    return true;
-}
-
-void MainWindow::CommandNew() {
-    if (ConfirmDiscardChanges()) {
-        ResetDocument();
-    }
-}
-
-void MainWindow::CommandOpen() {
-    if (!ConfirmDiscardChanges()) {
+    if (!documents_) {
         return;
     }
-    std::vector<wchar_t> buffer(32768, L'\0');
-    OPENFILENAMEW dialog{};
-    dialog.lStructSize = sizeof(dialog);
-    dialog.hwndOwner = hwnd_;
-    dialog.lpstrFilter =
-        L"文本与源码文件\0*.txt;*.log;*.md;*.ini;*.json;*.xml;*.c;*.h;*.cpp;*.hpp;*.py;*.js;*.css;*.html;*.sql\0"
-        L"所有文件\0*.*\0";
-    dialog.nFilterIndex = 1;
-    dialog.lpstrFile = buffer.data();
-    dialog.nMaxFile = static_cast<DWORD>(buffer.size());
-    if (!lastDirectory_.empty()) {
-        dialog.lpstrInitialDir = lastDirectory_.c_str();
+    edit::Document* document = documents_->Active();
+    if (document == nullptr || !document->view) {
+        statusBar_.SetPosition(0, 0, 0);
+        statusBar_.SetDocumentInfo(L"", L"", L"", false);
+        return;
     }
-    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
-    if (::GetOpenFileNameW(&dialog) != 0) {
-        OpenPath(buffer.data());
-    }
+    statusBar_.SetPosition(document->view->CurrentLine(), document->view->CurrentColumn(),
+                           document->view->SelectionByteCount());
+    statusBar_.SetDocumentInfo(edit::EncodingName(document->buffer.encoding),
+                               edit::EolName(document->buffer.eol),
+                               document->view->CurrentLanguageName(),
+                               document->buffer.isModified);
 }
 
-bool MainWindow::CommandSave() {
-    if (!doc_.HasPath()) {
-        return CommandSaveAs();
+void MainWindow::ActivateDocument(core::BufferId id) {
+    if (!documents_) {
+        return;
     }
-    return SaveToPath(doc_.filePath);
+    documents_->Activate(id);
+    if (edit::Document* document = documents_->Active(); document != nullptr && document->view) {
+        ApplyViewToggles(*document->view);
+        ::SetFocus(document->view->Handle());
+    }
+    tabBar_.SetActive(id);
+    LayoutChildren();
+    UpdateTitle();
+    UpdateStatus();
 }
 
-bool MainWindow::CommandSaveAs() {
+void MainWindow::EnsureAtLeastOneDocument() {
+    if (!documents_) {
+        return;
+    }
+    if (documents_->Count() == 0) {
+        documents_->CreateUntitled();
+    }
+    if (documents_->Active() == nullptr && !documents_->TabOrder().empty()) {
+        documents_->Activate(documents_->TabOrder().front());
+    }
+    SyncTabBar();
+    ActivateDocument(documents_->Active() != nullptr ? documents_->Active()->buffer.id : 0);
+}
+
+bool MainWindow::SaveDocument(edit::Document& document) {
+    if (!document.buffer.HasPath()) {
+        return SaveDocumentAs(document);
+    }
+    const core::SaveOutcome outcome = documents_->Save(document);
+    if (!outcome.ok) {
+        infra::LogError(L"file", L"保存失败: " + document.buffer.filePath + L" / " + outcome.message);
+        ::MessageBoxW(hwnd_, outcome.message.c_str(), L"保存失败", MB_ICONERROR);
+        return false;
+    }
+    lastDirectory_ = core::DocumentManager::DirectoryOf(document.buffer.filePath);
+    infra::LogInfo(L"file", L"已保存: " + document.buffer.filePath);
+    SyncTabBar();
+    UpdateTitle();
+    UpdateStatus();
+    return true;
+}
+
+bool MainWindow::SaveDocumentAs(edit::Document& document) {
     std::vector<wchar_t> buffer(32768, L'\0');
-    if (!doc_.displayName.empty()) {
-        std::wcsncpy(buffer.data(), doc_.displayName.c_str(), buffer.size() - 1);
+    if (!document.buffer.displayName.empty()) {
+        std::wcsncpy(buffer.data(), document.buffer.displayName.c_str(), buffer.size() - 1);
     }
     OPENFILENAMEW dialog{};
     dialog.lStructSize = sizeof(dialog);
@@ -527,28 +578,294 @@ bool MainWindow::CommandSaveAs() {
     if (::GetSaveFileNameW(&dialog) == 0) {
         return false;
     }
-    return SaveToPath(buffer.data());
+
+    const core::SaveOutcome outcome = documents_->SaveAs(document, buffer.data());
+    if (!outcome.ok) {
+        infra::LogError(L"file", L"另存为失败: " + std::wstring(buffer.data()) + L" / " +
+                                     outcome.message);
+        ::MessageBoxW(hwnd_, outcome.message.c_str(), L"保存失败", MB_ICONERROR);
+        return false;
+    }
+    lastDirectory_ = core::DocumentManager::DirectoryOf(buffer.data());
+    infra::LogInfo(L"file", L"已另存为: " + std::wstring(buffer.data()));
+    SyncTabBar();
+    UpdateTitle();
+    UpdateStatus();
+    return true;
+}
+
+bool MainWindow::ConfirmSaveIfModified(edit::Document& document) {
+    if (!document.buffer.isModified) {
+        return true;
+    }
+    const std::wstring question = L"是否保存对「" + document.buffer.displayName + L"」的更改？";
+    const int answer = ::MessageBoxW(hwnd_, question.c_str(), L"notepadcc",
+                                     MB_ICONQUESTION | MB_YESNOCANCEL);
+    if (answer == IDYES) {
+        return SaveDocument(document);
+    }
+    return answer == IDNO;
+}
+
+bool MainWindow::CloseDocument(core::BufferId id, bool force) {
+    edit::Document* document = documents_->Find(id);
+    if (document == nullptr) {
+        return true;
+    }
+    if (!force && !ConfirmSaveIfModified(*document)) {
+        return false;
+    }
+    return documents_->Close(document);
+}
+
+bool MainWindow::CloseOthers(core::BufferId keep) {
+    // 先按顺序问一遍，遇到取消就整体中止（避免"关了一半"的中间态）
+    const std::vector<core::BufferId> order = documents_->TabOrder();
+    for (const core::BufferId id : order) {
+        if (id == keep) {
+            continue;
+        }
+        edit::Document* document = documents_->Find(id);
+        if (document != nullptr && !ConfirmSaveIfModified(*document)) {
+            return false;
+        }
+    }
+    for (const core::BufferId id : order) {
+        if (id != keep) {
+            CloseDocument(id, true);
+        }
+    }
+    EnsureAtLeastOneDocument();
+    return true;
+}
+
+bool MainWindow::CloseRightOf(core::BufferId anchor) {
+    const std::vector<core::BufferId> order = documents_->TabOrder();
+    const auto position = std::find(order.begin(), order.end(), anchor);
+    if (position == order.end()) {
+        return true;
+    }
+    std::vector<core::BufferId> targets(position + 1, order.end());
+    for (const core::BufferId id : targets) {
+        edit::Document* document = documents_->Find(id);
+        if (document != nullptr && !ConfirmSaveIfModified(*document)) {
+            return false;
+        }
+    }
+    for (const core::BufferId id : targets) {
+        CloseDocument(id, true);
+    }
+    EnsureAtLeastOneDocument();
+    return true;
+}
+
+bool MainWindow::CloseAllDocuments() {
+    const std::vector<core::BufferId> order = documents_->TabOrder();
+    for (const core::BufferId id : order) {
+        edit::Document* document = documents_->Find(id);
+        if (document != nullptr && !ConfirmSaveIfModified(*document)) {
+            return false;
+        }
+    }
+    for (const core::BufferId id : order) {
+        CloseDocument(id, true);
+    }
+    return true;
+}
+
+void MainWindow::HandleTabBarNotify(const TabBarNotify& notification) {
+    switch (notification.action) {
+        case TabAction::Activate:
+            ActivateDocument(notification.source);
+            break;
+        case TabAction::Close:
+            if (CloseDocument(notification.source, false)) {
+                EnsureAtLeastOneDocument();
+            }
+            break;
+        case TabAction::CloseOthers:
+            CloseOthers(notification.source);
+            break;
+        case TabAction::CloseRight:
+            CloseRightOf(notification.source);
+            break;
+        case TabAction::CloseAll:
+            if (CloseAllDocuments()) {
+                EnsureAtLeastOneDocument();
+            }
+            break;
+        case TabAction::CopyPath:
+            if (edit::Document* document = documents_->Find(notification.source);
+                document != nullptr && document->buffer.HasPath()) {
+                CopyTextToClipboard(hwnd_, document->buffer.filePath);
+            }
+            break;
+        case TabAction::Reorder:
+            documents_->MoveBefore(notification.source, notification.target);
+            SyncTabBar();
+            break;
+    }
+}
+
+void MainWindow::HandleEditorNotify(const NMHDR& header) {
+    edit::EditorNotification note;
+    if (!edit::EditView::TranslateNotify(&header, note)) {
+        return;
+    }
+    edit::Document* document = DocumentOfView(header.hwndFrom);
+    if (document == nullptr) {
+        return;
+    }
+
+    // 关键：修改标记记在"发出通知的那个文档"上，而不是当前活动文档。
+    // 打开文件时会先给隐藏的控件 SetText，此时活动文档还不是它。
+    switch (note.event) {
+        case edit::EditorEvent::SavePointLeft:
+            document->buffer.isModified = true;
+            break;
+        case edit::EditorEvent::SavePointReached:
+            document->buffer.isModified = false;
+            break;
+        case edit::EditorEvent::UpdateUI:
+            if (document == documents_->Active()) {
+                UpdateStatus();
+            }
+            return;
+        default:
+            return;
+    }
+
+    SyncTabBar();
+    if (document == documents_->Active()) {
+        UpdateTitle();
+        UpdateStatus();
+    }
+}
+
+void MainWindow::CommandNew() {
+    if (edit::Document* document = documents_->CreateUntitled(); document != nullptr) {
+        SyncTabBar();
+        ActivateDocument(document->buffer.id);
+    }
+}
+
+void MainWindow::CommandOpen() {
+    std::vector<wchar_t> buffer(32768, L'\0');
+    OPENFILENAMEW dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = hwnd_;
+    dialog.lpstrFilter =
+        L"文本与源码文件\0*.txt;*.log;*.md;*.ini;*.json;*.xml;*.c;*.h;*.cpp;*.hpp;*.py;*.js;*.css;*.html;*.sql\0"
+        L"所有文件\0*.*\0";
+    dialog.nFilterIndex = 1;
+    dialog.lpstrFile = buffer.data();
+    dialog.nMaxFile = static_cast<DWORD>(buffer.size());
+    if (!lastDirectory_.empty()) {
+        dialog.lpstrInitialDir = lastDirectory_.c_str();
+    }
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_ALLOWMULTISELECT;
+    if (::GetOpenFileNameW(&dialog) == 0) {
+        return;
+    }
+
+    // OFN_ALLOWMULTISELECT 时缓冲区是 "目录\0文件1\0文件2\0\0"；只有一个文件时是完整路径
+    const wchar_t* first = buffer.data();
+    const wchar_t* second = first + std::wcslen(first) + 1;
+    if (*second == L'\0') {
+        const core::OpenOutcome outcome = documents_->Open(first);
+        if (outcome.status != core::OpenStatus::Ok &&
+            outcome.status != core::OpenStatus::AlreadyOpen) {
+            ::MessageBoxW(hwnd_, outcome.message.c_str(), L"打开文件失败", MB_ICONWARNING);
+        } else {
+            lastDirectory_ = core::DocumentManager::DirectoryOf(first);
+        }
+    } else {
+        const std::wstring directory = first;
+        for (const wchar_t* name = second; *name != L'\0'; name += std::wcslen(name) + 1) {
+            const std::wstring full = directory + L"\\" + name;
+            const core::OpenOutcome outcome = documents_->Open(full);
+            if (outcome.status != core::OpenStatus::Ok &&
+                outcome.status != core::OpenStatus::AlreadyOpen) {
+                ::MessageBoxW(hwnd_, outcome.message.c_str(), L"打开文件失败", MB_ICONWARNING);
+            }
+        }
+        lastDirectory_ = directory;
+    }
+
+    SyncTabBar();
+    ActivateDocument(documents_->Active() != nullptr ? documents_->Active()->buffer.id : 0);
+}
+
+bool MainWindow::CommandSave() {
+    if (edit::Document* document = documents_->Active(); document != nullptr) {
+        return SaveDocument(*document);
+    }
+    return false;
+}
+
+bool MainWindow::CommandSaveAs() {
+    if (edit::Document* document = documents_->Active(); document != nullptr) {
+        return SaveDocumentAs(*document);
+    }
+    return false;
+}
+
+bool MainWindow::CommandCloseCurrent() {
+    if (edit::Document* document = documents_->Active(); document != nullptr) {
+        const core::BufferId id = document->buffer.id;
+        if (!CloseDocument(id, false)) {
+            return false;
+        }
+        EnsureAtLeastOneDocument();
+    }
+    return true;
+}
+
+bool MainWindow::CommandCloseAll() {
+    if (!CloseAllDocuments()) {
+        return false;
+    }
+    EnsureAtLeastOneDocument();
+    return true;
+}
+
+void MainWindow::CommandNextTab() {
+    if (!documents_ || documents_->TabOrder().empty()) {
+        return;
+    }
+    const std::vector<core::BufferId>& order = documents_->TabOrder();
+    const core::BufferId current =
+        documents_->Active() != nullptr ? documents_->Active()->buffer.id : 0;
+    const auto position = std::find(order.begin(), order.end(), current);
+    const size_t next = (position == order.end() || position + 1 == order.end())
+                            ? 0
+                            : static_cast<size_t>(std::distance(order.begin(), position)) + 1;
+    ActivateDocument(order[next]);
+}
+
+void MainWindow::CommandPrevTab() {
+    if (!documents_ || documents_->TabOrder().empty()) {
+        return;
+    }
+    const std::vector<core::BufferId>& order = documents_->TabOrder();
+    const core::BufferId current =
+        documents_->Active() != nullptr ? documents_->Active()->buffer.id : 0;
+    const auto position = std::find(order.begin(), order.end(), current);
+    size_t previous = order.size() - 1;
+    if (position != order.end()) {
+        const size_t index = static_cast<size_t>(std::distance(order.begin(), position));
+        previous = (index == 0) ? order.size() - 1 : index - 1;
+    }
+    ActivateDocument(order[previous]);
 }
 
 void MainWindow::CommandAbout() {
     ::MessageBoxW(hwnd_,
-                  L"notepadcc 1.0.0（M0 骨架版）\n\n"
+                  L"notepadcc 1.0.0（M0 + 多标签）\n\n"
                   L"原生 Win32 + Scintilla 的轻量文本 / 源码编辑器。\n"
-                  L"已完成：多编码打开与保存、原子写盘、语法着色、"
-                  L"命令注册表与可重绑快捷键。",
+                  L"已完成：多标签与标签栏（拖拽排序、中键关闭、右键菜单、脏标记）、"
+                  L"多编码打开与保存、原子写盘、语法着色、命令注册表与可重绑快捷键。",
                   L"关于 notepadcc", MB_ICONINFORMATION);
-}
-
-bool MainWindow::ConfirmDiscardChanges() {
-    if (!doc_.isModified) {
-        return true;
-    }
-    const int answer = ::MessageBoxW(hwnd_, L"当前文档尚未保存，是否保存？", L"notepadcc",
-                                     MB_ICONQUESTION | MB_YESNOCANCEL);
-    if (answer == IDYES) {
-        return CommandSave();
-    }
-    return answer != IDCANCEL;
 }
 
 }  // namespace npcc::shell

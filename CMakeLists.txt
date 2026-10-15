@@ -102,6 +102,7 @@ target_compile_definitions(lexilla PRIVATE NDEBUG)
 # ---------------------------------------------------------------- 核心静态库（主程序与测试共用）
 set(NPCC_CORE_SOURCES
     src/core/CommandRegistry.cpp
+    src/core/DocumentManager.cpp
     src/edit/EditView.cpp
     src/edit/Encoding.cpp
     src/infra/Log.cpp
@@ -110,7 +111,8 @@ set(NPCC_CORE_SOURCES
     src/io/FileReader.cpp
     src/shell/MainWindow.cpp
     src/shell/MenuBuilder.cpp
-    src/shell/StatusBar.cpp)
+    src/shell/StatusBar.cpp
+    src/shell/TabBar.cpp)
 
 add_library(notepadcc_core STATIC ${NPCC_CORE_SOURCES})
 target_include_directories(notepadcc_core PUBLIC src)

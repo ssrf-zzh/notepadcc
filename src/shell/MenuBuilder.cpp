@@ -15,6 +15,7 @@ const CategoryEntry kMenuOrder[] = {
     {core::CmdCategory::Edit,   L"编辑(&E)"},
     {core::CmdCategory::Search, L"搜索(&S)"},
     {core::CmdCategory::View,   L"视图(&V)"},
+    {core::CmdCategory::Window, L"窗口(&W)"},
     {core::CmdCategory::Macro,  L"宏(&M)"},
     {core::CmdCategory::Run,    L"运行(&R)"},
     {core::CmdCategory::Plugin, L"插件(&P)"},

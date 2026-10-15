@@ -4,6 +4,7 @@
 #include <shellapi.h>
 
 #include <string>
+#include <vector>
 
 #include "edit/EditView.h"
 #include "infra/Log.h"
@@ -13,8 +14,8 @@
 namespace {
 
 struct StartupOptions {
-    bool         portable = false;
-    std::wstring fileToOpen;
+    bool                      portable = false;
+    std::vector<std::wstring> filesToOpen;
 };
 
 StartupOptions ParseCommandLine() {
@@ -33,8 +34,8 @@ StartupOptions ParseCommandLine() {
         if (!argument.empty() && argument[0] == L'-') {
             continue;   // M0 只认 -portable，其余开关忽略
         }
-        if (options.fileToOpen.empty()) {
-            options.fileToOpen = argument;
+        if (options.filesToOpen.size() < 32) {
+            options.filesToOpen.push_back(argument);
         }
     }
     ::LocalFree(argv);
@@ -61,9 +62,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         ::MessageBoxW(nullptr, L"注册编辑控件窗口类失败。", L"notepadcc", MB_ICONERROR);
         return 1;
     }
+    if (!npcc::shell::TabBar::RegisterWindowClass(instance)) {
+        ::MessageBoxW(nullptr, L"注册标签栏窗口类失败。", L"notepadcc", MB_ICONERROR);
+        return 1;
+    }
 
     npcc::shell::MainWindow window;
-    if (!window.RegisterWindowClass(instance) || !window.Create(instance, options.fileToOpen)) {
+    if (!window.RegisterWindowClass(instance) || !window.Create(instance, options.filesToOpen)) {
         ::MessageBoxW(nullptr, L"创建主窗口失败。", L"notepadcc", MB_ICONERROR);
         return 1;
     }

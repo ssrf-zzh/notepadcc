@@ -6,8 +6,10 @@
 
 #include "core/Command.h"
 #include "core/CommandRegistry.h"
+#include "core/DocumentManager.h"
 #include "edit/DocBuffer.h"
 #include "edit/Encoding.h"
+#include "edit/EditView.h"
 #include "io/AtomicFile.h"
 #include "io/FileReader.h"
 
@@ -36,6 +38,24 @@ void CheckEqual(const std::string& actual, const std::string& expected, const ch
 
 void Section(const char* name) {
     std::printf("  %s\n", name);
+}
+
+LRESULT CALLBACK TestHostProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    return ::DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+// 建立一个隐藏宿主窗口。多文档逻辑要创建真实的 Scintilla 控件，
+// 所以这部分测试需要窗口，但不需要显示出来。
+HWND CreateHiddenHost() {
+    const HINSTANCE instance = ::GetModuleHandleW(nullptr);
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = &TestHostProc;
+    wc.hInstance = instance;
+    wc.lpszClassName = L"notepadccTestHost";
+    ::RegisterClassExW(&wc);
+    return ::CreateWindowExW(0, L"notepadccTestHost", L"", 0, 0, 0, 200, 200,
+                             nullptr, nullptr, instance, nullptr);
 }
 
 std::string ToUtf16Bytes(const std::wstring& text, bool bigEndian) {
@@ -221,6 +241,108 @@ int main() {
         Check(registry.FindConflicts(npcc::core::kModCtrl, 'K').size() == 1, "冲突检测命中 1 条");
         Check(npcc::core::MakeCmdId(1, 1) <= 0xFFFF, "命令 ID 落在 16 位内（菜单与加速键要求）");
         Check(npcc::core::MakeCmdId(1, 1) != npcc::core::MakeCmdId(2, 1), "不同类别不冲突");
+    }
+
+    // ---------------------------------------------------------------- 多文档管理
+    // 这一段会创建真实的 Scintilla 控件，但宿主窗口不显示
+    Section("DocumentManager（多标签）");
+    if (!npcc::edit::RegisterEditorClasses(::GetModuleHandleW(nullptr))) {
+        Check(false, "注册 Scintilla 窗口类");
+    } else if (HWND host = CreateHiddenHost(); host == nullptr) {
+        Check(false, "创建隐藏宿主窗口");
+    } else {
+        const std::filesystem::path dir =
+            std::filesystem::temp_directory_path() / "notepadcc_doc_test";
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        const std::filesystem::path fileA = dir / "a.txt";
+        const std::filesystem::path fileB = dir / "b.txt";
+        npcc::io::WriteFileAtomic(fileA.wstring(), "文件 A 的内容\r\n");
+        npcc::io::WriteFileAtomic(fileB.wstring(),
+                                  std::string("\xEF\xBB\xBF") + "文件 B 的内容\r\n");
+
+        {
+            npcc::core::DocumentManager manager(host);
+
+            npcc::edit::Document* first = manager.CreateUntitled();
+            Check(first != nullptr, "新建文档成功");
+            Check(manager.Count() == 1, "标签数为 1");
+            Check(manager.Active() == first, "新建后成为活动文档");
+            Check(first->buffer.isUntitled, "新建文档标记为未保存");
+            Check(!first->buffer.displayName.empty(), "新建文档有默认标题");
+
+            npcc::edit::Document* second = manager.CreateUntitled();
+            Check(manager.Count() == 2, "第二个标签加入");
+            Check(manager.TabOrder().size() == 2, "标签顺序表同步");
+            Check(manager.TabOrder()[0] == first->buffer.id &&
+                      manager.TabOrder()[1] == second->buffer.id,
+                  "标签顺序与创建顺序一致");
+
+            // 打开文件
+            const auto openA = manager.Open(fileA.wstring());
+            Check(openA.status == npcc::core::OpenStatus::Ok, "打开文件成功");
+            Check(openA.document != nullptr && !openA.document->buffer.isUntitled,
+                  "打开后不再是未保存文档");
+            Check(openA.document->buffer.displayName == L"a.txt", "标题取自文件名");
+            Check(openA.document->buffer.encoding.uniMode == npcc::edit::UniMode::Utf8,
+                  "ANSI 范围内的内容判为 UTF-8");
+            Check(manager.Count() == 3, "打开后标签数为 3");
+
+            const auto openB = manager.Open(fileB.wstring());
+            Check(openB.status == npcc::core::OpenStatus::Ok, "打开第二个文件成功");
+            Check(openB.document->buffer.encoding.uniMode == npcc::edit::UniMode::Utf8Bom,
+                  "识别出 UTF-8 BOM");
+
+            // 重复打开不应产生新标签
+            const auto again = manager.Open(fileA.wstring());
+            Check(again.status == npcc::core::OpenStatus::AlreadyOpen, "重复打开被识别");
+            Check(manager.Count() == 4, "重复打开不新增标签");
+            Check(manager.Active() == openA.document, "重复打开会激活已有标签");
+
+            // 打开不存在的文件
+            const auto missing = manager.Open((dir / "no_such_file.txt").wstring());
+            Check(missing.status == npcc::core::OpenStatus::NotFound, "不存在的文件返回 NotFound");
+            Check(manager.Count() == 4, "失败不产生标签");
+
+            // 保存：内容改动后写回，修改标记复位
+            npcc::edit::Document* target = openA.document;
+            target->view->SetText("改写后的内容\r\n");
+            Check(target->view->IsModified(), "改写后 Scintilla 修改标记置位");
+            const auto saved = manager.SaveAs(*target, (dir / "a2.txt").wstring());
+            Check(saved.ok, "另存为成功");
+            Check(!target->view->IsModified(), "保存后修改标记复位");
+            Check(target->buffer.displayName == L"a2.txt", "另存为后标题更新");
+            const auto reread = npcc::io::ReadWholeFile((dir / "a2.txt").wstring());
+            CheckEqual(reread.bytes, "改写后的内容\r\n", "磁盘内容与编辑器一致");
+            Check(std::filesystem::exists(fileA), "原文件仍然存在（另存为不删除源文件）");
+
+            // 标签重排
+            const npcc::core::BufferId a2Id = target->buffer.id;
+            const npcc::core::BufferId firstId = first->buffer.id;
+            manager.MoveBefore(a2Id, firstId);
+            Check(manager.TabOrder().front() == a2Id, "MoveBefore 把标签移到目标之前");
+            manager.MoveBefore(a2Id, npcc::core::kInvalidId);
+            Check(manager.TabOrder().back() == a2Id, "target 为 kInvalidId 时移到末尾");
+            Check(npcc::core::kInvalidId != 0, "无效 ID 不是 0（0 会与首个缓冲区 ID 冲突）");
+
+            // 关闭活动标签后应自动激活相邻标签
+            manager.Activate(a2Id);
+            const size_t before = manager.Count();
+            Check(manager.Close(target), "关闭文档成功");
+            Check(manager.Count() == before - 1, "标签数减少");
+            Check(manager.Active() != nullptr, "关闭后仍有活动文档");
+            Check(manager.Find(a2Id) == nullptr, "已关闭的文档不可再查到");
+
+            // 关闭到为空
+            for (npcc::edit::Document* document : manager.All()) {
+                manager.Close(document);
+            }
+            Check(manager.Count() == 0, "可以关闭到空");
+            Check(manager.Active() == nullptr, "空状态下没有活动文档");
+        }
+
+        std::filesystem::remove_all(dir, ec);
+        ::DestroyWindow(host);
     }
 
     std::printf("\n结果: %d 项检查, %d 项失败\n", g_checks, g_failures);

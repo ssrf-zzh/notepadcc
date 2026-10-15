@@ -107,8 +107,16 @@ bool EditView::Create(HWND parent, int controlId) {
 
 void EditView::Destroy() {
     if (hwnd_ != nullptr) {
-        ::DestroyWindow(hwnd_);
+        if (::IsWindow(hwnd_) != 0) {
+            ::DestroyWindow(hwnd_);
+        }
         hwnd_ = nullptr;
+    }
+}
+
+void EditView::SetVisible(bool visible) const {
+    if (hwnd_ != nullptr) {
+        ::ShowWindow(hwnd_, visible ? SW_SHOW : SW_HIDE);
     }
 }
 

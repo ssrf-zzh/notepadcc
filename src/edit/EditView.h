@@ -43,6 +43,9 @@ public:
 
     bool Create(HWND parent, int controlId);
     void Destroy();
+    // 主窗口销毁后子窗口句柄随之失效，此时只清空记录，不再调用 DestroyWindow
+    void Detach() noexcept { hwnd_ = nullptr; }
+    void SetVisible(bool visible) const;
     void Resize(const RECT& client) const;
 
     HWND Handle() const noexcept { return hwnd_; }

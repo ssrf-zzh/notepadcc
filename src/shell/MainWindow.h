@@ -3,11 +3,14 @@
 #include <windows.h>
 
 #include <string>
+#include <vector>
 
 #include "core/CommandRegistry.h"
-#include "edit/DocBuffer.h"
+#include "core/DocumentManager.h"
+#include "edit/Document.h"
 #include "edit/EditView.h"
 #include "shell/StatusBar.h"
+#include "shell/TabBar.h"
 
 namespace npcc::shell {
 
@@ -21,7 +24,7 @@ public:
     MainWindow& operator=(const MainWindow&) = delete;
 
     bool RegisterWindowClass(HINSTANCE instance) const;
-    bool Create(HINSTANCE instance, const std::wstring& initialFile);
+    bool Create(HINSTANCE instance, const std::vector<std::wstring>& filesToOpen);
 
     HWND   Handle() const noexcept { return hwnd_; }
     HACCEL Accelerators() const noexcept { return accel_; }
@@ -35,6 +38,8 @@ private:
     void LayoutChildren() const;
     void UpdateTitle() const;
     void UpdateStatus() const;
+    void SyncTabBar();
+    void ApplyViewToggles(edit::EditView& view) const;
     core::CmdContext Context();
 
     // ---- 命令实现 ----
@@ -42,28 +47,40 @@ private:
     void CommandOpen();
     bool CommandSave();
     bool CommandSaveAs();
+    bool CommandCloseCurrent();
+    bool CommandCloseAll();
+    void CommandNextTab();
+    void CommandPrevTab();
     void CommandAbout();
 
-    bool OpenPath(const std::wstring& path);
-    bool SaveToPath(const std::wstring& path);
-    bool ConfirmDiscardChanges();
-    void ResetDocument();
+    // ---- 文档操作 ----
+    bool SaveDocument(edit::Document& document);
+    bool SaveDocumentAs(edit::Document& document);
+    bool ConfirmSaveIfModified(edit::Document& document);   // 返回 false = 取消
+    bool CloseDocument(core::BufferId id, bool force);
+    bool CloseOthers(core::BufferId keep);
+    bool CloseAllDocuments();
+    bool CloseRightOf(core::BufferId anchor);
+    void ActivateDocument(core::BufferId id);
+    void EnsureAtLeastOneDocument();
+    edit::Document* DocumentOfView(HWND view) const;
+    void HandleTabBarNotify(const TabBarNotify& notification);
+    void HandleEditorNotify(const NMHDR& header);
 
-    HINSTANCE             instance_ = nullptr;
-    HWND                  hwnd_ = nullptr;
-    HMENU                 menu_ = nullptr;
-    HACCEL                accel_ = nullptr;
-    edit::EditView        view_;
-    edit::DocBuffer       doc_;
-    StatusBar             statusBar_;
-    core::CommandRegistry registry_;
+    HINSTANCE                  instance_ = nullptr;
+    HWND                       hwnd_ = nullptr;
+    HMENU                      menu_ = nullptr;
+    HACCEL                     accel_ = nullptr;
+    core::CommandRegistry      registry_;
+    std::unique_ptr<core::DocumentManager> documents_;
+    TabBar                     tabBar_;
+    StatusBar                  statusBar_;
 
-    uint16_t     nextBufferId_ = 0;
     std::wstring lastDirectory_;
-    bool         showWhitespace_ = false;
-    bool         showEol_ = false;
-    bool         showLineNumbers_ = true;
-    bool         wrapEnabled_ = false;
+    bool showWhitespace_ = false;
+    bool showEol_ = false;
+    bool showLineNumbers_ = true;
+    bool wrapEnabled_ = false;
 };
 
 }  // namespace npcc::shell
