@@ -654,9 +654,13 @@ void MainWindow::UpdateStatus() const {
     statusBar_.SetPosition(document->view->CurrentLine(), document->view->CurrentColumn(),
                            document->view->SelectionByteCount(),
                            document->view->OverwriteMode());
+    std::wstring language = document->view->CurrentLanguageName();
+    if (document->buffer.tier != edit::FileTier::Normal) {
+        language += L"  |  ";
+        language += edit::TierName(document->buffer.tier);
+    }
     statusBar_.SetDocumentInfo(edit::EncodingName(document->buffer.encoding),
-                               edit::EolName(document->buffer.eol),
-                               document->view->CurrentLanguageName(),
+                               edit::EolName(document->buffer.eol), language,
                                document->buffer.isModified);
 }
 

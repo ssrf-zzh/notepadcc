@@ -50,13 +50,6 @@ bool LooksBinary(std::string_view bytes) {
     return suspicious * 100 > probe * 30;
 }
 
-std::uint64_t ToMilliseconds(const FILETIME& time) {
-    ULARGE_INTEGER value{};
-    value.LowPart = time.dwLowDateTime;
-    value.HighPart = time.dwHighDateTime;
-    return value.QuadPart / 10000ull;   // 100ns -> ms
-}
-
 }  // namespace
 
 void EnumerateFiles(const SearchConfig& config, std::vector<std::wstring>& out,
@@ -123,19 +116,6 @@ bool PrepareFile(const std::wstring& path, const SearchConfig& config, PreparedF
     out.bytes = loaded.editorBytes;
     out.utfMode = loaded.encoding.uniMode != edit::UniMode::Ansi;
     out.codePage = loaded.encoding.codePage;
-    return true;
-}
-
-bool QueryFileIdentity(const std::wstring& path, std::uint64_t& size, std::uint64_t& lastWrite) {
-    WIN32_FILE_ATTRIBUTE_DATA data{};
-    if (::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data) == 0) {
-        return false;
-    }
-    ULARGE_INTEGER fileSize{};
-    fileSize.LowPart = data.nFileSizeLow;
-    fileSize.HighPart = data.nFileSizeHigh;
-    size = fileSize.QuadPart;
-    lastWrite = ToMilliseconds(data.ftLastWriteTime);
     return true;
 }
 

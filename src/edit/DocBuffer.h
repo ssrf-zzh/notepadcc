@@ -5,6 +5,7 @@
 
 #include "core/Ids.h"
 #include "edit/Encoding.h"
+#include "edit/FileTier.h"
 
 namespace npcc::edit {
 
@@ -17,6 +18,7 @@ struct DocBuffer {
     bool isModified  = false;
     bool isReadOnly  = false;      // 用户锁定/只读打开
     bool isUntitled  = true;
+    FileTier tier = FileTier::Normal;   // 打开时的分档，决定降级到什么程度
 
     EncodingState encoding;
     EolMode       eol         = EolMode::Crlf;   // 保存时使用的行尾

@@ -5,10 +5,17 @@
 #include <algorithm>
 
 #include "edit/Encoding.h"
+#include "edit/FileTier.h"
 #include "infra/Log.h"
 #include "infra/Paths.h"
 #include "io/AtomicFile.h"
 #include "io/FileReader.h"
+#include "io/MappedFile.h"
+
+namespace {
+// 大文件只读开头这一段做编码探测
+constexpr std::size_t kEncodingProbeBytes = 256 * 1024;
+}
 
 namespace npcc::core {
 namespace {
@@ -105,18 +112,19 @@ OpenOutcome DocumentManager::Open(const std::wstring& path) {
         }
     }
 
-    const io::ReadResult read = io::ReadWholeFile(target);
-    if (!read.ok) {
-        outcome.message = read.message;
-        if (read.tooLarge) {
-            outcome.status = OpenStatus::TooLarge;
-        } else if (read.lastError == ERROR_ACCESS_DENIED) {
-            outcome.status = OpenStatus::AccessDenied;
-        } else if (read.lastError == ERROR_FILE_NOT_FOUND || read.lastError == ERROR_PATH_NOT_FOUND) {
-            outcome.status = OpenStatus::NotFound;
-        } else {
-            outcome.status = OpenStatus::InternalError;
-        }
+    // 先看体积定档：这决定了后面走"全量读入"还是"映射 + 分块装载"
+    std::uint64_t fileSize = 0;
+    std::uint64_t lastWrite = 0;
+    if (!io::QueryFileIdentity(target, fileSize, lastWrite)) {
+        outcome.status = OpenStatus::NotFound;
+        outcome.message = L"文件不存在或无法访问。";
+        return outcome;
+    }
+    const edit::FileTier tier = tierPolicy_.Classify(fileSize);
+    if (!tierPolicy_.Acceptable(fileSize)) {
+        outcome.status = OpenStatus::TooLarge;
+        outcome.message = L"文件超过 " + std::to_wstring(tierPolicy_.refuseAboveBytes >> 20) +
+                          L" MB，当前版本暂不支持打开。";
         return outcome;
     }
 
@@ -126,12 +134,55 @@ OpenOutcome DocumentManager::Open(const std::wstring& path) {
     document->buffer.displayName = FileNameOf(target);
     document->buffer.isUntitled = false;
     document->buffer.isModified = false;
+    document->buffer.tier = tier;
 
-    const edit::LoadResult loaded = edit::DetectAndPrepare(read.bytes, kFallbackCodePage);
-    document->buffer.encoding = loaded.encoding;
-    document->buffer.eol = loaded.eol;
-    document->buffer.detectedEol = loaded.eol;
-    outcome.message = loaded.warning;   // 例如"检测到混合行尾"，非致命
+    // 大文件路径用的是一份临时映射，装载完成后即可释放——
+    // ILoader 会把数据拷进 Scintilla 的文档模型里
+    io::MappedFile mapped;
+    std::string loadedBytes;   // 仅常规路径使用
+
+    if (tier == edit::FileTier::Normal) {
+        const io::ReadResult read = io::ReadWholeFile(target, tierPolicy_.normalMaxBytes);
+        if (!read.ok) {
+            outcome.message = read.message;
+            if (read.lastError == ERROR_ACCESS_DENIED) {
+                outcome.status = OpenStatus::AccessDenied;
+            } else {
+                outcome.status = OpenStatus::InternalError;
+            }
+            return outcome;
+        }
+        const edit::LoadResult loaded = edit::DetectAndPrepare(read.bytes, kFallbackCodePage);
+        document->buffer.encoding = loaded.encoding;
+        document->buffer.eol = loaded.eol;
+        document->buffer.detectedEol = loaded.eol;
+        outcome.message = loaded.warning;
+        loadedBytes = loaded.editorBytes;
+    } else {
+        if (!mapped.Open(target)) {
+            outcome.status = OpenStatus::InternalError;
+            outcome.message = mapped.Error();
+            return outcome;
+        }
+        const std::string_view mappedBytes(mapped.Data(), static_cast<size_t>(mapped.Size()));
+        const std::string_view head = mappedBytes.substr(0, std::min<size_t>(mappedBytes.size(),
+                                                                            kEncodingProbeBytes));
+        const edit::EncodingState encoding = edit::DetectEncodingFromHead(head, kFallbackCodePage);
+        if (encoding.uniMode == edit::UniMode::Utf16LE ||
+            encoding.uniMode == edit::UniMode::Utf16BE) {
+            // UTF-16 必须先转成 UTF-8 才能交给 Scintilla，那就要整份复制，
+            // 大文件下等于把映射省下的内存又花回去。如实告知而不是硬撑。
+            outcome.status = OpenStatus::EncodingFailed;
+            outcome.message = L"大文件模式下暂不支持 UTF-16 编码，请先用其他工具转换。";
+            return outcome;
+        }
+        document->buffer.encoding = encoding;
+        document->buffer.eol = edit::DetectEol(head);
+        document->buffer.detectedEol = document->buffer.eol;
+        outcome.message = (tier == edit::FileTier::Huge)
+                              ? L"文件较大，已以只读方式打开。"
+                              : L"文件较大，已进入大文件模式（已关闭自动换行等显示项）。";
+    }
 
     document->view = std::make_unique<edit::EditView>();
     if (!document->view->Create(viewParent_, NextControlId())) {
@@ -145,15 +196,41 @@ OpenOutcome DocumentManager::Open(const std::wstring& path) {
                                     ? document->buffer.encoding.codePage
                                     : edit::kCodePageUtf8);
     document->view->SetEolMode(document->buffer.eol);
-    document->view->SetText(loaded.editorBytes);
-    document->view->ApplyLanguageForPath(target);
-    document->view->ClearUndoBuffer();
-    document->view->MarkSavePoint();
+
+    if (tier == edit::FileTier::Normal) {
+        document->view->SetText(loadedBytes);
+        document->view->ApplyLanguageForPath(target);
+        document->view->ClearUndoBuffer();
+    } else {
+        // BOM 不能交给 Scintilla：它按代码页解释缓冲区，BOM 会变成一个可见字符
+        const std::size_t skip = document->buffer.encoding.hasBom ? 3u : 0u;
+        const char* data = mapped.Data() + skip;
+        const std::uint64_t dataSize = mapped.Size() - skip;
+        if (!document->view->LoadFromChunkedData(data, dataSize, true)) {
+            outcome.status = OpenStatus::InternalError;
+            outcome.message = L"装载大文件失败。";
+            return outcome;
+        }
+        if (tier == edit::FileTier::Huge) {
+            document->view->ApplyHugeFileMode();
+            document->buffer.isReadOnly = true;
+        } else {
+            document->view->ApplyLargeFileDisplayMode();
+            document->view->ApplyLanguageForPath(target);
+        }
+        // 大文件不保留撤销历史会是更大的损失，所以这里只在超大文件下关闭
+        document->view->MarkSavePoint();
+    }
     document->view->SetVisible(false);
 
     edit::Document* added = AddDocument(std::move(document));
     Activate(added);
-    infra::LogInfo(L"file", L"已打开: " + target);
+    std::wstring log = L"已打开: " + target;
+    if (tier != edit::FileTier::Normal) {
+        log += L"（" + std::wstring(edit::TierName(tier)) + L"，" +
+               std::to_wstring(fileSize / 1024) + L" KB）";
+    }
+    infra::LogInfo(L"file", log);
     outcome.document = added;
     outcome.status = OpenStatus::Ok;
     return outcome;

@@ -68,6 +68,13 @@ public:
     // ---- 文本 ----
     void SetText(std::string_view bytes) const;
     std::string GetAllText() const;
+    // 用 Scintilla 的 ILoader 分块装载。与 SetText 的区别在于：
+    // 不会在应用层先拼一个完整副本，峰值内存少一份文件大小。
+    bool LoadFromChunkedData(const char* data, std::uint64_t size, bool largeDocument) const;
+    // 大文件模式下的降级：关掉最吃性能的显示项
+    void ApplyLargeFileDisplayMode() const;
+    // 超大文件：再叠上只读、关闭撤销、改为纯文本着色
+    void ApplyHugeFileMode() const;
 
     // ---- 文档状态 ----
     void SetReadOnly(bool readOnly) const;

@@ -383,6 +383,70 @@ def test_column_editing(root):
             proc.kill()
 
 
+def test_large_file(root):
+    """大文件分档：真开一个超过 8 MB 的文件，核对应用是否走了大文件路径。
+
+    状态栏是 STATUSCLASSNAMEW 控件，读取文本要用 SB_GETTEXT——它的消息号
+    超过 WM_USER，跨进程不会封送指针参数，所以这里改成核对程序自己写的日志。
+    """
+    work = os.path.join(root, "build", "large_test")
+    os.makedirs(work, exist_ok=True)
+    path = os.path.join(work, "big.txt")
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        for i in range(240000):
+            handle.write(f"line {i:06d} abcdefghijklmnopqrstuvwxyz\n")
+    size_mb = os.path.getsize(path) / (1024 * 1024)
+    if size_mb <= 8:
+        print(f"  FAIL: 造的测试文件只有 {size_mb:.1f} MB，够不到大文件阈值")
+        return False
+
+    log_path = os.path.join(root, "build", "bin", "config", "logs", "notepadcc.log")
+    if os.path.exists(log_path):
+        os.remove(log_path)
+    session = os.path.join(root, "build", "bin", "config", "session.xml")
+    if os.path.exists(session):
+        os.remove(session)
+
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    started = time.time()
+    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    time.sleep(12)
+    window = user32.FindWindowW("notepadccMainWindow", "notepadcc - big.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到打开了 big.txt 的窗口")
+            return False
+        elapsed = time.time() - started
+
+        log_text = ""
+        if os.path.exists(log_path):
+            with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
+                log_text = handle.read()
+        if "大文件模式" not in log_text:
+            print(f"  FAIL: 日志里没有大文件模式的记录\n{log_text[-400:]}")
+            return False
+
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到可见的编辑控件")
+            return False
+        length = user32.SendMessageW(scinti, SCI_GETLENGTH, 0, 0)
+        expected = os.path.getsize(path)
+        if length != expected:
+            print(f"  FAIL: 装载长度不符，编辑器 {length} vs 文件 {expected}")
+            return False
+
+        print(f"  大文件分档：{size_mb:.1f} MB 文件以{elapsed:.1f} 秒进入大文件模式，"
+              f"装载长度一致")
+        return True
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            time.sleep(2)
+        if proc.poll() is None:
+            proc.kill()
+
+
 def test_find_bar(main_window, root):
     """查找栏：填词、点下一个，核对编辑器选区是否落在第一个匹配上。"""
     target = os.path.join(root, "README.md")
@@ -518,11 +582,13 @@ def run():
     # 列编辑另起一个实例：跨进程无法用 SCI_SETTEXT 准备文档
     if not test_column_editing(root):
         failed = True
+    if not test_large_file(root):
+        failed = True
 
     if failed:
         print("FAIL: 界面回归未通过")
         return 1
-    print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑）")
+    print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + 大文件）")
     return 0
 
 

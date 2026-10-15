@@ -258,6 +258,33 @@ LoadResult DetectAndPrepare(std::string_view raw, uint32_t fallbackCodePage) {
     return result;
 }
 
+EncodingState DetectEncodingFromHead(std::string_view head, uint32_t fallbackCodePage) {
+    EncodingState state;
+    state.codePage = fallbackCodePage;
+
+    if (HasPrefix(head, {0xEF, 0xBB, 0xBF})) {
+        state.uniMode = UniMode::Utf8Bom;
+        state.hasBom = true;
+        state.confidence = 100;
+    } else if (HasPrefix(head, {0xFF, 0xFE})) {
+        state.uniMode = UniMode::Utf16LE;
+        state.hasBom = true;
+        state.confidence = 100;
+    } else if (HasPrefix(head, {0xFE, 0xFF})) {
+        state.uniMode = UniMode::Utf16BE;
+        state.hasBom = true;
+        state.confidence = 100;
+    } else if (head.empty() || IsValidUtf8(head)) {
+        state.uniMode = UniMode::Utf8;
+        state.confidence = head.empty() ? 100 : 95;
+    } else {
+        // 开头不是合法 UTF-8，按配置的代码页当作 ANSI
+        state.uniMode = UniMode::Ansi;
+        state.confidence = 80;
+    }
+    return state;
+}
+
 std::string EncodeForSave(std::string_view editorBytes, const EncodingState& state) {
     switch (state.uniMode) {
         case UniMode::Ansi:

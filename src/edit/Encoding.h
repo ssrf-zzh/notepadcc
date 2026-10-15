@@ -39,6 +39,10 @@ struct LoadResult {
 // 探测编码并准备编辑器字节流。fallbackCodePage 用于无法判定时的 ANSI 代码页。
 LoadResult DetectAndPrepare(std::string_view raw, uint32_t fallbackCodePage);
 
+// 只探测编码、不做任何转换。大文件路径用它：为了探测把整份文件复制一遍
+// 就违背了"映射装载"的初衷，所以只看开头一段。
+EncodingState DetectEncodingFromHead(std::string_view head, uint32_t fallbackCodePage);
+
 // 把编辑器字节流按原始编码写回磁盘格式（含 BOM 处理）。
 std::string EncodeForSave(std::string_view editorBytes, const EncodingState& state);
 

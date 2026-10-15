@@ -8,6 +8,7 @@
 
 #include "core/Ids.h"
 #include "edit/Document.h"
+#include "edit/FileTier.h"
 
 namespace npcc::core {
 
@@ -16,6 +17,7 @@ enum class OpenStatus {
     NotFound,
     AccessDenied,
     TooLarge,
+    EncodingFailed,
     AlreadyOpen,
     InternalError,
 };
@@ -37,6 +39,9 @@ class DocumentManager {
 public:
     explicit DocumentManager(HWND viewParent);
     ~DocumentManager();
+
+    // 大文件分档阈值（设计文档 6.1）。可配置，这里先给默认值。
+    edit::TierPolicy& TierPolicyRef() noexcept { return tierPolicy_; }
 
     DocumentManager(const DocumentManager&) = delete;
     DocumentManager& operator=(const DocumentManager&) = delete;
@@ -89,6 +94,7 @@ private:
     int                                      nextControlId_ = 100;
     int                                      nextBufferId_ = 1;   // 0 保留给"无效"
     int                                      untitledCounter_ = 0;
+    edit::TierPolicy                         tierPolicy_;
 };
 
 }  // namespace npcc::core

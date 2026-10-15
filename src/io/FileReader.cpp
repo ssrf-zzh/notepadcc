@@ -59,4 +59,20 @@ ReadResult ReadWholeFile(const std::wstring& path, uint64_t maxBytes) {
     return result;
 }
 
+bool QueryFileIdentity(const std::wstring& path, uint64_t& size, uint64_t& lastWriteMs) {
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data) == 0) {
+        return false;
+    }
+    ULARGE_INTEGER fileSize{};
+    fileSize.LowPart = data.nFileSizeLow;
+    fileSize.HighPart = data.nFileSizeHigh;
+    size = fileSize.QuadPart;
+    ULARGE_INTEGER written{};
+    written.LowPart = data.ftLastWriteTime.dwLowDateTime;
+    written.HighPart = data.ftLastWriteTime.dwHighDateTime;
+    lastWriteMs = written.QuadPart / 10000ull;   // 100ns -> ms
+    return true;
+}
+
 }  // namespace npcc::io

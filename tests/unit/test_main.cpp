@@ -15,9 +15,11 @@
 #include "edit/ColumnEdit.h"
 #include "edit/ColumnText.h"
 #include "edit/Encoding.h"
+#include "edit/FileTier.h"
 #include "edit/EditView.h"
 #include "io/AtomicFile.h"
 #include "io/FileReader.h"
+#include "io/MappedFile.h"
 #include "io/XmlFile.h"
 #include "search/EscapeSequence.h"
 #include "search/CrossFileSearch.h"
@@ -1489,6 +1491,137 @@ int main() {
             Check(report.applied == 1, "正则替换写回成功");
             CheckEqual(readFile(dir / "x.txt"), "host#user\nplace#other\n", "捕获组已重排");
             std::filesystem::remove_all(dir, ec);
+        }
+    }
+
+    // ---------------------------------------------------------------- 大文件分档
+    Section("大文件分档（T1 常规 / T2 大文件 / T3 只读）");
+    {
+        npcc::edit::TierPolicy policy;
+        Check(policy.Classify(0) == npcc::edit::FileTier::Normal, "空文件属常规档");
+        Check(policy.Classify(policy.normalMaxBytes) == npcc::edit::FileTier::Normal,
+              "等于常规上限仍在常规档");
+        Check(policy.Classify(policy.normalMaxBytes + 1) == npcc::edit::FileTier::Large,
+              "刚过常规上限进入大文件档");
+        Check(policy.Classify(policy.largeMaxBytes) == npcc::edit::FileTier::Large,
+              "等于大文件上限仍在大文件档");
+        Check(policy.Classify(policy.largeMaxBytes + 1) == npcc::edit::FileTier::Huge,
+              "超过大文件上限进入只读档");
+        Check(policy.Acceptable(policy.refuseAboveBytes), "等于拒绝上限仍可打开");
+        Check(!policy.Acceptable(policy.refuseAboveBytes + 1), "超过拒绝上限不可打开");
+
+        // 只探测编码、不复制内容
+        {
+            const auto utf8 = npcc::edit::DetectEncodingFromHead("hello 中文", 936);
+            Check(utf8.uniMode == npcc::edit::UniMode::Utf8, "头部探测出 UTF-8");
+            const std::string bomHead = std::string("\xEF\xBB\xBF") + "x";
+            const auto bom = npcc::edit::DetectEncodingFromHead(bomHead, 936);
+            Check(bom.uniMode == npcc::edit::UniMode::Utf8Bom && bom.hasBom,
+                  "头部探测出 UTF-8 BOM");
+            const std::string gbkHead("\xB5\xDA\xD2\xBB", 4);
+            const auto ansi = npcc::edit::DetectEncodingFromHead(gbkHead, 936);
+            Check(ansi.uniMode == npcc::edit::UniMode::Ansi && ansi.codePage == 936,
+                  "头部探测出 ANSI");
+            const std::string utf16Head("\xFF\xFE", 2);
+            const auto utf16 = npcc::edit::DetectEncodingFromHead(utf16Head, 936);
+            Check(utf16.uniMode == npcc::edit::UniMode::Utf16LE, "头部探测出 UTF-16LE");
+        }
+
+        const std::filesystem::path dir =
+            std::filesystem::temp_directory_path() / "notepadcc_tier_test";
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+        std::filesystem::create_directories(dir, ec);
+
+        // 造一份有规律的多行文本，便于核对装载完整性
+        std::string big;
+        big.reserve(16 * 1024);
+        for (int i = 0; i < 800; ++i) {
+            big += "line " + std::to_string(i) + " abcdefghijklmnopqrstuvwxyz\n";
+        }
+        const std::filesystem::path bigPath = dir / "big.txt";
+        npcc::io::WriteFileAtomic(bigPath.wstring(), big);
+
+        // 内存映射本身
+        {
+            npcc::io::MappedFile mapped(bigPath.wstring());
+            Check(mapped.Valid(), "映射文件成功");
+            Check(mapped.Size() == big.size(), "映射大小与文件一致");
+            Check(mapped.Data() != nullptr &&
+                      std::string_view(mapped.Data(), 5) == "line ",
+                  "映射内容可读");
+
+            npcc::io::MappedFile missing((dir / "no_such.txt").wstring());
+            Check(!missing.Valid(), "映射不存在的文件应当失败");
+            Check(!missing.Error().empty(), "失败时给出可读原因");
+        }
+
+        HWND host = CreateHiddenHost();
+        Check(host != nullptr, "创建隐藏宿主窗口");
+        if (host != nullptr) {
+            npcc::core::DocumentManager manager(host);
+            // 把阈值压低，用几个小文件就能覆盖三档，不必真造几十 MB 的文件
+            manager.TierPolicyRef().normalMaxBytes = 1024;
+            manager.TierPolicyRef().largeMaxBytes = 64 * 1024;
+            manager.TierPolicyRef().refuseAboveBytes = 256 * 1024;
+            Check(big.size() > manager.TierPolicyRef().normalMaxBytes &&
+                      big.size() <= manager.TierPolicyRef().largeMaxBytes,
+                  "测试用的文件体积落在 T2 区间内");
+
+            const auto smallPath = dir / "small.txt";
+            npcc::io::WriteFileAtomic(smallPath.wstring(), "tiny\n");
+            const auto open1 = manager.Open(smallPath.wstring());
+            Check(open1.status == npcc::core::OpenStatus::Ok, "小文件打开成功");
+            Check(open1.document != nullptr &&
+                      open1.document->buffer.tier == npcc::edit::FileTier::Normal,
+                  "小文件归入常规档");
+            Check(open1.document != nullptr && !open1.document->buffer.isReadOnly,
+                  "常规档可编辑");
+
+            const auto open2 = manager.Open(bigPath.wstring());
+            Check(open2.status == npcc::core::OpenStatus::Ok, "大文件打开成功");
+            Check(open2.document != nullptr &&
+                      open2.document->buffer.tier == npcc::edit::FileTier::Large,
+                  "大文件归入 T2 档");
+            if (open2.document != nullptr && open2.document->view) {
+                // 分块装载后的内容必须与文件完全一致
+                const std::string loaded = open2.document->view->GetAllText();
+                Check(loaded.size() == big.size(), "分块装载后长度一致");
+                Check(loaded == big, "分块装载后内容一致");
+                Check(!open2.document->buffer.isReadOnly, "T2 档仍可编辑");
+                Check(!open2.document->view->IsModified(), "刚一打开不应是已修改状态");
+            }
+
+            // 把阈值再压低，让同一份文件落进 T3
+            manager.TierPolicyRef().largeMaxBytes = 2048;
+            npcc::io::WriteFileAtomic((dir / "huge.txt").wstring(), big);
+            const auto open4 = manager.Open((dir / "huge.txt").wstring());
+            Check(open4.status == npcc::core::OpenStatus::Ok, "超大文件（相对阈值）打开成功");
+            Check(open4.document != nullptr &&
+                      open4.document->buffer.tier == npcc::edit::FileTier::Huge,
+                  "归入 T3 只读档");
+            if (open4.document != nullptr && open4.document->view) {
+                Check(open4.document->buffer.isReadOnly, "T3 档标记为只读");
+                Check(open4.document->view->GetAllText() == big, "T3 装载内容一致");
+                // 只读必须真的挡住写入
+                open4.document->view->SetCaretPosition(0);
+                open4.document->view->ReplaceSelection("X");
+                Check(open4.document->view->GetAllText() == big, "只读文档拒绝写入");
+            }
+
+            // 超过拒绝上限
+            manager.TierPolicyRef().refuseAboveBytes = 4096;
+            const auto refused = manager.Open((dir / "huge.txt").wstring());
+            Check(refused.status == npcc::core::OpenStatus::AlreadyOpen,
+                  "已打开的文档会直接复用，不再走体积判定");
+            npcc::io::WriteFileAtomic((dir / "toobig.txt").wstring(), big);
+            const auto tooBig = manager.Open((dir / "toobig.txt").wstring());
+            Check(tooBig.status == npcc::core::OpenStatus::TooLarge,
+                  "超过拒绝上限时报 TooLarge");
+            Check(!tooBig.message.empty(), "拒绝时给出可读说明");
+
+            std::filesystem::remove_all(dir, ec);
+            ::DestroyWindow(host);
         }
     }
 

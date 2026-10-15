@@ -6,6 +6,7 @@
 #include <string_view>
 #include <vector>
 
+#include "io/FileReader.h"
 #include "search/SearchConfig.h"
 
 namespace npcc::search {
@@ -27,8 +28,8 @@ struct PreparedFile {
 
 bool PrepareFile(const std::wstring& path, const SearchConfig& config, PreparedFile& out);
 
-// 文件身份（大小 + 最后写入时间）。用于在"预览"与"写回"之间发现文件被外部改动。
-bool QueryFileIdentity(const std::wstring& path, std::uint64_t& size, std::uint64_t& lastWrite);
+// 文件身份查询复用 io 层实现，避免两处各写一份
+using npcc::io::QueryFileIdentity;
 
 // 行映射工具
 std::vector<std::size_t> BuildLineStarts(std::string_view text);

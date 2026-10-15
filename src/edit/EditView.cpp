@@ -5,6 +5,7 @@
 #include <Scintilla.h>
 // Lexilla.h 依赖 ILexer.h 中的 ILexer5（它自己不包含该头文件），必须先引入
 #include <ILexer.h>
+#include <ILoader.h>
 #include <Lexilla.h>
 
 #include <cwctype>
@@ -199,6 +200,64 @@ std::string EditView::GetAllText() const {
          reinterpret_cast<intptr_t>(buffer.data()));
     buffer.resize(static_cast<size_t>(length));
     return buffer;
+}
+
+bool EditView::LoadFromChunkedData(const char* data, std::uint64_t size,
+                                   bool largeDocument) const {
+    if (hwnd_ == nullptr || data == nullptr) {
+        return false;
+    }
+    // DocumentOption::TextLarge = 0x100，提示 Scintilla 按大文档处理
+    const intptr_t option = largeDocument ? 0x100 : 0;
+    auto* loader = reinterpret_cast<Scintilla::ILoader*>(
+        Send(SCI_CREATELOADER, static_cast<uintptr_t>(size), option));
+    if (loader == nullptr) {
+        return false;
+    }
+
+    constexpr std::uint64_t kChunkBytes = 1ull << 20;   // 每次投喂 1 MB
+    std::uint64_t offset = 0;
+    int status = 0;
+    while (offset < size) {
+        const std::uint64_t remaining = size - offset;
+        const auto length = static_cast<Sci_Position>(
+            remaining < kChunkBytes ? remaining : kChunkBytes);
+        status = loader->AddData(data + offset, length);
+        if (status != 0) {   // SC_STATUS_OK == 0
+            break;
+        }
+        offset += static_cast<std::uint64_t>(length);
+    }
+    if (status != 0) {
+        loader->Release();
+        return false;
+    }
+
+    if (void* document = loader->ConvertToDocument(); document != nullptr) {
+        // SCI_SETDOCPOINTER 会自己 AddRef，调用方的引用由 Release 归还
+        Send(SCI_SETDOCPOINTER, 0, reinterpret_cast<intptr_t>(document));
+    }
+    loader->Release();
+    return true;
+}
+
+void EditView::ApplyLargeFileDisplayMode() const {
+    SetWrapMode(false);
+    SetShowWhitespace(false);
+    SetShowEol(false);
+    Send(SCI_SETINDENTATIONGUIDES, 0);
+    Send(SCI_SETCARETLINEVISIBLE, 0);
+}
+
+void EditView::ApplyHugeFileMode() const {
+    ApplyLargeFileDisplayMode();
+    SetReadOnly(true);
+    Send(SCI_SETUNDOCOLLECTION, 0);
+    Send(SCI_SETMARGINWIDTHN, static_cast<uintptr_t>(kMarginBookmark), 0);
+    // 超大文件不做词法分析：Lexilla 会扫描全文，代价太高
+    Scintilla::ILexer5* plain = CreateLexer("null");
+    Send(SCI_SETILEXER, 0, reinterpret_cast<intptr_t>(plain));
+    languageName_ = L"纯文本（大文件）";
 }
 
 void EditView::SetReadOnly(bool readOnly) const {
