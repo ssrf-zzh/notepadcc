@@ -18,6 +18,8 @@
 #include "core/SessionManager.h"
 #include "edit/ColumnEdit.h"
 #include "edit/ColumnText.h"
+#include "edit/TextTools.h"
+#include "core/CommandText.h"
 #include "search/ByteMatcher.h"
 #include "shell/MenuBuilder.h"
 #include "shell/TabBar.h"
@@ -90,6 +92,34 @@ enum : npcc::core::CmdId {
     kCmdEncodingUtf8Bom = npcc::core::MakeCmdId(13, 3),
     kCmdEncodingUtf16Le = npcc::core::MakeCmdId(13, 4),
     kCmdEncodingUtf16Be = npcc::core::MakeCmdId(13, 5),
+
+    // 工具（14 类）：行操作与文本转换
+    kCmdToolDuplicateLine   = npcc::core::MakeCmdId(14, 1),
+    kCmdToolDeleteLine      = npcc::core::MakeCmdId(14, 2),
+    kCmdToolMoveLineUp      = npcc::core::MakeCmdId(14, 3),
+    kCmdToolMoveLineDown    = npcc::core::MakeCmdId(14, 4),
+    kCmdToolSortAsc         = npcc::core::MakeCmdId(14, 5),
+    kCmdToolSortDesc        = npcc::core::MakeCmdId(14, 6),
+    kCmdToolSortCaseInsAsc  = npcc::core::MakeCmdId(14, 7),
+    kCmdToolSortCaseInsDesc = npcc::core::MakeCmdId(14, 8),
+    kCmdToolSortLengthAsc   = npcc::core::MakeCmdId(14, 9),
+    kCmdToolSortLengthDesc  = npcc::core::MakeCmdId(14, 10),
+    kCmdToolRemoveEmpty     = npcc::core::MakeCmdId(14, 11),
+    kCmdToolRemoveDupFirst  = npcc::core::MakeCmdId(14, 12),
+    kCmdToolRemoveDupLast   = npcc::core::MakeCmdId(14, 13),
+    kCmdToolReverseLines    = npcc::core::MakeCmdId(14, 14),
+    kCmdToolTrimTrailing    = npcc::core::MakeCmdId(14, 15),
+    kCmdToolTrimLeading     = npcc::core::MakeCmdId(14, 16),
+    kCmdToolAddLineNumbers  = npcc::core::MakeCmdId(14, 17),
+    kCmdToolStripLineNumbers= npcc::core::MakeCmdId(14, 18),
+    kCmdToolUpperCase       = npcc::core::MakeCmdId(14, 19),
+    kCmdToolLowerCase       = npcc::core::MakeCmdId(14, 20),
+    kCmdToolUrlEncode       = npcc::core::MakeCmdId(14, 21),
+    kCmdToolUrlDecode       = npcc::core::MakeCmdId(14, 22),
+    kCmdToolBase64Encode    = npcc::core::MakeCmdId(14, 23),
+    kCmdToolBase64Decode    = npcc::core::MakeCmdId(14, 24),
+    kCmdToolHtmlEscape      = npcc::core::MakeCmdId(14, 25),
+    kCmdToolHtmlUnescape    = npcc::core::MakeCmdId(14, 26),
 
     kCmdWindowNext = npcc::core::MakeCmdId(11, 1),
     kCmdWindowPrev = npcc::core::MakeCmdId(11, 2),
@@ -353,7 +383,18 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             }
             const auto id = static_cast<core::CmdId>(controlId);
             const core::CmdContext context = Context();
-            if (registry_.Execute(id, context) == core::ExecResult::NotFound) {
+            const core::ExecResult executed = registry_.Execute(id, context);
+            if (executed == core::ExecResult::Disabled && id >= 0x1000) {
+                // "点了没反应"的另一种来路：命令注册了但当前不该可用。同样要留痕，
+                // 否则只能靠人肉二分猜。
+                infra::LogWarn(L"cmd", L"命令被禁用，未执行: " + std::to_wstring(id));
+            }
+            if (executed == core::ExecResult::NotFound) {
+                // 只记"像命令"的 ID：控件 id（文档视图是 100 起）走 WM_COMMAND 是正常的，
+                // 记进来只会刷屏。命令 ID 的高 4 位是类别，所以从 4096 起。
+                if (id >= 0x1000) {
+                    infra::LogWarn(L"cmd", L"收到未注册的命令 ID: " + std::to_wstring(id));
+                }
                 return ::DefWindowProcW(hwnd_, message, wParam, lParam);
             }
             UpdateStatus();
@@ -459,7 +500,9 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             }
             if (wParam == kTimerCrashTest) {
                 ::KillTimer(hwnd_, kTimerCrashTest);
+                infra::LogInfo(L"app", L"自检开关：现在故意触发一次访问违例");
                 infra::crashguard::RaiseTestCrash();   // 自检开关：这里之后不会再返回
+                infra::LogWarn(L"app", L"自检开关：异常没有发生（RaiseTestCrash 返回了）");
                 return 0;
             }
             break;
@@ -728,6 +771,126 @@ void MainWindow::RegisterCommands() {
         L"转为 UTF-16 BE(&E)", needsWritable,
         [this](const CmdContext&) { CommandConvertEncoding(edit::UniMode::Utf16BE); });
 
+    // ---- 工具：行操作与文本转换（设计文档 2.13）----
+    // 用分组分隔线代替子菜单：本版的菜单是"一个类别一个平铺菜单"，
+    // 嵌套子菜单要等菜单定制那一版。分组顺序是 行操作 → 排序 → 去重 → 空白 → 行号 → 大小写 → 编码。
+    // 分隔线也要占一个命令 ID。**必须给它显式的保留号**：用"自动分配"的话，
+    // 它领到的号正好是紧随其后的那条命令的显式号，于是那条命令被当成重复注册丢弃
+    // （表现：菜单里有这一项，点了没反应）。保留号放在没人用的第 15 类里。
+    int separatorIndex = 0;
+    auto addSeparator = [&](const wchar_t* key) {
+        add(core::MakeCmdId(15, static_cast<uint16_t>(++separatorIndex)), CmdCategory::Tools, key,
+            L"-", core::kCmdNone, [](const CmdContext&) {});
+    };
+    auto addTool = [&](core::CmdId id, const wchar_t* key, const wchar_t* text,
+                       std::function<std::string(std::string_view, std::uint32_t)> tool) {
+        add(id, CmdCategory::Tools, key, text, needsWritable,
+            [this, tool = std::move(tool), text](const CmdContext&) {
+                ApplyTextTool(tool, text);
+            });
+    };
+    auto addLineOp = [&](core::CmdId id, const wchar_t* key, const wchar_t* text,
+                         void (edit::EditView::*operation)() const) {
+        add(id, CmdCategory::Tools, key, text, needsWritable,
+            [this, operation](const CmdContext&) {
+                if (edit::Document* document = ActiveDocument();
+                    document != nullptr && document->view) {
+                    (document->view.get()->*operation)();
+                }
+            });
+    };
+
+    addLineOp(kCmdToolDuplicateLine, L"cmd.tool.duplicateLine", L"复制当前行(&D)",
+              &edit::EditView::DuplicateCurrentLine);
+    addLineOp(kCmdToolDeleteLine, L"cmd.tool.deleteLine", L"删除当前行(&L)",
+              &edit::EditView::DeleteCurrentLine);
+    addLineOp(kCmdToolMoveLineUp, L"cmd.tool.moveLineUp", L"上移当前行(&U)",
+              &edit::EditView::MoveCurrentLineUp);
+    addLineOp(kCmdToolMoveLineDown, L"cmd.tool.moveLineDown", L"下移当前行(&N)",
+              &edit::EditView::MoveCurrentLineDown);
+
+    addSeparator(L"cmd.tool.sepSort");
+    addTool(kCmdToolSortAsc, L"cmd.tool.sortAsc", L"升序排序(&A)",
+            [](std::string_view text, std::uint32_t) {
+                return edit::SortLines(text, edit::SortOrder::Ascending, true);
+            });
+    addTool(kCmdToolSortDesc, L"cmd.tool.sortDesc", L"降序排序(&Z)",
+            [](std::string_view text, std::uint32_t) {
+                return edit::SortLines(text, edit::SortOrder::Descending, true);
+            });
+    addTool(kCmdToolSortCaseInsAsc, L"cmd.tool.sortCaseInsAsc", L"升序排序（忽略大小写）",
+            [](std::string_view text, std::uint32_t) {
+                return edit::SortLines(text, edit::SortOrder::Ascending, false);
+            });
+    addTool(kCmdToolSortCaseInsDesc, L"cmd.tool.sortCaseInsDesc", L"降序排序（忽略大小写）",
+            [](std::string_view text, std::uint32_t) {
+                return edit::SortLines(text, edit::SortOrder::Descending, false);
+            });
+    addTool(kCmdToolSortLengthAsc, L"cmd.tool.sortLengthAsc", L"按长度升序排序",
+            [](std::string_view text, std::uint32_t) {
+                return edit::SortLinesByLength(text, edit::SortOrder::Ascending);
+            });
+    addTool(kCmdToolSortLengthDesc, L"cmd.tool.sortLengthDesc", L"按长度降序排序",
+            [](std::string_view text, std::uint32_t) {
+                return edit::SortLinesByLength(text, edit::SortOrder::Descending);
+            });
+
+    addSeparator(L"cmd.tool.sepDup");
+    addTool(kCmdToolRemoveEmpty, L"cmd.tool.removeEmpty", L"删除空行(&E)",
+            [](std::string_view text, std::uint32_t) { return edit::RemoveEmptyLines(text); });
+    addTool(kCmdToolRemoveDupFirst, L"cmd.tool.removeDupFirst", L"删除重复行（保留首次出现）",
+            [](std::string_view text, std::uint32_t) {
+                return edit::RemoveDuplicateLines(text, false);
+            });
+    addTool(kCmdToolRemoveDupLast, L"cmd.tool.removeDupLast", L"删除重复行（保留最后一次）",
+            [](std::string_view text, std::uint32_t) {
+                return edit::RemoveDuplicateLines(text, true);
+            });
+    addTool(kCmdToolReverseLines, L"cmd.tool.reverseLines", L"反转行序(&R)",
+            [](std::string_view text, std::uint32_t) { return edit::ReverseLines(text); });
+
+    addSeparator(L"cmd.tool.sepSpace");
+    addTool(kCmdToolTrimTrailing, L"cmd.tool.trimTrailing", L"去掉行尾空白",
+            [](std::string_view text, std::uint32_t) {
+                return edit::TrimTrailingWhitespace(text);
+            });
+    addTool(kCmdToolTrimLeading, L"cmd.tool.trimLeading", L"去掉行首空白",
+            [](std::string_view text, std::uint32_t) {
+                return edit::TrimLeadingWhitespace(text);
+            });
+    addTool(kCmdToolAddLineNumbers, L"cmd.tool.addLineNumbers", L"加上行号",
+            [](std::string_view text, std::uint32_t) {
+                return edit::AddLineNumbers(text, 1, 1, 0);
+            });
+    addTool(kCmdToolStripLineNumbers, L"cmd.tool.stripLineNumbers", L"去掉行号",
+            [](std::string_view text, std::uint32_t) {
+                return edit::StripLineNumbers(text);
+            });
+
+    addSeparator(L"cmd.tool.sepCase");
+    addTool(kCmdToolUpperCase, L"cmd.tool.upperCase", L"转为大写(&U)",
+            [](std::string_view text, std::uint32_t codePage) {
+                return edit::ToUpperCase(text, codePage);
+            });
+    addTool(kCmdToolLowerCase, L"cmd.tool.lowerCase", L"转为小写(&O)",
+            [](std::string_view text, std::uint32_t codePage) {
+                return edit::ToLowerCase(text, codePage);
+            });
+
+    addSeparator(L"cmd.tool.sepEncode");
+    addTool(kCmdToolUrlEncode, L"cmd.tool.urlEncode", L"URL 编码",
+            [](std::string_view text, std::uint32_t) { return edit::UrlEncode(text); });
+    add(kCmdToolUrlDecode, CmdCategory::Tools, L"cmd.tool.urlDecode", L"URL 解码",
+        needsWritable, [this](const CmdContext&) { CommandDecodeText(false); });
+    addTool(kCmdToolBase64Encode, L"cmd.tool.base64Encode", L"Base64 编码",
+            [](std::string_view text, std::uint32_t) { return edit::Base64Encode(text); });
+    add(kCmdToolBase64Decode, CmdCategory::Tools, L"cmd.tool.base64Decode", L"Base64 解码",
+        needsWritable, [this](const CmdContext&) { CommandDecodeText(true); });
+    addTool(kCmdToolHtmlEscape, L"cmd.tool.htmlEscape", L"HTML 实体转义",
+            [](std::string_view text, std::uint32_t) { return edit::EscapeHtml(text); });
+    addTool(kCmdToolHtmlUnescape, L"cmd.tool.htmlUnescape", L"HTML 实体还原",
+            [](std::string_view text, std::uint32_t) { return edit::UnescapeHtml(text); });
+
     // ---- 窗口 ----
     add(kCmdWindowNext, CmdCategory::Window, L"cmd.window.next", L"下一个标签(&N)",
         core::kCmdNone, [this](const CmdContext&) { CommandNextTab(); });
@@ -810,6 +973,13 @@ void MainWindow::RegisterCommands() {
     registry_.BindShortcut(kCmdWindowNext, ctrl, VK_NEXT, false);
     registry_.BindShortcut(kCmdWindowPrev, ctrl, VK_PRIOR, false);
     registry_.BindShortcut(kCmdSettingsPreferences, ctrl, VK_OEM_COMMA, true);
+    // 附录 A 里属于行操作的默认键（其余工具命令不给默认键，避免和打字冲突）
+    registry_.BindShortcut(kCmdToolDuplicateLine, ctrl, 'D', true);
+    registry_.BindShortcut(kCmdToolDeleteLine, ctrl, 'L', true);
+    registry_.BindShortcut(kCmdToolMoveLineUp, ctrlShift, VK_UP, true);
+    registry_.BindShortcut(kCmdToolMoveLineDown, ctrlShift, VK_DOWN, true);
+    registry_.BindShortcut(kCmdToolUpperCase, ctrlShift, 'U', true);
+    registry_.BindShortcut(kCmdToolLowerCase, ctrl, 'U', true);
 }
 
 void MainWindow::RebuildMenu() {
@@ -2484,6 +2654,74 @@ void MainWindow::CommandPreferences() {
     UpdateStatus();
     ::InvalidateRect(hwnd_, nullptr, TRUE);
     ScheduleAutosave();   // 快照开关与间隔都可能刚被改过
+}
+
+void MainWindow::ApplyTextTool(
+    const std::function<std::string(std::string_view, std::uint32_t)>& tool,
+    const wchar_t* description) {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr) {
+        return;
+    }
+    if (document->buffer.isReadOnly) {
+        ::MessageBoxW(hwnd_, L"这份文档是只读打开的，无法改内容。", L"工具",
+                      MB_ICONINFORMATION);
+        return;
+    }
+    // 大小写这类"按字符理解"的变换要知道缓冲区用什么代码页解释
+    const std::uint32_t codePage = document->buffer.encoding.uniMode == edit::UniMode::Ansi
+                                       ? document->buffer.encoding.codePage
+                                       : edit::kCodePageUtf8;
+    const std::wstring name = core::StripAccelerator(description);
+    // 没有变化时不留撤销步骤、也不把文档标成已修改——用户按了没反应总比留下假改动好
+    if (!document->view->ApplyTextTransform(
+            [&tool, codePage](std::string_view text) { return tool(text, codePage); })) {
+        infra::LogInfo(L"tools", L"内容没有变化，已跳过: " + name);
+        return;
+    }
+    infra::LogInfo(L"tools", L"已执行: " + name);
+    SyncTabBar();
+    UpdateStatus();
+}
+
+void MainWindow::CommandDecodeText(bool base64) {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr) {
+        return;
+    }
+    if (document->buffer.isReadOnly) {
+        ::MessageBoxW(hwnd_, L"这份文档是只读打开的，无法改内容。", L"工具",
+                      MB_ICONINFORMATION);
+        return;
+    }
+    // 解码会失败（粘贴的内容不合法），所以不能走"永不失败"的变换接口：
+    // 先自己解一次，失败就把原因说清楚，成功再交给统一的变换流程写入
+    std::string decoded;
+    const std::string original = document->view->TextRange(
+        document->view->SelectionStart() == document->view->SelectionEnd()
+            ? 0
+            : std::min(document->view->SelectionStart(), document->view->SelectionEnd()),
+        document->view->SelectionStart() == document->view->SelectionEnd()
+            ? document->view->ByteLength()
+            : std::max(document->view->SelectionStart(), document->view->SelectionEnd()));
+    const bool ok = base64 ? edit::Base64Decode(original, decoded) : edit::UrlDecode(original, decoded);
+    if (!ok) {
+        ::MessageBoxW(hwnd_, base64
+                                 ? L"选中的内容不是合法的 Base64（长度必须是 4 的倍数，"
+                                   L"且只含 A–Z a–z 0–9 + / 与结尾的 =）。"
+                                 : L"选中的内容里有不完整的百分号转义（% 后面要跟两位十六进制）。",
+                      L"无法解码", MB_ICONWARNING);
+        return;
+    }
+    ApplyTextTool(
+        [base64](std::string_view text, std::uint32_t) {
+            std::string out;
+            if (base64 ? edit::Base64Decode(text, out) : edit::UrlDecode(text, out)) {
+                return out;
+            }
+            return std::string(text);   // 上面已经检过一次，这里只是兜底：原样返回等于"没有变化"
+        },
+        base64 ? L"Base64 解码" : L"URL 解码");
 }
 
 void MainWindow::CommandRegisterAssociations(bool registerThem) {

@@ -22,6 +22,7 @@
 #include "edit/ColumnText.h"
 #include "edit/Encoding.h"
 #include "edit/FileTier.h"
+#include "edit/TextTools.h"
 #include "edit/EditView.h"
 #include "io/AtomicFile.h"
 #include "io/FileReader.h"
@@ -340,6 +341,43 @@ int main() {
         Check(registry.FindConflicts(npcc::core::kModCtrl, 'K').size() == 1, "冲突检测命中 1 条");
         Check(npcc::core::MakeCmdId(1, 1) <= 0xFFFF, "命令 ID 落在 16 位内（菜单与加速键要求）");
         Check(npcc::core::MakeCmdId(1, 1) != npcc::core::MakeCmdId(2, 1), "不同类别不冲突");
+
+        // 自动分配 ID 必须绕开用过的号。曾经踩过：菜单分隔线用自动 ID，
+        // 而它正好等于紧随其后的那条命令的显式 ID，于是那条命令被静默丢弃——
+        // 表现是"菜单里有这一项，点了没反应"。
+        {
+            npcc::core::CommandRegistry autoIds;
+            npcc::core::Command explicitOne;
+            explicitOne.id = 4097;                  // 让 nextAutoId_ 走到 4098
+            explicitOne.category = npcc::core::CmdCategory::Edit;
+            explicitOne.text = L"显式命令";
+            explicitOne.execute = [](const npcc::core::CmdContext&) {};
+            autoIds.Register(std::move(explicitOne));
+
+            npcc::core::Command later;
+            later.id = 4098;                        // 正好是自动分配会先挑的那个号
+            later.category = npcc::core::CmdCategory::Tools;
+            later.text = L"后来的命令";
+            later.execute = [](const npcc::core::CmdContext&) {};
+            const npcc::core::CmdId laterId = autoIds.Register(std::move(later));
+
+            auto addAuto = [&autoIds](const wchar_t* text) {
+                npcc::core::Command autoCommand;
+                autoCommand.category = npcc::core::CmdCategory::Tools;
+                autoCommand.text = text;
+                autoCommand.execute = [](const npcc::core::CmdContext&) {};
+                return autoIds.Register(std::move(autoCommand));
+            };
+            const npcc::core::CmdId auto1 = addAuto(L"自动一");
+            const npcc::core::CmdId auto2 = addAuto(L"自动二");
+
+            Check(laterId == 4098, "显式 ID 不被自动分配抢走");
+            Check(auto1 != laterId && auto2 != laterId && auto1 != auto2,
+                  "自动分配绕开已用号且彼此不同");
+            Check(autoIds.All().size() == 4, "四条命令都注册上了（没有被静默丢弃）");
+            Check(autoIds.Find(laterId) != nullptr && autoIds.Find(auto1) != nullptr,
+                  "注册过的命令都查得到");
+        }
     }
 
     // ---------------------------------------------------------------- 多文档管理
@@ -1891,12 +1929,15 @@ int main() {
         }
 
         // 取消监视之后不该再有通知
+        watcher.Unwatch(target.wstring());
+        Check(watcher.WatchedCount() == 0, "取消监视后计数归零");
         {
+            // 清空必须放在 Unwatch **之后**：取消监视时，可能刚好有一个通知已经进了
+            // 回调、还没落地，它会在 join 之前补进来。不清掉它，下面那句断言就会偶发失败
+            // （实测偶发过一次）。
             std::lock_guard<std::mutex> guard(mutex);
             events.clear();
         }
-        watcher.Unwatch(target.wstring());
-        Check(watcher.WatchedCount() == 0, "取消监视后计数归零");
         plainWrite(target, "third\n");
         std::this_thread::sleep_for(std::chrono::milliseconds(600));
         {
@@ -2513,6 +2554,139 @@ int main() {
     // 这一段只写 HKCU\Software\notepadcc-selftest 这个临时键，跑完就删，
     // **不会碰机器上真实的关联**。注册表操作要是测不了，就只能靠"点了按钮看着像好了"，
     // 而关联这种东西恰恰是最容易悄悄写错、用户过几天才发现的地方。
+    // ---------------------------------------------------------------- 行操作与文本转换
+    // 纯函数，所以能测得很细。两条贯穿全部行操作的约定必须钉住：
+    // 保留原文的行尾风格、保留结尾换行与否——这类细节用户一眼就能看出来。
+    Section("行操作与文本转换（TextTools）");
+    {
+        using namespace npcc::edit;
+
+        // 行尾探测与结尾换行的保留
+        {
+            const LineSplit crlf = SplitLines("a\r\nb\r\n");
+            Check(crlf.eol == "\r\n" && crlf.trailingEol && crlf.lines.size() == 2,
+                  "CRLF 文本识别出行尾与结尾换行");
+            const LineSplit lf = SplitLines("a\nb");
+            Check(lf.eol == "\n" && !lf.trailingEol && lf.lines.size() == 2,
+                  "LF 文本没有结尾换行");
+            const LineSplit cr = SplitLines("a\rb\r");
+            Check(cr.eol == "\r" && cr.lines.size() == 2, "老式 CR 行尾也能识别");
+            Check(SplitLines("").lines.empty(), "空文本没有行");
+            Check(SplitLines("\n").lines.size() == 1, "只有一个换行的文本算一行");
+        }
+
+        // 排序：保留行尾风格，稳定排序不搅乱相同行
+        {
+            Check(SortLines("b\r\na\r\nc\r\n", SortOrder::Ascending, true) ==
+                      "a\r\nb\r\nc\r\n",
+                  "升序排序保留 CRLF 行尾");
+            Check(SortLines("a\nc\nb", SortOrder::Descending, true) == "c\nb\na",
+                  "降序排序保留「没有结尾换行」这一点");
+            Check(SortLines("B\na\nC", SortOrder::Ascending, false) == "a\nB\nC",
+                  "忽略大小写排序");
+            Check(SortLines("b\nA\nc", SortOrder::Ascending, true) == "A\nb\nc",
+                  "区分大小写时大写在前（ASCII 序）");
+            Check(SortLines("bb\na\nccc", SortOrder::Ascending, true) == "a\nbb\nccc",
+                  "按长度升序排序");
+            Check(SortLinesByLength("bb\na\nccc", SortOrder::Descending) == "ccc\nbb\na",
+                  "按长度降序排序");
+        }
+
+        // 删空行：只删真正空的行
+        {
+            Check(RemoveEmptyLines("a\n\nb\n") == "a\nb\n", "删除真正的空行");
+            Check(RemoveEmptyLines("a\n   \nb\n") == "a\n   \nb\n",
+                  "只有空白的行不算空行（与对标产品一致）");
+        }
+
+        // 去重：保留首次 / 保留最后一次
+        {
+            Check(RemoveDuplicateLines("a\nb\na\nc\n", false) == "a\nb\nc\n",
+                  "去重保留首次出现");
+            Check(RemoveDuplicateLines("a\nb\na\nc\n", true) == "b\na\nc\n",
+                  "去重保留最后一次（位置也按最后一次算）");
+            Check(RemoveDuplicateLines("x\nx\nx\n", false) == "x\n", "全同去重只剩一行");
+        }
+
+        // 反转与去空白
+        {
+            Check(ReverseLines("1\r\n2\r\n3") == "3\r\n2\r\n1", "反转行序保留行尾风格");
+            Check(TrimTrailingWhitespace("a  \nb\t\t\n") == "a\nb\n", "去掉行尾空白");
+            Check(TrimLeadingWhitespace("  a\n\tb\n") == "a\nb\n", "去掉行首空白");
+            Check(TrimTrailingWhitespace("a   ") == "a", "最后一行没有换行时也去掉空白");
+        }
+
+        // 行号：加与去要能往返，且不能吃掉正文开头的数字
+        {
+            const std::string numbered = AddLineNumbers("x\ny\n", 1, 1, 0);
+            Check(numbered == "1\tx\n2\ty\n", "加行号");
+            Check(StripLineNumbers(numbered) == "x\ny\n", "去行号与加行号往返一致");
+            Check(StripLineNumbers("42 是答案\n") == "是答案\n",
+                  "去行号认得「数字 + 空格」这种形态");
+            Check(StripLineNumbers("island\n") == "island\n",
+                  "没有行首数字的行原样保留");
+            Check(AddLineNumbers("a\nb\n", 10, 5, 3) == " 10\ta\n 15\tb\n",
+                  "行号支持起始值、步长与补宽");
+        }
+
+        // 大小写：ASCII 与非 ASCII 都要对，中文这类没有大小写的字符原样保留
+        {
+            Check(ToUpperCase("abc", npcc::edit::kCodePageUtf8) == "ABC", "转大写");
+            Check(ToLowerCase("ABC", npcc::edit::kCodePageUtf8) == "abc", "转小写");
+            Check(ToUpperCase("caf\xC3\xA9", npcc::edit::kCodePageUtf8) == "CAF\xC3\x89",
+                  "带重音的拉丁字母也按系统的大小写表转换");
+            Check(ToUpperCase("\xE4\xB8\xAD\xE6\x96\x87", npcc::edit::kCodePageUtf8) ==
+                      "\xE4\xB8\xAD\xE6\x96\x87",
+                  "中文没有大小写，原样保留");
+            Check(ToUpperCase("\xD6\xD0\xCE\xC4", 936) == "\xD6\xD0\xCE\xC4",
+                  "ANSI(GBK) 缓冲区的中文同样原样保留");
+        }
+
+        // Base64：标准向量、往返、以及各种不合法输入
+        {
+            Check(Base64Encode("Man") == "TWFu", "Base64 标准向量 Man");
+            Check(Base64Encode("Ma") == "TWE=", "Base64 补一个等号");
+            Check(Base64Encode("M") == "TQ==", "Base64 补两个等号");
+            Check(Base64Encode("") == "", "空内容编码为空");
+            std::string out;
+            Check(Base64Decode("TWFu", out) && out == "Man", "Base64 解码往返");
+            std::string plain;
+            Check(Base64Decode("VHd1", plain) && plain == "Twu", "Base64 三字节往返");
+            Check(Base64Decode("VH d1\n", out) && out == plain,
+                  "解码时忽略空格与换行");
+            Check(!Base64Decode("TWF", out), "长度不是 4 的倍数要拒绝");
+            Check(!Base64Decode("TW!u", out), "含非法字符要拒绝");
+            Check(!Base64Decode("T=Fu", out), "填充位置不对要拒绝");
+        }
+
+        // URL：标准编码、往返、以及不完整的百分号
+        {
+            Check(UrlEncode("a b") == "a%20b", "空格编成 %20");
+            Check(UrlEncode("\xE4\xB8\xAD\xE6\x96\x87") == "%E4%B8%AD%E6%96%87",
+                  "中文按 UTF-8 字节做百分号编码");
+            Check(UrlEncode("a-b_c.d~e") == "a-b_c.d~e", "未保留字符不动");
+            std::string out;
+            Check(UrlDecode("a%20b", out) && out == "a b", "URL 解码往返");
+            Check(UrlDecode("%E4%B8%AD", out) && out == "\xE4\xB8\xAD", "多字节字符解码正确");
+            Check(!UrlDecode("a%2", out), "百分号后面不足两位要拒绝");
+            Check(!UrlDecode("a%zz", out), "百分号后面不是十六进制要拒绝");
+            Check(UrlDecode("a+b", out) && out == "a+b", "'+' 保持原样（不做表单式转换）");
+        }
+
+        // HTML 实体：转义与还原、数字实体、不认识的实体原样保留
+        {
+            Check(EscapeHtml("<a href=\"x\">&'") == "&lt;a href=&quot;x&quot;&gt;&amp;&#39;",
+                  "HTML 转义五个字符");
+            std::string back = UnescapeHtml("&lt;a&gt;&amp;&quot;&#39;");
+            Check(back == "<a>&\"'", "HTML 还原");
+            Check(UnescapeHtml("&#20013;&#x6587;") == "\xE4\xB8\xAD\xE6\x96\x87",
+                  "十进制与十六进制数字实体都能还原");
+            Check(UnescapeHtml("&unknown;") == "&unknown;", "不认识的实体原样保留");
+            Check(UnescapeHtml("a & b") == "a & b", "孤立的 & 不当实体处理");
+            Check(EscapeHtml("") == "" && UnescapeHtml("") == "", "空串两头都不出错");
+        }
+    }
+
     Section("文件关联（只进打开方式列表，不抢默认关联）");
     {
         const std::wstring testRoot = L"Software\\notepadcc-selftest";

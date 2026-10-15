@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -102,6 +103,11 @@ private:
     void CommandCyclePane();
     void CommandConvertEol(edit::EolMode target);
     void CommandConvertEncoding(edit::UniMode target);
+    // 行操作与文本转换（设计文档 2.13）。tool 接收"选区或整篇"的字节与当前代码页。
+    void ApplyTextTool(
+        const std::function<std::string(std::string_view, std::uint32_t)>& tool,
+        const wchar_t* description);
+    void CommandDecodeText(bool base64);
     void WriteConvertBackup(const std::wstring& path) const;
     void CommandRegisterAssociations(bool registerThem);
     void CommandAbout();

@@ -4,16 +4,26 @@
 
 #include "edit/DocBuffer.h"
 #include "edit/EditView.h"
+#include "infra/Log.h"
 
 namespace npcc::core {
 
 CmdId CommandRegistry::Register(Command command) {
     if (command.id == 0) {
+        // 自动分配必须绕开已经用掉的号：显式 ID 是"类别 + 序号"编出来的，
+        // 高类别（比如工具菜单）占的号很可能正好落在自动分配的下一号上。
+        // 撞号的后果是**后来者被静默丢弃**——表现就是"菜单里有这一项，点了没反应"。
+        while (Find(nextAutoId_) != nullptr) {
+            ++nextAutoId_;
+        }
         command.id = nextAutoId_++;
     } else {
         nextAutoId_ = std::max(nextAutoId_, command.id + 1);
     }
     if (Find(command.id) != nullptr) {
+        // 重复注册必须出声：静默保留先来者会变成"菜单里有这一项，点了没反应"
+        infra::LogWarn(L"cmd", L"命令 ID 重复，已忽略后来者: " + std::to_wstring(command.id) +
+                                   L" / " + command.key);
         return command.id;   // 重复注册：保留先注册者，返回既有 id
     }
     commands_.push_back(std::move(command));

@@ -67,6 +67,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     // 越早安装越好：窗口还没建起来时崩了，同样要留下崩溃报告与转储
     npcc::infra::crashguard::Install(npcc::infra::BackupDir().wstring().c_str());
     npcc::infra::LogInfo(L"app", L"notepadcc 启动");
+    // 启动参数记一笔：排查"开关到底生效没有"时不用再靠猜
+    {
+        std::wstring switches = L"参数: ";
+        switches += options.portable ? L"portable " : L"";
+        switches += options.crashTest ? L"crash-test " : L"";
+        switches += options.multiInstance ? L"multi-instance " : L"";
+        switches += L"文件 " + std::to_wstring(options.filesToOpen.size()) + L" 个";
+        npcc::infra::LogInfo(L"app", switches);
+    }
 
     // 单实例判定必须在建窗口之前：晚一步就可能出现"两个窗口同时起来"。
     // 配置要读一次才知道用户选的是单开还是多开——这里单独加载一份配置，

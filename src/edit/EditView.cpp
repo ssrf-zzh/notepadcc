@@ -280,6 +280,66 @@ void EditView::SetText(std::string_view bytes) const {
     Send(SCI_SETTEXT, 0, reinterpret_cast<intptr_t>(owned.c_str()));
 }
 
+std::string EditView::TextRange(int32_t start, int32_t end) const {
+    if (end <= start) {
+        return {};
+    }
+    // 缓冲区留一个结尾 NUL：SCI_GETTEXTRANGE 会自己补，但多给一个字节更稳妥
+    std::string buffer(static_cast<std::size_t>(end - start) + 1, '\0');
+    Sci_TextRangeFull range{};
+    range.chrg.cpMin = start;
+    range.chrg.cpMax = end;
+    range.lpstrText = buffer.data();
+    Send(SCI_GETTEXTRANGEFULL, 0, reinterpret_cast<intptr_t>(&range));
+    buffer.resize(static_cast<std::size_t>(end - start));
+    return buffer;
+}
+
+bool EditView::ApplyTextTransform(
+    const std::function<std::string(std::string_view)>& transform) const {
+    if (hwnd_ == nullptr || !transform) {
+        return false;
+    }
+    int32_t start = SelectionStart();
+    int32_t end = SelectionEnd();
+    if (start == end) {
+        // 没有选区就作用于整篇：这是对标产品的行为，用户不必先全选
+        start = 0;
+        end = static_cast<int32_t>(ByteLength());
+    }
+    if (end < start) {
+        std::swap(start, end);
+    }
+    const std::string original = TextRange(start, end);
+    const std::string replaced = transform(original);
+    if (replaced == original) {
+        return false;   // 没有变化：不写文档，也不在撤销栈上留一步空操作
+    }
+    // SETSEL + REPLACESEL：一次编辑、一个撤销单元，替换完原区域仍是选区，
+    // 用户可以接着对同一段内容做下一个变换
+    Send(SCI_BEGINUNDOACTION);
+    Send(SCI_SETSEL, static_cast<uintptr_t>(start), static_cast<intptr_t>(end));
+    Send(SCI_REPLACESEL, 0, reinterpret_cast<intptr_t>(replaced.c_str()));
+    Send(SCI_ENDUNDOACTION);
+    return true;
+}
+
+void EditView::DuplicateCurrentLine() const {
+    Send(SCI_LINEDUPLICATE);
+}
+
+void EditView::DeleteCurrentLine() const {
+    Send(SCI_LINEDELETE);
+}
+
+void EditView::MoveCurrentLineUp() const {
+    Send(SCI_MOVESELECTEDLINESUP);
+}
+
+void EditView::MoveCurrentLineDown() const {
+    Send(SCI_MOVESELECTEDLINESDOWN);
+}
+
 std::string EditView::GetAllText() const {
     const intptr_t length = Send(SCI_GETLENGTH);
     if (length <= 0) {

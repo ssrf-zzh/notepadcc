@@ -132,6 +132,7 @@ set(NPCC_CORE_SOURCES
     src/edit/ColumnText.cpp
     src/edit/EditView.cpp
     src/edit/Encoding.cpp
+    src/edit/TextTools.cpp
     src/infra/Log.cpp
     src/infra/Paths.cpp
     src/infra/SingleInstance.cpp

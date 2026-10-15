@@ -5,6 +5,7 @@
 再回来核对编辑器选区与结果列表，因此能抓住"编译通过但功能没接上"的问题。
 """
 import ctypes
+import base64
 import os
 import shutil
 import subprocess
@@ -40,6 +41,12 @@ WM_SETTEXT = 0x000C
 WM_GETTEXT = 0x000D
 WM_GETTEXTLENGTH = 0x000E
 WM_CLOSE = 0x0010
+
+# 除"单实例"那一段，其余各段一律用 --multi-instance 启动。
+# 原因：单实例是产品行为——某个实例还活着时，新启动的会把参数交给它然后自己退出。
+# 万一上一段留下一个没退干净的实例，下一段的启动就会被悄悄交接掉，报出来却是
+# "找不到窗口"，与本节要测的功能毫无关系（实测踩到过一次）。
+MULTI_INSTANCE = "--multi-instance"
 
 
 def send_bounded(hwnd, message, wparam=0, lparam=0, timeout_ms=2000):
@@ -110,6 +117,12 @@ CMD_ENCODING_ANSI = (13 << 12) | 1
 CMD_ENCODING_UTF8 = (13 << 12) | 2
 CMD_SETTINGS_REGISTER_ASSOC = (7 << 12) | 3
 CMD_SETTINGS_UNREGISTER_ASSOC = (7 << 12) | 4
+CMD_TOOL_TRIM_TRAILING = (14 << 12) | 15
+CMD_TOOL_SORT_ASC = (14 << 12) | 5
+CMD_TOOL_REMOVE_DUP_FIRST = (14 << 12) | 12
+CMD_TOOL_UPPERCASE = (14 << 12) | 19
+CMD_TOOL_BASE64_ENCODE = (14 << 12) | 23
+CMD_TOOL_BASE64_DECODE = (14 << 12) | 24
 
 COLUMN_TEMPLATE_EDIT = 751
 COLUMN_INSERT_BUTTON = 758
@@ -539,7 +552,7 @@ def test_column_editing(root):
         os.remove(session)
 
     exe = os.path.join(root, "build", "bin", "notepadcc.exe")
-    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
     window = wait_for_main_window("notepadcc - cols.txt")
     try:
         if not window:
@@ -636,7 +649,7 @@ def test_large_file(root):
 
     exe = os.path.join(root, "build", "bin", "notepadcc.exe")
     started = time.time()
-    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
     # 大文件装载慢是正常的，这里给足时间等它真正就绪
     window = wait_for_main_window("notepadcc - big.txt", timeout=90.0)
     try:
@@ -690,7 +703,7 @@ def test_external_change(root):
         os.remove(session)
 
     exe = os.path.join(root, "build", "bin", "notepadcc.exe")
-    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
     window = wait_for_main_window("notepadcc - doc.txt")
     try:
         if not window:
@@ -784,7 +797,7 @@ def test_folding(root):
     def is_folded(scinti, line):
         return user32.SendMessageW(scinti, SCI_GETFOLDEXPANDED, line, 0) == 0
 
-    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
     window = wait_for_main_window("notepadcc - folds.cpp")
     try:
         if not window:
@@ -855,7 +868,7 @@ def test_folding(root):
         return False
 
     # 不带文件参数重启：会话应当把文件与折叠状态一起恢复回来
-    proc = subprocess.Popen([exe, "-portable"], cwd=root)
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable"], cwd=root)
     window = wait_for_main_window("notepadcc - folds.cpp")
     try:
         if not window:
@@ -913,6 +926,141 @@ def appdata_snapshot():
     return sorted(found)
 
 
+def test_tools_menu(root):
+    """工具菜单：行操作与文本转换，重点核对"一次操作 = 一步撤销"。
+
+    行操作最容易出的问题不是算错，而是撤销栈被切碎成好几步——用户按一次 Ctrl+Z
+    只回退半截，那种体验很糟。所以这里一路做四步，再连按四次撤销，
+    核对内容与"已修改"标记一起回到起点。
+    """
+    work = os.path.join(root, "build", "tools_test")
+    os.makedirs(work, exist_ok=True)
+    path = os.path.join(work, "lines.txt")
+    original = "b  \nA\na\nb\n"
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write(original)
+
+    cfg = os.path.join(root, "build", "bin", "config")
+    for name in ("config.xml", "session.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - lines.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到可见的编辑控件")
+            return False
+        if scinti_text(scinti) != original:
+            print(f"  FAIL: 初始内容不对 {scinti_text(scinti)!r}")
+            return False
+
+        steps = [
+            (CMD_TOOL_TRIM_TRAILING, "b\nA\na\nb\n", "去掉行尾空白"),
+            (CMD_TOOL_SORT_ASC, "A\na\nb\nb\n", "升序排序"),
+            (CMD_TOOL_REMOVE_DUP_FIRST, "A\na\nb\n", "删除重复行"),
+            (CMD_TOOL_UPPERCASE, "A\nA\nB\n", "转为大写"),
+        ]
+        for command_id, expected, label in steps:
+            user32.PostMessageW(window, WM_COMMAND, command_id, 0)
+            time.sleep(0.6)
+            actual = scinti_text(scinti)
+            if actual != expected:
+                print(f"  FAIL: {label} 之后内容不对\n           实际 {actual!r}\n"
+                      f"           期望 {expected!r}")
+                return False
+        if user32.SendMessageW(scinti, SCI_GETMODIFY, 0, 0) == 0:
+            print("  FAIL: 改过内容之后应当处于已修改状态")
+            return False
+
+        # 一次撤销回退一步
+        user32.PostMessageW(window, WM_COMMAND, CMD_EDIT_UNDO, 0)
+        time.sleep(0.6)
+        if scinti_text(scinti) != "A\na\nb\n":
+            print(f"  FAIL: 一次撤销应当只回退「转为大写」这一步，实际 "
+                  f"{scinti_text(scinti)!r}")
+            return False
+        # 再撤销三次，应当回到最初的内容与未修改状态
+        for _ in range(3):
+            user32.PostMessageW(window, WM_COMMAND, CMD_EDIT_UNDO, 0)
+            time.sleep(0.4)
+        if scinti_text(scinti) != original:
+            print(f"  FAIL: 全部撤销之后应当回到原文，实际 {scinti_text(scinti)!r}")
+            return False
+        if user32.SendMessageW(scinti, SCI_GETMODIFY, 0, 0) != 0:
+            print("  FAIL: 撤销回到保存点之后不应再是已修改状态")
+            return False
+
+        # Base64 编码 → 用 Python 独立解码核对 → 再在程序里解回来
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_UPPERCASE, 0)
+        time.sleep(0.5)
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_BASE64_ENCODE, 0)
+        time.sleep(0.6)
+        encoded = scinti_text(scinti)
+        try:
+            decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+        except Exception as error:                      # noqa: BLE001 - 诊断用
+            print(f"  FAIL: 编辑器里的内容不是合法 Base64（{error}）：{encoded[:60]!r}")
+            return False
+        # 上面四次撤销已经把内容还原成原文，所以这里的大写结果是原文的大写版
+        if decoded != "B  \nA\nA\nB\n":
+            print(f"  FAIL: Base64 内容解出来不对 {decoded!r}")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_BASE64_DECODE, 0)
+        time.sleep(0.6)
+        if scinti_text(scinti) != "B  \nA\nA\nB\n":
+            print(f"  FAIL: Base64 解码之后内容不对 {scinti_text(scinti)!r}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    # 非法内容要给出说明，而不是默默改坏内容
+    broken = os.path.join(work, "broken.txt")
+    with open(broken, "w", encoding="utf-8", newline="") as handle:
+        handle.write("not base64!!\n")
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", broken], cwd=root)
+    window = wait_for_main_window("notepadcc - broken.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到第二个实例的主窗口")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_BASE64_DECODE, 0)
+        if not dismiss_dialog("无法解码", IDOK, timeout=8.0):
+            print("  FAIL: 非法 Base64 应当弹出说明，而不是静默处理")
+            return False
+        time.sleep(0.5)
+        scinti = visible_scintilla(window)
+        if scinti_text(scinti) != "not base64!!\n":
+            print("  FAIL: 解码失败之后内容不该被改动")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        for name in ("config.xml", "session.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    print("  工具菜单：去空白 / 排序 / 去重 / 大小写 / Base64 往返正确，"
+          "一次操作正好一步撤销，非法输入被挡下")
+    return True
+
+
 def test_portable_package(root):
     """绿色发行：打包 → 解压 → 直接运行，核对"解压即用"与"只写程序目录"。
 
@@ -953,7 +1101,7 @@ def test_portable_package(root):
         handle.write("绿色版自检\n")
 
     before = appdata_snapshot()
-    proc = subprocess.Popen([exe, sample], cwd=target)   # 注意：不加 -portable
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, sample], cwd=target)   # 注意：不加 -portable
     window = None
     try:
         window = wait_for_main_window("notepadcc - 示例.txt", timeout=40.0)
@@ -1007,7 +1155,7 @@ def test_associated_commands(root):
         handle.write("hello\n")
 
     had_it_before = assoc_registered()
-    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
     window = wait_for_main_window("notepadcc - assoc.txt")
     try:
         if not window:
@@ -1154,7 +1302,7 @@ def test_encoding_convert(root):
             os.remove(target)
 
     exe = os.path.join(root, "build", "bin", "notepadcc.exe")
-    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
     window = wait_for_main_window("notepadcc - code.txt")
     try:
         if not window:
@@ -1240,7 +1388,7 @@ def test_encoding_convert(root):
     with open(path, "wb") as handle:
         handle.write("emoji \U0001F600\n".encode("utf-8"))
     emoji_bytes = os.path.getsize(path)
-    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
     window = wait_for_main_window("notepadcc - code.txt")
     try:
         if not window:
@@ -1314,7 +1462,7 @@ def test_split_view(root):
     def first_visible(view):
         return user32.SendMessageW(view, SCI_GETFIRSTVISIBLELINE, 0, 0)
 
-    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
     window = wait_for_main_window("notepadcc - split.txt")
     try:
         if not window:
@@ -1460,7 +1608,7 @@ def test_split_view(root):
         print(f"  FAIL: 会话里没有分屏状态\n{session_text[:400]}")
         return False
 
-    proc = subprocess.Popen([exe, "-portable"], cwd=root)
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable"], cwd=root)
     window = wait_for_main_window("notepadcc - split.txt")
     try:
         if not window:
@@ -1560,7 +1708,7 @@ def test_snapshots(root):
 
     # ---- 1) 定时快照：硬杀进程后仍能恢复 ----
     reset("aaa\nbbb\nccc")
-    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
     window = wait_for_main_window("notepadcc - doc.txt")
     try:
         if not window:
@@ -1590,7 +1738,7 @@ def test_snapshots(root):
             proc.kill()          # 硬杀：不给任何收尾机会，模拟任务管理器结束进程
         time.sleep(1.0)
 
-    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
     window = wait_for_main_window("notepadcc - doc.txt")
     try:
         if not window:
@@ -1620,7 +1768,7 @@ def test_snapshots(root):
     # ---- 2) 崩溃抢救：异常退出时把未保存内容写进 crash 目录 ----
     reset("aaa\nbbb\nccc")
     crash_dir = None
-    proc = subprocess.Popen([exe, "-portable", "--crash-test", path], cwd=root)
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", "--crash-test", path], cwd=root)
     window = wait_for_main_window("notepadcc - doc.txt", timeout=40.0)
     try:
         if not window:
@@ -1685,7 +1833,7 @@ def test_snapshots(root):
         return False
 
     # ---- 3) 崩溃之后重启，应当提示并恢复 ----
-    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
     window = wait_for_main_window("notepadcc - doc.txt")
     try:
         if not window:
@@ -1741,7 +1889,7 @@ def test_shortcuts(root):
             os.remove(leftover)
 
     exe = os.path.join(root, "build", "bin", "notepadcc.exe")
-    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
     window = wait_for_main_window("notepadcc - doc.txt")
     try:
         if not window:
@@ -1968,7 +2116,7 @@ def test_preferences(root):
             os.remove(leftover)
 
     exe = os.path.join(root, "build", "bin", "notepadcc.exe")
-    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
     window = wait_for_main_window("notepadcc - doc.txt")
     try:
         if not window:
@@ -2176,7 +2324,7 @@ def run():
     if os.path.exists(session):
         os.remove(session)
 
-    proc = subprocess.Popen([exe, "-portable", os.path.join(root, "README.md")], cwd=root)
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", os.path.join(root, "README.md")], cwd=root)
     main_window = wait_for_main_window("notepadcc - README.md")
     failed = False
     try:
@@ -2219,6 +2367,8 @@ def run():
         failed = True
     if not test_single_instance(root):
         failed = True
+    if not test_tools_menu(root):
+        failed = True
     if not test_associated_commands(root):
         failed = True
     if not test_portable_package(root):
@@ -2229,7 +2379,7 @@ def run():
         return 1
     print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + "
           "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + "
-          "编码转换 + 单实例 + 文件关联 + 绿色打包）")
+          "编码转换 + 单实例 + 工具菜单 + 文件关联 + 绿色打包）")
     return 0
 
 

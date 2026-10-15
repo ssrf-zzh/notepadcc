@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -228,6 +229,21 @@ public:
 
     // 行尾转换：既改"以后新输入用什么行尾"，也把现有行尾一次性换掉
     void ConvertLineEndings(EolMode eol) const;
+
+    // ---- 行操作与文本转换（设计文档 2.13）----
+    // 把一次文本变换应用到"选区（没有选区则整篇）"，并且**包在单个撤销单元里**：
+    // 用户按一次 Ctrl+Z 就该整个还原，而不是一步一步回退。
+    // 返回是否真的改动了内容——没变就不该动撤销栈，也不该把文档标成已修改。
+    bool ApplyTextTransform(const std::function<std::string(std::string_view)>& transform) const;
+
+    // 取一段字节（变换的输入）。指针消息只在进程内发，不存在封送问题。
+    std::string TextRange(int32_t start, int32_t end) const;
+
+    // 行操作里用 Scintilla 原生能力更快也更稳的四件事
+    void DuplicateCurrentLine() const;
+    void DeleteCurrentLine() const;
+    void MoveCurrentLineUp() const;
+    void MoveCurrentLineDown() const;
 
 private:
     HWND hwnd_ = nullptr;
