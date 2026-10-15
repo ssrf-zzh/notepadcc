@@ -1,0 +1,95 @@
+# notepadcc
+
+原生 Windows x64 轻量文本 / 源码编辑器。内核嵌入 Scintilla + Lexilla，外壳用 Win32 API 与 C++20
+直接编写，不依赖 .NET / Qt / Electron。
+
+设计依据见 [notepadcc详细设计说明书.md](notepadcc详细设计说明书.md)（功能基线为
+[Notepad++功能全景梳理.md](Notepad++功能全景梳理.md)）。
+
+## 当前进度
+
+已完成 **M0（骨架）**：能开窗、能打字、能存盘。
+
+| 能力 | 状态 |
+|---|---|
+| 主窗口、菜单、状态栏 | 已完成 |
+| 命令注册表（菜单 / 快捷键 / 勾选态同源） | 已完成 |
+| Scintilla 集成与静态链接 | 已完成（5.6.7） |
+| 语法着色（19 类扩展名，Lexilla） | 已完成（M1 起改为 langs.xml 驱动） |
+| 编码识别：UTF-8 / UTF-8-BOM / ANSI(GBK) / UTF-16LE / UTF-16BE | 已完成 |
+| 行尾识别与保存时统一（CRLF / LF / CR / Mixed） | 已完成 |
+| 原子写盘（临时文件 + ReplaceFile，失败不动原文件） | 已完成 |
+| 命令行传入文件、拖放打开、便携模式 | 已完成 |
+| 单元测试（52 项检查） | 已完成 |
+| 多标签、会话、查找替换、列编辑、大文件分档 | 未开始（M1） |
+
+## 环境要求
+
+- CMake ≥ 3.25、Ninja
+- 下列任一编译器：
+  - **MinGW-w64 GCC 13+**（当前开发机使用 16.2.0，免管理员安装）
+  - **MSVC v143**（Visual Studio 2022，正式发布用）
+- 第三方源码（Scintilla / Lexilla）不入库，首次构建前拉取
+
+免管理员的工具链获取方式（本机已装好，仅供换机参考）：
+
+```powershell
+scoop install cmake ninja mingw
+```
+
+## 构建
+
+```powershell
+# 1. 拉取第三方源码（Scintilla 5.6.7 + Lexilla 5.5.4，解压到 third_party/）
+powershell -ExecutionPolicy Bypass -File scripts\fetch_deps.ps1
+
+# 2. 配置与编译（MinGW）
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
+
+若使用 MSVC，把编译器换成原生工具链即可，CMakeLists 对两者都做了适配：
+
+```powershell
+cmake -S . -B build-msvc -G Ninja -DCMAKE_BUILD_TYPE=Release `
+      -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
+cmake --build build-msvc
+```
+
+第三方源码需要可编译访问 `www.scintilla.org`。若网络受限，把两个 zip 手动放到
+`third_party/_dl/` 后重跑 `scripts\fetch_deps.ps1` 即可。
+
+## 运行与测试
+
+```powershell
+build\bin\notepadcc.exe                     # 普通启动（配置在 %APPDATA%\notepadcc）
+build\bin\notepadcc.exe -portable           # 便携模式（配置在程序目录 config\）
+build\bin\notepadcc.exe ..\some\file.cpp    # 启动即打开文件
+build\bin\notepadcc_tests.exe               # 单元测试
+```
+
+## 目录结构
+
+```
+src/
+  app/     入口、命令行解析、启动顺序
+  core/    命令注册表、ID 与命令模型
+  edit/    Scintilla 唯一适配层（EditView）、编码与行尾、文档状态
+  infra/   路径与便携判定、日志
+  io/      原子写盘、整文件读取
+  shell/   主窗口、菜单生成、状态栏
+res/       图标与清单资源（app.manifest 声明 PerMonitorV2 DPI）
+tests/     单元测试
+tools/     文档生成与校验脚本（md2docx.py / verify_docx.py / update_toc.ps1）
+third_party/  由脚本拉取，不入库
+```
+
+## 几条需要遵守的约定
+
+- **只有 `src/edit/EditView.*` 允许调用 Scintilla 消息**。其他模块一律走它的语义化方法，
+  这样将来换内核或升级 Scintilla 时改动面收敛在一个文件里。
+- **Scintilla 只能在 UI 线程访问**，且新窗口/DestroyWindow 之后不得再向其发送消息。
+- **命令 ID 必须落在 16 位以内**（`core::MakeCmdId`，高 4 位类别 + 低 12 位序号），
+  因为菜单项 ID 与 `ACCEL.cmd` 都是 `WORD`。插件命令超范围时由宿主分配菜单槽位映射。
+- **写文件必须走 `io::WriteFileAtomic`**，任何直接 `fopen(...,"w")` 都可能截断用户数据。
+- **宽字符 printf 用 `%ls`**，`%s` 在标准 C 语义下是窄字符串（MSVC 差异）。

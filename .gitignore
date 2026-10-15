@@ -1,0 +1,24 @@
+# 构建产物
+/build/
+/out/
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exe
+
+# 第三方源码（由 scripts/fetch_deps.ps1 拉取，不入库）
+/third_party/_dl/
+/third_party/scintilla/
+/third_party/lexilla/
+
+# 运行时配置（便携模式下会出现在这里）
+/config/
+
+# 编辑器与系统
+.vs/
+.vscode/
+*.user
+Thumbs.db
+desktop.ini
+~$*
