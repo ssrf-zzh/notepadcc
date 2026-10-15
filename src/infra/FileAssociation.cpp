@@ -102,6 +102,7 @@ bool RegisterAssociations(HKEY root, const std::wstring& classesSubKey,
 }
 
 bool UnregisterAssociations(HKEY root, const std::wstring& classesSubKey, std::wstring* error) {
+    (void)error;   // 移除失败不阻断（本来就不存在也算正常），只记日志
     bool ok = true;
     for (const FileAssociationSpec& spec : DefaultAssociations()) {
         // 先摘掉 OpenWithProgids 下的登记值，再删掉 ProgId 自己的整棵子树

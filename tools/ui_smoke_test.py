@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 import winreg
+import zipfile
 from ctypes import wintypes
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -39,6 +40,21 @@ WM_SETTEXT = 0x000C
 WM_GETTEXT = 0x000D
 WM_GETTEXTLENGTH = 0x000E
 WM_CLOSE = 0x0010
+
+
+def send_bounded(hwnd, message, wparam=0, lparam=0, timeout_ms=2000):
+    """带超时的 SendMessage。
+
+    普通 SendMessage 是同步的：发给一个卡住的窗口，脚本会**永久**阻塞在那里
+    （实测被后台程序与自己进程里的模态框卡死过十几分钟）。凡是跨进程发的消息都走
+    这个函数，超时返回 None，让测试干净地失败而不是挂住。
+    """
+    if not hwnd:
+        return None
+    result = ctypes.c_size_t(0)
+    ok = user32.SendMessageTimeoutW(hwnd, message, wparam, lparam,
+                                    SMTO_ABORTIFHUNG, timeout_ms, ctypes.byref(result))
+    return result.value if ok else None
 
 SCI_GETSELECTIONSTART = 2143
 SCI_GETSELECTIONEND = 2145
@@ -161,11 +177,29 @@ def class_name(hwnd):
 
 
 def window_text(hwnd):
-    length = user32.SendMessageW(hwnd, WM_GETTEXTLENGTH, 0, 0)
+    length = send_bounded(hwnd, WM_GETTEXTLENGTH)
+    if length is None:
+        return ""
     if length <= 0:
         return ""
     buffer = ctypes.create_unicode_buffer(length + 1)
-    user32.SendMessageW(hwnd, WM_GETTEXT, length + 1, address_of(buffer))
+    if send_bounded(hwnd, WM_GETTEXT, length + 1, address_of(buffer)) is None:
+        return ""
+    return buffer.value
+
+
+def window_text_safe(hwnd):
+    """只对**本机任意窗口**都安全的读标题方式。
+
+    WM_GETTEXT 是同步消息：发给别的进程里一个不响应的窗口，脚本会永久阻塞在那里
+    （实测被一个后台播放器卡死过十几分钟）。GetWindowTextW 取不到外部进程的文本，
+    但它不会阻塞——诊断输出本来就"能拿到多少算多少"。
+    """
+    length = user32.GetWindowTextLengthW(hwnd)
+    if length <= 0:
+        return ""
+    buffer = ctypes.create_unicode_buffer(length + 1)
+    user32.GetWindowTextW(hwnd, buffer, length + 1)
     return buffer.value
 
 
@@ -181,8 +215,7 @@ def set_text(hwnd, control_id, text):
     if not control:
         return False
     buffer = ctypes.create_unicode_buffer(text)
-    user32.SendMessageW(control, WM_SETTEXT, 0, address_of(buffer))
-    return True
+    return send_bounded(control, WM_SETTEXT, 0, address_of(buffer)) is not None
 
 
 def visible_scintilla(main_window):
@@ -311,13 +344,13 @@ def test_bookmarks(main_window):
 
 
 def dump_top_level_windows():
-    """诊断用：列出当前可见的顶层窗口。"""
+    """诊断用：列出当前可见的顶层窗口。用不阻塞的方式读标题（见 window_text_safe）。"""
     result = []
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
     def callback(hwnd, _):
         if user32.IsWindowVisible(hwnd):
-            result.append((class_name(hwnd), window_text(hwnd)))
+            result.append((class_name(hwnd), window_text_safe(hwnd)))
         return True
 
     user32.EnumWindows(callback_type(callback), 0)
@@ -353,9 +386,12 @@ def find_message_button(box, command_id):
 def dismiss_dialog(title, command_id, timeout=6.0, quiet=False):
     """确认框是模态的，脚本必须替用户点掉，否则后面的断言都无从谈起。
 
-    点完之后要确认它真的消失了：BM_CLICK 在对话框不是活动窗口时可能失效
-    （MSDN 明确写了），而脚本拉起的进程本来就在后台。点不动就退回键盘——
-    确认框的默认按钮就是"确定/是"（确定和是都走回车）。
+    三条经验都踩过，所以这里同时用上：
+      1. 全部用 PostMessage，**不用同步 SendMessage**——后者碰上模态框会永久阻塞脚本；
+      2. 框刚出现时它的默认按钮还没就位，这时候敲回车会被忽略，所以先等它settle，
+         而且整段"点不动就再试"要循环到超时为止，不能试一轮就放弃；
+      3. 按钮控件 ID 不一定是标准值（只带"确定"的框里实测是 2 而不是 IDOK），
+         所以找不到就按按钮文字找。
     """
     def gone(after):
         limit = time.time() + after
@@ -366,27 +402,23 @@ def dismiss_dialog(title, command_id, timeout=6.0, quiet=False):
             time.sleep(0.1)
         return not user32.FindWindowW("#32770", title)
 
+    key = 0x0D if command_id in (IDOK, IDYES) else 0x1B   # VK_RETURN / VK_ESCAPE
     deadline = time.time() + timeout
     while time.time() < deadline:
         dialog = user32.FindWindowW("#32770", title)
-        if dialog:
-            button = find_message_button(dialog, command_id)
-            if button:
-                user32.SendMessageW(button, 0x00F5, 0, 0)   # BM_CLICK
-                if gone(1.5):
-                    return True
-                # BM_CLICK 在对话框不是活动窗口时可能没反应（本机实测过），
-                # 那就按按钮**真实的**控件 ID 给对话框发 WM_COMMAND——
-                # 按钮点的本质就是这条消息，而 ID 不一定等于我们期望的那个。
-                user32.PostMessageW(dialog, WM_COMMAND, user32.GetDlgCtrlID(button), 0)
-                if gone(1.5):
-                    return True
-            key = 0x0D if command_id in (IDOK, IDYES) else 0x1B   # VK_RETURN / VK_ESCAPE
-            user32.PostMessageW(dialog, 0x0100, key, 0)          # WM_KEYDOWN
-            if gone(2.0):
-                return True
-            break
-        time.sleep(0.2)
+        if not dialog:
+            time.sleep(0.2)
+            continue
+        time.sleep(0.4)                     # 等框就位（默认按钮挂上）
+        user32.PostMessageW(dialog, 0x0100, key, 0)          # WM_KEYDOWN
+        button = find_message_button(dialog, command_id)
+        if button:
+            user32.PostMessageW(button, 0x00F5, 0, 0)        # BM_CLICK（投递，不阻塞）
+            user32.PostMessageW(dialog, WM_COMMAND, user32.GetDlgCtrlID(button), 0)
+        else:
+            user32.PostMessageW(dialog, WM_COMMAND, command_id, 0)
+        if gone(1.0):
+            return True
     if not quiet:
         print(f"    [诊断] 没能点掉标题为 {title!r} 的对话框；当前可见顶层窗口：")
         for cls, text in dump_top_level_windows():
@@ -474,10 +506,15 @@ def scinti_text(scinti):
     参数封送，SCI_* 都在 WM_USER 以上，指针参数不会被封送——对面进程会按
     自己的地址空间去解引用，读到的是垃圾。SCI_GETCHARAT 只传值，安全。
     """
-    length = user32.SendMessageW(scinti, SCI_GETLENGTH, 0, 0)
+    length = send_bounded(scinti, SCI_GETLENGTH)
+    if length is None:
+        return ""
     data = bytearray()
     for index in range(length):
-        data.append(user32.SendMessageW(scinti, SCI_GETCHARAT, index, 0) & 0xFF)
+        value = send_bounded(scinti, SCI_GETCHARAT, index)
+        if value is None:
+            return ""
+        data.append(value & 0xFF)
     return data.decode("utf-8", errors="replace")
 
 
@@ -667,9 +704,14 @@ def test_external_change(root):
             print(f"  FAIL: 初始内容不对 {scinti_text(scinti)!r}")
             return False
 
-        # 在程序之外直接改文件
-        with open(path, "w", encoding="utf-8", newline="") as handle:
-            handle.write("beta\n")
+        # 在程序之外直接改文件。这里**故意用等长重写（不截断）**：
+        # open(path, "w") 会先把文件截成 0 字节再写入，程序有可能正好在那一瞬间
+        # 检测到"文件变小了"并重新加载空文件——测试就会读到空内容而误报失败。
+        # 等长重写没有这个中间态，改动的语义也更清楚：外部程序改了内容。
+        with open(path, "r+b") as handle:
+            handle.seek(0)
+            handle.write(b"gamma\n")
+            handle.truncate()
 
         # 等程序自己发现（目录通知），弹确认框
         if not dismiss_dialog("文件已被外部修改", IDYES, timeout=15.0):
@@ -678,7 +720,7 @@ def test_external_change(root):
         time.sleep(1.0)
 
         after = scinti_text(scinti)
-        if after != "beta\n":
+        if after != "gamma\n":
             still_open = user32.FindWindowW("#32770", "文件已被外部修改")
             print(f"  FAIL: 重新加载后内容应被磁盘版本替换，实际 {after!r}；"
                   f"确认框是否仍在 = {bool(still_open)}")
@@ -854,6 +896,101 @@ def assoc_registered(extension=".txt", prog_id="notepadcc.txt"):
             return True
     except OSError:
         return False
+
+
+def appdata_snapshot():
+    """记下 %APPDATA%\\notepadcc 的样子，用来核对"绿色版不写 AppData"。"""
+    appdata = os.environ.get("APPDATA", "")
+    if not appdata:
+        return None
+    target = os.path.join(appdata, "notepadcc")
+    if not os.path.isdir(target):
+        return "不存在"
+    found = []
+    for base, _, names in os.walk(target):
+        for name in names:
+            found.append(os.path.relpath(os.path.join(base, name), target))
+    return sorted(found)
+
+
+def test_portable_package(root):
+    """绿色发行：打包 → 解压 → 直接运行，核对"解压即用"与"只写程序目录"。
+
+    这里是拿真实产物验证设计文档 2.15 的绿色承诺：不写 %APPDATA%、不写注册表、
+    整个目录拷走或删掉即完成迁移与卸载。**故意不加 -portable**——靠的正是包里的
+    portable 标记文件，加了开关就等于没测到这条。
+    """
+    script = os.path.join(root, "scripts", "package.ps1")
+    result = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", script,
+                             "-NoBuild"],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        print(f"  FAIL: 打包脚本失败\n{result.stdout[-400:]}\n{result.stderr[-400:]}")
+        return False
+
+    dist = os.path.join(root, "dist")
+    packages = [name for name in os.listdir(dist)
+                if name.startswith("notepadcc-") and name.endswith("-portable-x64.zip")]
+    if len(packages) != 1:
+        print(f"  FAIL: dist 下的便携包应当正好 1 个，实际 {packages}")
+        return False
+    zip_path = os.path.join(dist, packages[0])
+
+    target = os.path.join(root, "build", "pack_test")
+    shutil.rmtree(target, ignore_errors=True)
+    os.makedirs(target)
+    with zipfile.ZipFile(zip_path) as archive:
+        names = archive.namelist()
+        archive.extractall(target)
+    for required in ("notepadcc.exe", "portable", "说明.txt"):
+        if required not in names:
+            print(f"  FAIL: 便携包里缺少 {required}，实际内容 {names}")
+            return False
+
+    exe = os.path.join(target, "notepadcc.exe")
+    sample = os.path.join(target, "示例.txt")
+    with open(sample, "w", encoding="utf-8", newline="") as handle:
+        handle.write("绿色版自检\n")
+
+    before = appdata_snapshot()
+    proc = subprocess.Popen([exe, sample], cwd=target)   # 注意：不加 -portable
+    window = None
+    try:
+        window = wait_for_main_window("notepadcc - 示例.txt", timeout=40.0)
+        if not window:
+            print("  FAIL: 解压出来的程序没跑起来（可能是缺运行库或便携判定失效）")
+            return False
+        config_dir = os.path.join(target, "config")
+        if not os.path.isdir(config_dir):
+            print("  FAIL: 便携模式下配置应当写在程序目录的 config\\ 下")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    # 会话与日志是在正常使用中一定会落盘的：用它们证明"真的写在了程序目录里"
+    for produced in (os.path.join("config", "session.xml"),
+                     os.path.join("config", "logs", "notepadcc.log")):
+        if not os.path.exists(os.path.join(target, produced)):
+            print(f"  FAIL: 便携模式下应当在程序目录里生成 {produced}")
+            return False
+    after = appdata_snapshot()
+    if after != before:
+        print(f"  FAIL: 绿色版不该动 %APPDATA%\\notepadcc（前 {before!r}，后 {after!r}）")
+        return False
+    # 卸载就是删目录：这里顺手验证"删掉之后什么都不剩"
+    shutil.rmtree(target, ignore_errors=True)
+    if os.path.exists(target):
+        print("  FAIL: 程序目录删不掉")
+        return False
+
+    print("  绿色发行：打包产物解压即用（不靠开关）、配置写在程序目录、"
+          "全程没碰 %APPDATA%、删目录即卸载")
+    return True
 
 
 def test_associated_commands(root):
@@ -2084,13 +2221,15 @@ def run():
         failed = True
     if not test_associated_commands(root):
         failed = True
+    if not test_portable_package(root):
+        failed = True
 
     if failed:
         print("FAIL: 界面回归未通过")
         return 1
     print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + "
           "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + "
-          "编码转换 + 单实例 + 文件关联）")
+          "编码转换 + 单实例 + 文件关联 + 绿色打包）")
     return 0
 
 

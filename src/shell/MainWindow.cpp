@@ -1976,6 +1976,7 @@ void MainWindow::HandleExternalChange(const std::wstring& path, io::FileChangeKi
     if (!documents_) {
         return;
     }
+    infra::LogInfo(L"watch", L"收到文件改动通知: " + path);
     // 只有"当前正显示的文档"才弹窗；其余的只做标记，等切过去再说，
     // 免得后台一堆标签同时被改动时弹出一串对话框。
     edit::Document* target = nullptr;
@@ -1988,15 +1989,21 @@ void MainWindow::HandleExternalChange(const std::wstring& path, io::FileChangeKi
         }
     }
     if (target == nullptr) {
+        infra::LogWarn(L"watch", L"改动通知对应的文件不在已打开的文档里: " + path);
         return;   // 不在我们打开的范围内（可能是别的程序在同目录里改文件）
     }
     if (target != documents_->Active()) {
+        infra::LogInfo(L"watch", L"改动来自非活动标签，留到切过去时再问: " + path);
         return;   // 切到该标签时由兜底检查处理
     }
 
     // 内容其实没变（比如只是时间戳被动过）就静默刷新记录
     if (!documents_->HasExternallyChanged(*target)) {
         documents_->RefreshIdentity(*target);
+        // 这一条以前是静默的，结果"外部明明改了却没有任何反应"完全无从查起。
+        // 记一行，至少能看出通知到了、只是身份比对认为没变。
+        infra::LogInfo(L"watch", L"收到改动通知但身份未变（大小与时间戳一致），只刷新记录: " +
+                                    path);
         return;
     }
     CheckActiveDocumentForExternalChange(kind);
@@ -2008,11 +2015,15 @@ void MainWindow::CheckActiveDocumentForExternalChange(io::FileChangeKind kind) {
     }
     edit::Document* document = documents_->Active();
     if (document == nullptr || !document->buffer.HasPath()) {
+        infra::LogInfo(L"watch", L"兜底检查：当前没有带路径的活动文档，跳过");
         return;
     }
     if (!documents_->HasExternallyChanged(*document)) {
+        infra::LogInfo(L"watch", L"兜底检查：文件身份未变，跳过: " + document->buffer.filePath);
         return;
     }
+    infra::LogInfo(L"watch", L"兜底检查：确认外部改动，准备询问用户: " +
+                                document->buffer.filePath);
 
     // 把变更类型写进提示：被删除和被修改，用户该做的事是不一样的
     const std::wstring question =

@@ -9,6 +9,8 @@
 #include <utility>
 #include <vector>
 
+#include "infra/Log.h"
+
 namespace npcc::io {
 namespace {
 
@@ -237,6 +239,9 @@ void FileWatcher::Watch(const std::wstring& path) {
                                   nullptr, OPEN_EXISTING,
                                   FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr);
     if (watch->handle == INVALID_HANDLE_VALUE) {
+        // 这里以前是静默 return：结果是"整个外部改动检测失效"却一点痕迹都没有
+        infra::LogWarn(L"watch", L"无法监视目录（错误码 " +
+                                    std::to_wstring(::GetLastError()) + L"）: " + directory);
         return;
     }
     watch->stopEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -244,6 +249,7 @@ void FileWatcher::Watch(const std::wstring& path) {
     watch->armedEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (watch->stopEvent == nullptr || watch->changeEvent == nullptr ||
         watch->armedEvent == nullptr) {
+        infra::LogWarn(L"watch", L"创建监视事件失败: " + directory);
         StopWatch(watch.get());
         return;
     }
@@ -251,7 +257,11 @@ void FileWatcher::Watch(const std::wstring& path) {
     WatchState* state = &impl_->state;
     watch->thread = std::thread([raw, state] { WatchLoop(raw, state); });
     // 等第一次监视真正挂上去再返回，堵住这段空档
-    ::WaitForSingleObject(watch->armedEvent, 3000);
+    if (::WaitForSingleObject(watch->armedEvent, 3000) != WAIT_OBJECT_0) {
+        // 挂载超时意味着"从现在起可能漏掉改动"，必须留下痕迹
+        infra::LogWarn(L"watch", L"监视挂载超时，期间的文件改动可能被漏掉: " + directory);
+    }
+    infra::LogInfo(L"watch", L"已开始监视目录: " + directory);
     impl_->state.watches.push_back(std::move(watch));
 }
 

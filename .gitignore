@@ -2,6 +2,8 @@
 /build/
 /build-*/
 /out/
+# 发行打包产物（scripts/package.ps1 生成）
+/dist/
 *.obj
 *.o
 *.pdb
