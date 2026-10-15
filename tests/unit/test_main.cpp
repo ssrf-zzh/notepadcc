@@ -16,8 +16,10 @@
 #include "io/FileReader.h"
 #include "io/XmlFile.h"
 #include "search/EscapeSequence.h"
+#include "search/CrossFileSearch.h"
 #include "search/InDocSearch.h"
 #include "search/RegexEngine.h"
+#include "search/Wildcard.h"
 #include "infra/Paths.h"
 #include "infra/Xml.h"
 
@@ -863,6 +865,163 @@ int main() {
             view->Destroy();
             ::DestroyWindow(host);
         }
+    }
+
+    // ---------------------------------------------------------------- 通配符与过滤器
+    Section("Wildcard / 文件过滤器");
+    {
+        Check(npcc::search::WildcardMatch(L"*.txt", L"a.txt"), "*.txt 匹配 a.txt");
+        Check(!npcc::search::WildcardMatch(L"*.txt", L"a.cpp"), "*.txt 不匹配 a.cpp");
+        Check(npcc::search::WildcardMatch(L"a?c", L"abc"), "? 匹配单个字符");
+        Check(npcc::search::WildcardMatch(L"*.TXT", L"a.txt"), "文件名匹配默认不区分大小写");
+        Check(npcc::search::WildcardMatch(L"*", L"anything"), "* 匹配一切");
+        Check(!npcc::search::WildcardMatch(L"a*b*c", L"aXb"), "跨多段的 * 不匹配");
+        Check(npcc::search::WildcardMatch(L"a*b*c", L"aXbYc"), "跨多段的 * 匹配");
+        Check(npcc::search::WildcardMatch(L"", L""), "空模式匹配空串");
+        Check(!npcc::search::WildcardMatch(L"", L"x"), "空模式不匹配非空串");
+
+        const npcc::search::FileFilter filter =
+            npcc::search::ParseFileFilter(L"*.js; *.html ;!node_modules;!*.min.js");
+        Check(filter.includes.size() == 2, "解析出两个包含模式（含空白裁剪）");
+        Check(filter.excludes.size() == 2, "解析出两个排除模式");
+        Check(npcc::search::FilterAllowsFile(filter, L"app.js"), "允许 app.js");
+        Check(!npcc::search::FilterAllowsFile(filter, L"app.css"), "不在包含列表里的被拒绝");
+        Check(!npcc::search::FilterAllowsFile(filter, L"lib.min.js"), "排除 *.min.js");
+        Check(!npcc::search::FilterAllowsDirectory(filter, L"node_modules"),
+              "排除 node_modules 目录");
+        Check(npcc::search::FilterAllowsDirectory(filter, L"src"), "允许 src 目录");
+
+        const npcc::search::FileFilter allowAll = npcc::search::ParseFileFilter(L"*.*");
+        Check(npcc::search::FilterAllowsFile(allowAll, L"anything.xyz"),
+              "只有 *.* 时允许任意文件");
+        const npcc::search::FileFilter empty = npcc::search::ParseFileFilter(L"");
+        Check(npcc::search::FilterAllowsFile(empty, L"anything"), "空过滤器不限制");
+    }
+
+    // ---------------------------------------------------------------- 在文件中查找
+    Section("CrossFileSearch（在文件中查找）");
+    {
+        const std::filesystem::path root =
+            std::filesystem::temp_directory_path() / "notepadcc_cross_test";
+        std::error_code ec;
+        std::filesystem::remove_all(root, ec);
+        std::filesystem::create_directories(root / "sub", ec);
+        std::filesystem::create_directories(root / "node_modules", ec);
+        std::filesystem::create_directories(root / "other", ec);
+
+        const auto write = [](const std::filesystem::path& path, std::string_view bytes) {
+            npcc::io::WriteFileAtomic(path.wstring(), bytes);
+        };
+        write(root / "a.txt", "first line\r\nneedle here\r\nthird\r\nneedle again\r\n");
+        write(root / "b.cpp", "// needle in cpp\n");
+        write(root / "sub" / "c.md", "needle in subdirectory\n");
+        write(root / "node_modules" / "skip.txt", "needle must not be found here\n");
+        write(root / "other" / "ignored.dat", "needle in dat\n");
+        write(root / "binary.bin", std::string("\x00\x01\x02needle\x03", 10));
+
+        npcc::search::SearchConfig config;
+        config.pattern = L"needle";
+        config.directories = {root.wstring()};
+        config.filter = L"*.txt;*.cpp;*.md";
+        config.includeSubDirs = true;
+
+        const std::vector<npcc::search::FileSearchResult> results =
+            npcc::search::CrossFileSearch::RunSynchronously(config, 2);
+
+        auto findFile = [&results](const std::wstring& name)
+            -> const npcc::search::FileSearchResult* {
+            for (const auto& result : results) {
+                if (result.path.size() >= name.size() &&
+                    result.path.compare(result.path.size() - name.size(), name.size(), name) == 0) {
+                    return &result;
+                }
+            }
+            return nullptr;
+        };
+
+        Check(results.size() == 3, "命中 3 个文件（其余被过滤或跳过）");
+        Check(findFile(L"a.txt") != nullptr, "a.txt 命中");
+        Check(findFile(L"b.cpp") != nullptr, "b.cpp 命中");
+        Check(findFile(L"sub\\c.md") != nullptr || findFile(L"c.md") != nullptr,
+              "子目录里的 c.md 命中");
+        Check(findFile(L"skip.txt") == nullptr, "node_modules 下的文件被跳过");
+        Check(findFile(L"ignored.dat") == nullptr, "不在过滤器内的文件被跳过");
+        Check(findFile(L"binary.bin") == nullptr, "二进制文件被跳过");
+
+        if (const auto* a = findFile(L"a.txt"); a != nullptr) {
+            Check(a->hits.size() == 2, "a.txt 两行命中");
+            if (a->hits.size() == 2) {
+                Check(a->hits[0].line == 2, "第一处命中在第 2 行");
+                CheckEqual(a->hits[0].text, "needle here", "行文本正确");
+                Check(a->hits[1].line == 4, "第二处命中在第 4 行");
+                Check(a->hits[0].matches.size() == 1, "第 2 行有 1 处匹配");
+                Check(a->hits[0].matches[0].start == 0 && a->hits[0].matches[0].end == 6,
+                      "行内偏移正确（相对行首）");
+            }
+        }
+
+        // 只搜 .txt
+        npcc::search::SearchConfig txtOnly = config;
+        txtOnly.filter = L"*.txt";
+        const auto txtResults = npcc::search::CrossFileSearch::RunSynchronously(txtOnly, 2);
+        Check(txtResults.size() == 1, "限制为 *.txt 时只命中 a.txt");
+
+        // 不递归
+        npcc::search::SearchConfig noSub = config;
+        noSub.includeSubDirs = false;
+        const auto noSubResults = npcc::search::CrossFileSearch::RunSynchronously(noSub, 2);
+        Check(noSubResults.size() == 2, "不递归时子目录里的 c.md 不再命中");
+
+        // 正则模式跨文件
+        npcc::search::SearchConfig regexConfig = config;
+        regexConfig.mode = npcc::search::SearchMode::Regex;
+        regexConfig.pattern = L"needle\\s+\\w+";
+        const auto regexResults =
+            npcc::search::CrossFileSearch::RunSynchronously(regexConfig, 2);
+        Check(!regexResults.empty(), "正则跨文件搜索有结果");
+        if (const auto* a = [&regexResults]() -> const npcc::search::FileSearchResult* {
+                for (const auto& result : regexResults) {
+                    if (result.path.size() > 6 &&
+                        result.path.compare(result.path.size() - 6, 6, L"a.txt") == 0) {
+                        return &result;
+                    }
+                }
+                return nullptr;
+            }(); a != nullptr && !a->hits.empty()) {
+            const auto& match = a->hits[0].matches[0];
+            Check(match.end - match.start > 6, "正则匹配覆盖了 needle 之后的词");
+        }
+
+        // 取消：命中第一个结果后就取消，应当提前收工
+        {
+            const std::filesystem::path many = root / "many";
+            std::filesystem::create_directories(many, ec);
+            for (int i = 0; i < 200; ++i) {
+                write(many / (L"f" + std::to_wstring(i) + L".txt"), "needle\n");
+            }
+            npcc::search::SearchConfig cancelConfig = config;
+            cancelConfig.directories = {many.wstring()};
+            cancelConfig.filter = L"*.txt";
+
+            npcc::search::CrossFileSearch searcher(2);
+            std::shared_ptr<npcc::search::CrossSearchJob> job;
+            std::atomic<int> seen{0};
+            npcc::search::CrossSearchCallbacks callbacks;
+            callbacks.onFileResult = [&](const npcc::search::FileSearchResult&) {
+                if (seen.fetch_add(1) == 0 && job) {
+                    job->Cancel();
+                }
+            };
+            job = searcher.Start(cancelConfig, std::move(callbacks));
+            job->Wait();
+            const npcc::search::SearchProgress progress = job->Progress();
+            Check(progress.cancelled, "取消标志被记录");
+            Check(progress.finished, "取消后任务仍然正常收尾");
+            Check(progress.filesScanned < 200, "取消后没有扫完全部文件");
+            Check(seen.load() > 0, "取消前已经产生了结果");
+        }
+
+        std::filesystem::remove_all(root, ec);
     }
 
     std::printf("\n结果: %d 项检查, %d 项失败\n", g_checks, g_failures);

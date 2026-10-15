@@ -128,14 +128,18 @@ set(NPCC_CORE_SOURCES
     src/edit/Encoding.cpp
     src/infra/Log.cpp
     src/infra/Paths.cpp
+    src/infra/ThreadPool.cpp
     src/infra/Xml.cpp
     src/io/AtomicFile.cpp
     src/io/FileReader.cpp
     src/io/XmlFile.cpp
     src/search/EscapeSequence.cpp
+    src/search/ByteMatcher.cpp
+    src/search/CrossFileSearch.cpp
     src/search/InDocSearch.cpp
     src/search/RegexEngine.cpp
     src/search/TextBytes.cpp
+    src/search/Wildcard.cpp
     src/shell/MainWindow.cpp
     src/shell/MenuBuilder.cpp
     src/shell/FindBar.cpp

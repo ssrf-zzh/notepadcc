@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "search/RegexEngine.h"
+#include "search/SearchConfig.h"
 #include "search/SearchTypes.h"
 
 namespace npcc::edit {
@@ -13,21 +14,6 @@ class EditView;
 }
 
 namespace npcc::search {
-
-struct SearchConfig {
-    std::wstring  pattern;
-    std::wstring  replaceTo;
-    SearchMode    mode = SearchMode::Literal;
-    bool          matchCase = false;
-    bool          wholeWordOnly = false;
-    bool          dotMatchesNewline = false;
-    bool          wrapAround = true;
-    bool          inSelectionOnly = false;
-
-    // 由调用方按文档编码设置：UTF-8 文档置 utfMode，ANSI 文档给 codePage
-    bool          utfMode = true;
-    std::uint32_t codePage = 936;
-};
 
 // 单文档的查找与替换（设计文档 2.5、5.4）。
 //
