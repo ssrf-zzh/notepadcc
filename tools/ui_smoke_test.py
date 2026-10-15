@@ -44,6 +44,14 @@ PANEL_DIR = 702
 PANEL_FILTER = 703
 PANEL_START = 707
 PANEL_LIST = 710
+PANEL_REPLACE_EDIT = 712
+PANEL_REPLACE_PREVIEW = 713
+PANEL_APPLY = 714
+
+CMD_REPLACE_IN_FILES = (3 << 12) | 10
+
+IDYES = 6
+IDOK = 1
 
 MARKER_BOOKMARK_MASK = 1            # EditView::kMarkerBookmark == 0
 
@@ -149,6 +157,110 @@ def test_bookmarks(main_window):
         return False
 
     print("  书签：标记 / 跳转 / 清除均正确")
+    return True
+
+
+def dump_top_level_windows():
+    """诊断用：列出当前可见的顶层窗口。"""
+    result = []
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def callback(hwnd, _):
+        if user32.IsWindowVisible(hwnd):
+            result.append((class_name(hwnd), window_text(hwnd)))
+        return True
+
+    user32.EnumWindows(callback_type(callback), 0)
+    return result
+
+
+def dismiss_dialog(title, command_id, timeout=6.0, quiet=False):
+    """确认框是模态的，脚本必须替用户点掉，否则后面的断言都无从谈起。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        dialog = user32.FindWindowW("#32770", title)
+        if dialog:
+            user32.PostMessageW(dialog, WM_COMMAND, command_id, 0)
+            time.sleep(0.4)
+            return True
+        time.sleep(0.2)
+    if not quiet:
+        print(f"    [诊断] 未找到标题为 {title!r} 的对话框；当前可见顶层窗口：")
+        for cls, text in dump_top_level_windows():
+            print(f"      {cls!r}  {text!r}")
+    return False
+
+
+def test_replace_in_files(main_window, root):
+    """在文件中替换：生成预览 → 应用 → 核对磁盘内容。"""
+    work = os.path.join(root, "build", "replace_test")
+    if os.path.isdir(work):
+        for name in os.listdir(work):
+            os.remove(os.path.join(work, name))
+    else:
+        os.makedirs(work)
+    targets = ["one.txt", "two.txt", "skip.log"]
+    for name in targets:
+        with open(os.path.join(work, name), "w", encoding="utf-8") as handle:
+            handle.write("alpha needle beta\nno match\nneedle again\n")
+
+    user32.SendMessageW(main_window, WM_COMMAND, CMD_REPLACE_IN_FILES, 0)
+    time.sleep(1)
+    panel = find_child(main_window, "notepadccSearchPanel")
+    if panel is None or not user32.IsWindowVisible(panel):
+        print("  FAIL: 替换面板不可见")
+        return False
+
+    set_text(panel, PANEL_FIND, "needle")
+    set_text(panel, PANEL_REPLACE_EDIT, "NEEDLE")
+    set_text(panel, PANEL_DIR, work)
+    set_text(panel, PANEL_FILTER, "*.txt")
+    time.sleep(0.3)
+
+    user32.SendMessageW(main_window, WM_COMMAND, PANEL_REPLACE_PREVIEW, 0)
+    list_view = user32.GetDlgItem(panel, PANEL_LIST)
+    deadline = time.time() + 30
+    status = ""
+    while time.time() < deadline:
+        time.sleep(0.5)
+        status = ""
+        for child in children(panel):
+            if class_name(child) == "Static":
+                status = window_text(child)
+                break
+        if status.startswith("预览就绪") or status.startswith("已取消"):
+            break
+
+    if not status.startswith("预览就绪"):
+        print(f"  FAIL: 没有生成替换预览，状态 {status!r}")
+        return False
+    rows = user32.SendMessageW(list_view, LVM_GETITEMCOUNT, 0, 0)
+    if rows != 2:
+        print(f"  FAIL: 预览应有 2 个文件（skip.log 被过滤器排除），实际 {rows}")
+        return False
+
+    # 用 PostMessage 而不是 SendMessage：确认框是模态的，
+    # SendMessage 会被它同步阻塞住，脚本就没机会去点它了。
+    user32.PostMessageW(main_window, WM_COMMAND, PANEL_APPLY, 0)
+    if not dismiss_dialog("在文件中替换", IDYES):
+        print("  FAIL: 没能点掉替换确认框")
+        return False
+    # 被替换的文件没有在标签里打开，所以不会有第二个提示框；找不到属正常
+    dismiss_dialog("替换完成", IDOK, timeout=2.0, quiet=True)
+
+    time.sleep(1.0)
+    for name in ("one.txt", "two.txt"):
+        with open(os.path.join(work, name), "r", encoding="utf-8") as handle:
+            content = handle.read()
+        if content != "alpha NEEDLE beta\nno match\nNEEDLE again\n":
+            print(f"  FAIL: {name} 替换后的内容不对：{content!r}")
+            return False
+    with open(os.path.join(work, "skip.log"), "r", encoding="utf-8") as handle:
+        if "needle" not in handle.read():
+            print("  FAIL: 被过滤器排除的文件不应被改动")
+            return False
+
+    print("  在文件中替换：预览 2 个文件 → 应用 → 磁盘内容正确")
     return True
 
 
@@ -275,6 +387,8 @@ def run():
             failed = True
         if not test_bookmarks(main_window):
             failed = True
+        if not test_replace_in_files(main_window, root):
+            failed = True
     finally:
         if main_window:
             user32.PostMessageW(main_window, WM_CLOSE, 0, 0)
@@ -285,7 +399,7 @@ def run():
     if failed:
         print("FAIL: 界面回归未通过")
         return 1
-    print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签）")
+    print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换）")
     return 0
 
 

@@ -19,4 +19,9 @@ std::wstring ConvertFromDocBytes(std::string_view bytes, bool utfMode, std::uint
 // 界面层就不必再关心每个文件原本是什么编码。
 std::string DocBytesToUtf8(std::string_view bytes, bool utfMode, std::uint32_t codePage);
 
+// 判断文本能否在给定代码页下无损表示。
+// 实现方式是一次往返转换比对——WideCharToMultiByte 遇到无法表示的字符会
+// 静默替换成 '?' 而不报错，只靠返回值判断不出来。
+bool CanRepresentInCodePage(std::wstring_view text, std::uint32_t codePage);
+
 }  // namespace npcc::search

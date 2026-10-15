@@ -52,6 +52,8 @@ bool SearchPanel::Create(HWND parent) {
                 0, kSearchPanelDir, L"搜索目录（留空则用当前文件所在目录）");
     MakeControl(L"EDIT", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
                 0, kSearchPanelFilter, L"文件过滤器：*.txt;*.cpp;!node_modules");
+    MakeControl(L"EDIT", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
+                0, kSearchPanelReplaceEdit, L"替换为");
 
     MakeControl(L"BUTTON", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0,
                 kSearchPanelCase, nullptr);
@@ -68,9 +70,15 @@ bool SearchPanel::Create(HWND parent) {
     MakeControl(L"BUTTON", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0,
                 kSearchPanelStop, nullptr);
     MakeControl(L"BUTTON", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0,
+                kSearchPanelReplacePreview, nullptr);
+    MakeControl(L"BUTTON", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0,
+                kSearchPanelApply, nullptr);
+    MakeControl(L"BUTTON", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0,
                 kSearchPanelClose, nullptr);
     ::SetWindowTextW(::GetDlgItem(hwnd_, kSearchPanelStart), L"在文件中查找");
     ::SetWindowTextW(::GetDlgItem(hwnd_, kSearchPanelStop), L"停止");
+    ::SetWindowTextW(::GetDlgItem(hwnd_, kSearchPanelReplacePreview), L"替换…");
+    ::SetWindowTextW(::GetDlgItem(hwnd_, kSearchPanelApply), L"应用");
     ::SetWindowTextW(::GetDlgItem(hwnd_, kSearchPanelClose), L"关闭");
 
     list_ = MakeControl(WC_LISTVIEWW,
@@ -84,6 +92,7 @@ bool SearchPanel::Create(HWND parent) {
     SetupColumns();
     Layout();
     SetStatus(L"就绪");
+    SetApplyEnabled(false);
     return true;
 }
 
@@ -198,10 +207,12 @@ void SearchPanel::Layout() {
     const int buttonWidth = Scale(92);
     const int smallButton = Scale(60);
     const int checkWidth = Scale(88);
+    const int replaceButtonWidth = Scale(68);
     int x = gap;
 
     // 第一行：查找内容 + 选项 + 操作按钮
-    const int reserved = checkWidth * 3 + buttonWidth * 2 + smallButton + gap * 8;
+    const int reserved = checkWidth * 3 + buttonWidth + replaceButtonWidth * 2 +
+                         smallButton + gap * 10;
     const int findWidth = std::max(Scale(160), width - reserved - gap);
     place(::GetDlgItem(hwnd_, kSearchPanelFind), x, row1, findWidth, rowHeight);
     x += findWidth + gap;
@@ -212,18 +223,27 @@ void SearchPanel::Layout() {
     x += gap;
     place(::GetDlgItem(hwnd_, kSearchPanelStart), x, row1, buttonWidth, rowHeight);
     x += buttonWidth + gap;
+    place(::GetDlgItem(hwnd_, kSearchPanelReplacePreview), x, row1, replaceButtonWidth,
+          rowHeight);
+    x += replaceButtonWidth + gap;
+    place(::GetDlgItem(hwnd_, kSearchPanelApply), x, row1, replaceButtonWidth, rowHeight);
+    x += replaceButtonWidth + gap;
     place(::GetDlgItem(hwnd_, kSearchPanelStop), x, row1, smallButton, rowHeight);
     x += smallButton + gap;
     place(::GetDlgItem(hwnd_, kSearchPanelClose), x, row1, smallButton, rowHeight);
 
-    // 第二行：目录 + 过滤器 + 状态
+    // 第二行：目录 + 过滤器 + 替换为 + 状态
     x = gap;
     const int statusWidth = Scale(240);
+    const int replaceWidth = Scale(200);
     const int filterWidth = Scale(240);
-    const int dirWidth = std::max(Scale(160), width - statusWidth - filterWidth - gap * 5);
+    const int dirWidth = std::max(
+        Scale(140), width - statusWidth - filterWidth - replaceWidth - gap * 6);
     place(::GetDlgItem(hwnd_, kSearchPanelDir), x, row2, dirWidth, rowHeight);
     x += dirWidth + gap;
     place(::GetDlgItem(hwnd_, kSearchPanelFilter), x, row2, filterWidth, rowHeight);
+    x += filterWidth + gap;
+    place(::GetDlgItem(hwnd_, kSearchPanelReplaceEdit), x, row2, replaceWidth, rowHeight);
     place(status_, width - statusWidth - gap, row2, statusWidth, rowHeight);
 
     // 结果列表填满剩余空间
@@ -277,6 +297,7 @@ void SearchPanel::SetTextOf(int controlId, const std::wstring& text) {
 search::SearchConfig SearchPanel::Config() const {
     search::SearchConfig config;
     config.pattern = TextOf(kSearchPanelFind);
+    config.replaceTo = TextOf(kSearchPanelReplaceEdit);
     config.matchCase = ::IsDlgButtonChecked(hwnd_, kSearchPanelCase) == BST_CHECKED;
     config.wholeWordOnly = ::IsDlgButtonChecked(hwnd_, kSearchPanelWord) == BST_CHECKED;
     config.mode = (::IsDlgButtonChecked(hwnd_, kSearchPanelRegex) == BST_CHECKED)
@@ -320,8 +341,144 @@ void SearchPanel::SetDefaultFilter() {
 void SearchPanel::ClearResults() {
     rows_.clear();
     truncated_ = false;
+    plans_.clear();
+    replacePreview_ = false;
     if (list_ != nullptr) {
         ::SendMessageW(list_, LVM_DELETEALLITEMS, 0, 0);
+        // 回到"查找结果"的列定义
+        LVCOLUMNW column{};
+        column.mask = LVCF_TEXT;
+        column.pszText = const_cast<LPWSTR>(L"文件");
+        ::SendMessageW(list_, LVM_SETCOLUMNW, 0, reinterpret_cast<LPARAM>(&column));
+        column.pszText = const_cast<LPWSTR>(L"行");
+        ::SendMessageW(list_, LVM_SETCOLUMNW, 1, reinterpret_cast<LPARAM>(&column));
+        column.pszText = const_cast<LPWSTR>(L"内容");
+        ::SendMessageW(list_, LVM_SETCOLUMNW, 2, reinterpret_cast<LPARAM>(&column));
+        ::SendMessageW(list_, LVM_SETEXTENDEDLISTVIEWSTYLE, LVS_EX_CHECKBOXES, 0);
+    }
+    SetApplyEnabled(false);
+}
+
+void SearchPanel::BeginReplacePreview() {
+    ClearResults();
+    replacePreview_ = true;
+    if (list_ == nullptr) {
+        return;
+    }
+    LVCOLUMNW column{};
+    column.mask = LVCF_TEXT;
+    column.pszText = const_cast<LPWSTR>(L"文件");
+    ::SendMessageW(list_, LVM_SETCOLUMNW, 0, reinterpret_cast<LPARAM>(&column));
+    column.pszText = const_cast<LPWSTR>(L"处数");
+    ::SendMessageW(list_, LVM_SETCOLUMNW, 1, reinterpret_cast<LPARAM>(&column));
+    column.pszText = const_cast<LPWSTR>(L"替换预览（改前 → 改后）");
+    ::SendMessageW(list_, LVM_SETCOLUMNW, 2, reinterpret_cast<LPARAM>(&column));
+    ::SendMessageW(list_, LVM_SETEXTENDEDLISTVIEWSTYLE, LVS_EX_CHECKBOXES, LVS_EX_CHECKBOXES);
+}
+
+void SearchPanel::AppendReplacePlan(const search::FileReplacePlan& plan) {
+    if (list_ == nullptr || !replacePreview_) {
+        return;
+    }
+    if (plans_.size() >= kMaxRows) {
+        if (!truncated_) {
+            truncated_ = true;
+            SetStatus(L"文件过多，预览已截断");
+        }
+        return;
+    }
+
+    const std::size_t planIndex = plans_.size();
+    plans_.push_back(plan);
+
+    // 预览列显示第一处改动的前后对照；出错的文件把原因写在这里
+    std::wstring detail;
+    if (!plan.error.empty()) {
+        detail = L"⚠ " + plan.error;
+    } else if (!plan.samples.empty()) {
+        detail = search::ConvertFromDocBytes(plan.samples[0].before, true, 936);
+        detail += L"  →  ";
+        detail += search::ConvertFromDocBytes(plan.samples[0].after, true, 936);
+    }
+    if (detail.size() > 200) {
+        detail.resize(200);
+        detail += L"…";
+    }
+
+    const std::wstring countText =
+        plan.error.empty() ? std::to_wstring(plan.replacements) : std::wstring(L"—");
+    const std::wstring displayName = plan.path;
+
+    LVITEMW item{};
+    item.mask = LVIF_TEXT | LVIF_PARAM;
+    item.iItem = static_cast<int>(planIndex);
+    item.iSubItem = 0;
+    item.pszText = const_cast<LPWSTR>(displayName.c_str());
+    item.lParam = static_cast<LPARAM>(planIndex);
+    const int inserted = static_cast<int>(
+        ::SendMessageW(list_, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&item)));
+    if (inserted < 0) {
+        plans_.pop_back();
+        return;
+    }
+    SetListSubItem(list_, inserted, 1, countText);
+    SetListSubItem(list_, inserted, 2, detail);
+
+    // 默认勾选；出错的文件取消勾选并置灰
+    const UINT state = plan.selected ? 2u : 1u;
+    LVITEMW stateItem{};
+    stateItem.mask = LVIF_STATE;
+    stateItem.stateMask = LVIS_STATEIMAGEMASK;
+    stateItem.state = INDEXTOSTATEIMAGEMASK(state);
+    ::SendMessageW(list_, LVM_SETITEMSTATE, static_cast<WPARAM>(inserted),
+                   reinterpret_cast<LPARAM>(&stateItem));
+
+    rows_.push_back(RowRef{plan.path, 0, planIndex});
+}
+
+void SearchPanel::EndReplacePreview() {
+    if (list_ != nullptr) {
+        ::SendMessageW(list_, LVM_SETCOLUMNWIDTH, 0, Scale(320));
+        ::SendMessageW(list_, LVM_SETCOLUMNWIDTH, 1, Scale(60));
+        ::SendMessageW(list_, LVM_SETCOLUMNWIDTH, 2, Scale(520));
+    }
+    SetApplyEnabled(!plans_.empty());
+}
+
+std::vector<search::FileReplacePlan> SearchPanel::CheckedPlans() const {
+    std::vector<search::FileReplacePlan> selected;
+    if (list_ == nullptr || !replacePreview_) {
+        return selected;
+    }
+    const int count = static_cast<int>(::SendMessageW(list_, LVM_GETITEMCOUNT, 0, 0));
+    for (int index = 0; index < count; ++index) {
+        const LRESULT state = ::SendMessageW(list_, LVM_GETITEMSTATE,
+                                             static_cast<WPARAM>(index), LVIS_STATEIMAGEMASK);
+        const bool checked = ((state >> 12) & 0xF) == 2;
+        LVITEMW item{};
+        item.mask = LVIF_PARAM;
+        item.iItem = index;
+        if (::SendMessageW(list_, LVM_GETITEMW, 0, reinterpret_cast<LPARAM>(&item)) == 0) {
+            continue;
+        }
+        const std::size_t planIndex = static_cast<std::size_t>(item.lParam);
+        if (planIndex >= plans_.size()) {
+            continue;
+        }
+        search::FileReplacePlan plan = plans_[planIndex];
+        plan.selected = checked && plan.error.empty();
+        selected.push_back(std::move(plan));
+    }
+    return selected;
+}
+
+std::wstring SearchPanel::ReplacementText() const {
+    return TextOf(kSearchPanelReplaceEdit);
+}
+
+void SearchPanel::SetApplyEnabled(bool enabled) {
+    if (HWND control = ::GetDlgItem(hwnd_, kSearchPanelApply); control != nullptr) {
+        ::EnableWindow(control, enabled ? TRUE : FALSE);
     }
 }
 
@@ -383,6 +540,14 @@ void SearchPanel::SetRunning(bool running) {
     }
     if (HWND control = ::GetDlgItem(hwnd_, kSearchPanelStop); control != nullptr) {
         ::EnableWindow(control, running ? TRUE : FALSE);
+    }
+    for (const int id : {kSearchPanelReplacePreview, kSearchPanelApply}) {
+        if (HWND control = ::GetDlgItem(hwnd_, id); control != nullptr) {
+            ::EnableWindow(control, running ? FALSE : TRUE);
+        }
+    }
+    if (!running) {
+        SetApplyEnabled(replacePreview_ && !plans_.empty());
     }
 }
 

@@ -59,4 +59,16 @@ std::string DocBytesToUtf8(std::string_view bytes, bool utfMode, std::uint32_t c
     return out;
 }
 
+bool CanRepresentInCodePage(std::wstring_view text, std::uint32_t codePage) {
+    if (text.empty()) {
+        return true;
+    }
+    std::string bytes;
+    if (!ConvertToDocBytes(text, false, codePage, bytes)) {
+        return false;
+    }
+    const std::wstring roundTrip = ConvertFromDocBytes(bytes, false, codePage);
+    return roundTrip == text;
+}
+
 }  // namespace npcc::search

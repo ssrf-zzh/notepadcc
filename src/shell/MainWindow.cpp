@@ -47,6 +47,7 @@ enum : npcc::core::CmdId {
     kCmdSearchNextBookmark   = npcc::core::MakeCmdId(3, 7),
     kCmdSearchPrevBookmark   = npcc::core::MakeCmdId(3, 8),
     kCmdSearchClearBookmarks = npcc::core::MakeCmdId(3, 9),
+    kCmdSearchReplaceInFiles = npcc::core::MakeCmdId(3, 10),
 
     kCmdViewZoomIn        = npcc::core::MakeCmdId(4, 1),
     kCmdViewZoomOut       = npcc::core::MakeCmdId(4, 2),
@@ -165,6 +166,7 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             searchPanel_.Create(hwnd_);
             documents_ = std::make_unique<core::DocumentManager>(hwnd_);
             crossSearch_ = std::make_unique<search::CrossFileSearch>();
+            crossReplace_ = std::make_unique<search::CrossFileReplace>();
 
             RegisterCommands();
             menu_ = BuildMainMenu(registry_);
@@ -234,6 +236,31 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             std::unique_ptr<search::SearchProgress> progress(
                 reinterpret_cast<search::SearchProgress*>(lParam));
             FinishFileSearch(*progress);
+            return 0;
+        }
+        case core::kMsgReplacePlan: {
+            std::unique_ptr<search::FileReplacePlan> plan(
+                reinterpret_cast<search::FileReplacePlan*>(lParam));
+            searchPanel_.AppendReplacePlan(*plan);
+            return 0;
+        }
+        case core::kMsgReplaceFinished: {
+            std::unique_ptr<search::SearchProgress> progress(
+                reinterpret_cast<search::SearchProgress*>(lParam));
+            searchPanel_.SetRunning(false);
+            searchPanel_.EndReplacePreview();
+            std::wstring text = progress->cancelled ? L"已取消：" : L"预览就绪：";
+            text += L"扫描 " + std::to_wstring(progress->filesScanned) + L" / " +
+                    std::to_wstring(progress->filesTotal) + L" 个文件，将改动 " +
+                    std::to_wstring(progress->filesMatched) + L" 个文件、共 " +
+                    std::to_wstring(progress->hits) + L" 处";
+            if (progress->failedFiles > 0) {
+                text += L"，跳过 " + std::to_wstring(progress->failedFiles) + L" 个";
+            }
+            text += L"。核对无误后点「应用」。";
+            searchPanel_.SetStatus(text);
+            infra::LogInfo(L"replace", text);
+            replaceJob_.reset();
             return 0;
         }
         case WM_DROPFILES: {
@@ -389,6 +416,9 @@ void MainWindow::RegisterCommands() {
     add(kCmdSearchClearBookmarks, CmdCategory::Search, L"cmd.search.clearBookmarks",
         L"清除全部书签(&C)", needsBuffer,
         [this](const CmdContext&) { CommandClearBookmarks(); });
+    add(kCmdSearchReplaceInFiles, CmdCategory::Search, L"cmd.search.replaceInFiles",
+        L"在文件中替换(&R)...", core::kCmdNone,
+        [this](const CmdContext&) { CommandReplaceInFiles(); });
 
     // ---- 视图 ----
     add(kCmdViewZoomIn, CmdCategory::View, L"cmd.view.zoomIn", L"放大(&I)",
@@ -472,6 +502,7 @@ void MainWindow::RegisterCommands() {
     registry_.BindShortcut(kCmdSearchToggleBookmark, ctrl, VK_F2, true);
     registry_.BindShortcut(kCmdSearchNextBookmark, core::kModNone, VK_F2, true);
     registry_.BindShortcut(kCmdSearchPrevBookmark, core::kModShift, VK_F2, true);
+    registry_.BindShortcut(kCmdSearchReplaceInFiles, ctrlShift, 'H', true);
     registry_.BindShortcut(kCmdViewZoomIn, ctrl, VK_OEM_PLUS, true);
     registry_.BindShortcut(kCmdViewZoomOut, ctrl, VK_OEM_MINUS, true);
     registry_.BindShortcut(kCmdViewZoomReset, ctrl, '0', true);
@@ -1229,6 +1260,161 @@ void MainWindow::CommandClearBookmarks() {
     }
 }
 
+void MainWindow::CommandReplaceInFiles() {
+    CommandFindInFiles();
+    if (HWND edit = ::GetDlgItem(searchPanel_.Handle(), kSearchPanelReplaceEdit);
+        edit != nullptr) {
+        ::SetFocus(edit);
+        ::SendMessageW(edit, EM_SETSEL, 0, -1);
+    }
+}
+
+void MainWindow::StartReplacePlan() {
+    search::SearchConfig config = searchPanel_.Config();
+    if (config.pattern.empty()) {
+        searchPanel_.SetStatus(L"请输入查找内容");
+        return;
+    }
+    if (config.directories.empty()) {
+        if (edit::Document* document = ActiveDocument();
+            document != nullptr && document->buffer.HasPath()) {
+            config.directories.push_back(
+                core::DocumentManager::DirectoryOf(document->buffer.filePath));
+        }
+        if (config.directories.empty()) {
+            searchPanel_.SetStatus(L"请指定搜索目录");
+            return;
+        }
+    }
+    if (replaceJob_) {
+        replaceJob_->Cancel();
+        replaceJob_->Wait();
+        replaceJob_.reset();
+    }
+
+    // 模式串与替换串都先单独校验一次，明显写错的东西不该丢给后台才发现
+    {
+        search::ByteMatcher probe;
+        search::SearchOutcome outcome;
+        if (!probe.Prepare(config, true, 936, outcome)) {
+            searchPanel_.SetStatus(outcome.message);
+            return;
+        }
+    }
+
+    pendingReplaceConfig_ = config;
+    searchPanel_.BeginReplacePreview();
+    searchPanel_.SetRunning(true);
+    searchPanel_.SetStatus(L"正在生成替换预览…");
+
+    search::ReplacePlanCallbacks callbacks;
+    callbacks.onPlan = [this](const search::FileReplacePlan& plan) {
+        auto* copy = new search::FileReplacePlan(plan);
+        if (::PostMessageW(hwnd_, core::kMsgReplacePlan, 0, reinterpret_cast<LPARAM>(copy)) == 0) {
+            delete copy;
+        }
+    };
+    callbacks.onProgress = [this](const search::SearchProgress&) {
+        ::PostMessageW(hwnd_, core::kMsgSearchWakeup, 0, 0);
+    };
+    callbacks.onFinished = [this](const search::SearchProgress& progress) {
+        auto* copy = new search::SearchProgress(progress);
+        if (::PostMessageW(hwnd_, core::kMsgReplaceFinished, 0,
+                           reinterpret_cast<LPARAM>(copy)) == 0) {
+            delete copy;
+        }
+    };
+
+    infra::LogInfo(L"replace", L"生成替换预览: " + config.pattern + L" -> " + config.replaceTo);
+    replaceJob_ = crossReplace_->BuildPlan(config, replaceOptions_, std::move(callbacks));
+}
+
+void MainWindow::ApplyReplacements() {
+    const std::vector<search::FileReplacePlan> plans = searchPanel_.CheckedPlans();
+    std::size_t fileCount = 0;
+    std::size_t total = 0;
+    for (const auto& plan : plans) {
+        if (plan.selected) {
+            ++fileCount;
+            total += plan.replacements;
+        }
+    }
+    if (fileCount == 0) {
+        searchPanel_.SetStatus(L"没有勾选任何文件");
+        return;
+    }
+
+    // 批量改文件是不可逆操作（虽然能靠备份与版本控制挽回），必须显式确认
+    const std::wstring question =
+        L"将对 " + std::to_wstring(fileCount) + L" 个文件、共 " + std::to_wstring(total) +
+        L" 处执行替换。\n\n"
+        L"· 每个文件都是先写临时文件再原子替换，失败不会破坏原文件；\n"
+        L"· 若文件在生成预览之后被其他程序改过，该文件会被跳过；\n"
+        L"· 编码无法表示替换内容的文件已自动排除。\n\n是否继续？";
+    const int answer = ::MessageBoxW(hwnd_, question.c_str(), L"在文件中替换",
+                                     MB_ICONWARNING | MB_YESNO);
+    // 批量改文件是敏感操作，把用户的确认与否记进日志，便于事后追溯
+    infra::LogInfo(L"replace", answer == IDYES ? L"用户确认执行替换" : L"用户取消了替换");
+    if (answer != IDYES) {
+        searchPanel_.SetStatus(L"已取消");
+        return;
+    }
+
+    const search::ReplaceReport report =
+        search::CrossFileReplace::Apply(pendingReplaceConfig_, replaceOptions_, plans);
+
+    std::wstring text = L"替换完成：写回 " + std::to_wstring(report.applied) + L" 个文件、共 " +
+                        std::to_wstring(report.replacements) + L" 处";
+    if (report.skipped > 0) {
+        text += L"，跳过 " + std::to_wstring(report.skipped) + L" 个";
+    }
+    if (report.failed > 0) {
+        text += L"，失败 " + std::to_wstring(report.failed) + L" 个";
+    }
+    searchPanel_.SetStatus(text);
+    infra::LogInfo(L"replace", text);
+
+    if (!report.errors.empty()) {
+        std::wstring detail = L"以下文件未能替换：\n\n";
+        const std::size_t shown = std::min<std::size_t>(report.errors.size(), 10);
+        for (std::size_t i = 0; i < shown; ++i) {
+            detail += L"· " + report.errors[i] + L"\n";
+        }
+        if (report.errors.size() > shown) {
+            detail += L"…另有 " + std::to_wstring(report.errors.size() - shown) + L" 个\n";
+        }
+        ::MessageBoxW(hwnd_, detail.c_str(), L"替换结果", MB_ICONINFORMATION);
+    }
+
+    // 只有在被替换的文件确实已经打开时，才值得打断用户提醒一次；
+    // 否则替换完默默收工就好。
+    if (report.applied > 0) {
+        bool anyOpen = false;
+        for (const auto& plan : plans) {
+            if (!plan.selected) {
+                continue;
+            }
+            for (edit::Document* document : documents_->All()) {
+                if (document->buffer.HasPath() && document->buffer.filePath == plan.path) {
+                    anyOpen = true;
+                    break;
+                }
+            }
+            if (anyOpen) {
+                break;
+            }
+        }
+        if (anyOpen) {
+            ::MessageBoxW(hwnd_,
+                          L"部分被替换的文件已在标签中打开。请重新打开这些标签，"
+                          L"否则编辑器里显示的仍是旧内容。",
+                          L"替换完成", MB_ICONINFORMATION);
+        }
+    }
+    searchPanel_.BeginReplacePreview();
+    searchPanel_.SetApplyEnabled(false);
+}
+
 void MainWindow::CommandFindInFiles() {
     // 查找栏与搜索面板共用底部空间，同时只显示一个
     findBar_.Hide();
@@ -1321,9 +1507,19 @@ bool MainWindow::HandleSearchPanelCommand(int controlId) {
         case kSearchPanelStart:
             StartFileSearch();
             return true;
+        case kSearchPanelReplacePreview:
+            StartReplacePlan();
+            return true;
+        case kSearchPanelApply:
+            ApplyReplacements();
+            return true;
         case kSearchPanelStop:
             if (searchJob_) {
                 searchJob_->Cancel();
+                searchPanel_.SetStatus(L"正在停止…");
+            }
+            if (replaceJob_) {
+                replaceJob_->Cancel();
                 searchPanel_.SetStatus(L"正在停止…");
             }
             return true;

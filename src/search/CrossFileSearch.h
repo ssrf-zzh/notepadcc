@@ -1,44 +1,15 @@
 #pragma once
 
-#include <atomic>
-#include <condition_variable>
 #include <functional>
 #include <memory>
-#include <mutex>
-#include <string>
-#include <thread>
 #include <vector>
 
 #include "infra/ThreadPool.h"
 #include "search/SearchConfig.h"
+#include "search/SearchJob.h"
 #include "search/SearchResult.h"
 
 namespace npcc::search {
-
-// 一次跨文件搜索任务。Cancel() 可从任意线程调用。
-class CrossSearchJob {
-public:
-    ~CrossSearchJob();
-
-    void Cancel() noexcept { cancelled_.store(true, std::memory_order_relaxed); }
-    bool IsCancelled() const noexcept { return cancelled_.load(std::memory_order_relaxed); }
-
-    SearchProgress Progress() const;
-    void           Wait();
-
-private:
-    friend class CrossFileSearch;
-
-    void SetProgress(const SearchProgress& progress);
-    void MarkFinished(const SearchProgress& progress);
-
-    std::atomic<bool>       cancelled_{false};
-    mutable std::mutex      mutex_;
-    std::condition_variable finishedSignal_;
-    SearchProgress          progress_;
-    bool                    finished_ = false;
-    std::thread             coordinator_;
-};
 
 struct CrossSearchCallbacks {
     // 三个回调都在**协调线程**上调用，不是 UI 线程。

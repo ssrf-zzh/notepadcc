@@ -186,4 +186,36 @@ bool ByteMatcher::FindAll(std::string_view bytes, std::vector<MatchRange>& match
     return true;
 }
 
+bool ByteMatcher::ExpandReplacement(std::string_view bytes, std::int64_t matchStart,
+                                    std::wstring_view replacement, std::string& out,
+                                    SearchOutcome& outcome) {
+    out.clear();
+    outcome = SearchOutcome::Success();
+
+    if (!ready_) {
+        outcome = SearchOutcome::Failure(SearchError::InternalError, L"匹配器尚未准备。");
+        return false;
+    }
+
+    if (config_.mode == SearchMode::Regex) {
+        if (regex_ == nullptr) {
+            outcome = SearchOutcome::Failure(SearchError::InternalError, L"正则尚未编译。");
+            return false;
+        }
+        MatchRange located;
+        if (!regex_->Find(bytes, matchStart, located, outcome)) {
+            return outcome.Ok();
+        }
+        return regex_->ExpandReplacement(bytes, replacement, out, outcome);
+    }
+
+    // 字面量模式没有捕获组，替换串本身就是结果
+    if (!ConvertToDocBytes(replacement, utfMode_, codePage_, out)) {
+        outcome = SearchOutcome::Failure(SearchError::EncodingFailed,
+                                         L"替换内容无法按该文件的编码表示。");
+        return false;
+    }
+    return true;
+}
+
 }  // namespace npcc::search

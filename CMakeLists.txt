@@ -136,8 +136,11 @@ set(NPCC_CORE_SOURCES
     src/search/EscapeSequence.cpp
     src/search/ByteMatcher.cpp
     src/search/CrossFileSearch.cpp
+    src/search/CrossFileReplace.cpp
+    src/search/FileScanner.cpp
     src/search/InDocSearch.cpp
     src/search/RegexEngine.cpp
+    src/search/SearchJob.cpp
     src/search/TextBytes.cpp
     src/search/Wildcard.cpp
     src/shell/MainWindow.cpp

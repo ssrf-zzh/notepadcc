@@ -36,6 +36,12 @@ public:
     bool FindAll(std::string_view bytes, std::vector<MatchRange>& matches, std::size_t limit,
                  bool& truncated, SearchOutcome& outcome);
 
+    // 展开某一处匹配的替换文本。matchStart 必须正好是一处匹配的起点
+    // （正则模式下会据此重新定位，以便使用 $1 这类引用）。
+    bool ExpandReplacement(std::string_view bytes, std::int64_t matchStart,
+                           std::wstring_view replacement, std::string& out,
+                           SearchOutcome& outcome);
+
 private:
     bool FindLiteralAll(std::string_view bytes, std::vector<MatchRange>& matches,
                         std::size_t limit, bool& truncated);

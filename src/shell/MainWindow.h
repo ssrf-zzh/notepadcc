@@ -15,6 +15,7 @@
 #include "shell/FindBar.h"
 #include "shell/SearchPanel.h"
 #include "search/CrossFileSearch.h"
+#include "search/CrossFileReplace.h"
 
 namespace npcc::shell {
 
@@ -59,6 +60,9 @@ private:
     void CommandFindNext(bool forward);
     bool HandleFindBarCommand(int controlId);
     void CommandFindInFiles();
+    void CommandReplaceInFiles();
+    void StartReplacePlan();
+    void ApplyReplacements();
     void CommandToggleBookmark();
     void CommandGotoBookmark(bool forward);
     void CommandClearBookmarks();
@@ -99,6 +103,10 @@ private:
     SearchPanel                searchPanel_;
     std::unique_ptr<search::CrossFileSearch> crossSearch_;
     std::shared_ptr<search::CrossSearchJob>  searchJob_;
+    std::unique_ptr<search::CrossFileReplace> crossReplace_;
+    std::shared_ptr<search::CrossSearchJob>   replaceJob_;
+    search::SearchConfig                      pendingReplaceConfig_;
+    search::ReplaceOptions                    replaceOptions_;
 
     std::wstring lastDirectory_;
     bool showWhitespace_ = false;

@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "search/CrossFileReplace.h"
 #include "search/SearchConfig.h"
 #include "search/SearchResult.h"
 
@@ -25,6 +26,9 @@ enum SearchPanelControl : int {
     kSearchPanelClose  = 709,
     kSearchPanelList   = 710,
     kSearchPanelStatus = 711,
+    kSearchPanelReplaceEdit = 712,
+    kSearchPanelReplacePreview = 713,
+    kSearchPanelApply = 714,
     kSearchPanelLimit  = 799,
 };
 
@@ -54,8 +58,19 @@ public:
 
     void ClearResults();
     void AppendFileResult(const search::FileSearchResult& result);
+
+    // ---- 替换预览模式 ----
+    // 预览时列表变成"一行一个文件 + 勾选框"，用户可逐条取消。
+    void BeginReplacePreview();
+    void AppendReplacePlan(const search::FileReplacePlan& plan);
+    void EndReplacePreview();
+    bool ReplacePreviewActive() const noexcept { return replacePreview_; }
+    std::vector<search::FileReplacePlan> CheckedPlans() const;
+
+    std::wstring ReplacementText() const;
     void SetStatus(const std::wstring& text);
     void SetRunning(bool running);
+    void SetApplyEnabled(bool enabled);
 
     // 双击结果行时，父窗口用它取出要跳转的目标
     bool SelectedTarget(std::wstring& path, int& line) const;
@@ -81,6 +96,7 @@ private:
     struct RowRef {
         std::wstring path;
         int          line = 0;
+        std::size_t  planIndex = 0;
     };
 
     HWND                  hwnd_ = nullptr;
@@ -89,6 +105,8 @@ private:
     HWND                  status_ = nullptr;
     std::vector<RowRef>   rows_;
     bool                  truncated_ = false;
+    bool                  replacePreview_ = false;
+    std::vector<search::FileReplacePlan> plans_;
 };
 
 }  // namespace npcc::shell

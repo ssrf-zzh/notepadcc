@@ -16,6 +16,8 @@ enum : UINT {
     kMsgAppActivate     = WM_APP + 7,
     kMsgSearchFinished  = WM_APP + 8,
     kMsgSearchWakeup    = WM_APP + 9,   // 进度更新：UI 线程收到后自己去读进度
+    kMsgReplacePlan     = WM_APP + 11,  // 替换计划（指针所有权转移给 UI 线程）
+    kMsgReplaceFinished = WM_APP + 12,
     kMsgUserRangeStart  = WM_APP + 100, // 以下保留给外壳内部
 };
 

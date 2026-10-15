@@ -2,8 +2,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <chrono>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include "core/Command.h"
 #include "core/CommandRegistry.h"
@@ -17,6 +19,7 @@
 #include "io/XmlFile.h"
 #include "search/EscapeSequence.h"
 #include "search/CrossFileSearch.h"
+#include "search/CrossFileReplace.h"
 #include "search/InDocSearch.h"
 #include "search/RegexEngine.h"
 #include "search/Wildcard.h"
@@ -1111,6 +1114,196 @@ int main() {
         }
 
         std::filesystem::remove_all(root, ec);
+    }
+
+    // ---------------------------------------------------------------- 在文件中替换
+    Section("CrossFileReplace（在文件中替换）");
+    {
+        const auto writeFile = [](const std::filesystem::path& path, std::string_view bytes) {
+            npcc::io::WriteFileAtomic(path.wstring(), bytes);
+        };
+        const auto readFile = [](const std::filesystem::path& path) {
+            const auto result = npcc::io::ReadWholeFile(path.wstring());
+            return result.ok ? result.bytes : std::string();
+        };
+
+        std::error_code ec;
+        int treeCounter = 0;
+        const auto makeTree = [&](const char* tag) {
+            const auto dir = std::filesystem::temp_directory_path() /
+                             ("notepadcc_replace_" + std::to_string(++treeCounter) + "_" + tag);
+            std::filesystem::remove_all(dir, ec);
+            std::filesystem::create_directories(dir / "sub", ec);
+            writeFile(dir / "a.txt", "alpha needle beta\nsecond line\nneedle again\n");
+            writeFile(dir / "b.txt", "no match here\n");
+            writeFile(dir / "c.txt", "needle\n");
+            writeFile(dir / "sub" / "d.txt", "needle in sub\n");
+            return dir;
+        };
+
+        npcc::search::SearchConfig config;
+        config.pattern = L"needle";
+        config.replaceTo = L"NEEDLE";
+        config.filter = L"*.txt";
+        npcc::search::ReplaceOptions options;
+
+        // 生成计划
+        {
+            const auto dir = makeTree("plan");
+            config.directories = {dir.wstring()};
+            const auto plans = npcc::search::CrossFileReplace::BuildPlanSync(config, options, 2);
+
+            Check(plans.size() == 3, "只有含匹配的 3 个文件进入计划");
+            const auto findPlan = [&plans](const std::wstring& name)
+                -> const npcc::search::FileReplacePlan* {
+                for (const auto& plan : plans) {
+                    if (plan.path.size() >= name.size() &&
+                        plan.path.compare(plan.path.size() - name.size(), name.size(), name) == 0) {
+                        return &plan;
+                    }
+                }
+                return nullptr;
+            };
+            Check(findPlan(L"b.txt") == nullptr, "没有匹配的文件不进计划");
+            if (const auto* plan = findPlan(L"a.txt"); plan != nullptr) {
+                Check(plan->replacements == 2, "a.txt 计划替换 2 处");
+                Check(plan->selected, "计划默认勾选");
+                Check(plan->samples.size() == 2, "两处改动各有一条预览");
+                if (plan->samples.size() == 2) {
+                    Check(plan->samples[0].line == 1, "第一处改动在第 1 行");
+                    CheckEqual(plan->samples[0].before, "alpha needle beta", "预览的替换前文本");
+                    CheckEqual(plan->samples[0].after, "alpha NEEDLE beta", "预览的替换后文本");
+                }
+            }
+            std::filesystem::remove_all(dir, ec);
+        }
+
+        // 应用
+        {
+            const auto dir = makeTree("apply");
+            config.directories = {dir.wstring()};
+            auto plans = npcc::search::CrossFileReplace::BuildPlanSync(config, options, 2);
+            const auto report = npcc::search::CrossFileReplace::Apply(config, options, plans);
+            Check(report.applied == 3, "3 个文件写回成功");
+            Check(report.replacements == 4, "共替换 4 处");
+            Check(report.failed == 0 && report.skipped == 0, "没有失败或跳过");
+            CheckEqual(readFile(dir / "a.txt"), "alpha NEEDLE beta\nsecond line\nNEEDLE again\n",
+                       "a.txt 内容正确替换");
+            CheckEqual(readFile(dir / "sub" / "d.txt"), "NEEDLE in sub\n", "子目录文件也被替换");
+            CheckEqual(readFile(dir / "b.txt"), "no match here\n", "无匹配文件保持原样");
+            std::filesystem::remove_all(dir, ec);
+        }
+
+        // 未勾选的文件不动
+        {
+            const auto dir = makeTree("select");
+            config.directories = {dir.wstring()};
+            auto plans = npcc::search::CrossFileReplace::BuildPlanSync(config, options, 2);
+            for (auto& plan : plans) {
+                if (plan.path.size() >= 5 &&
+                    plan.path.compare(plan.path.size() - 5, 5, L"a.txt") == 0) {
+                    plan.selected = false;
+                }
+            }
+            const auto report = npcc::search::CrossFileReplace::Apply(config, options, plans);
+            Check(report.applied == 2, "只写回了勾选的 2 个文件");
+            Check(report.skipped == 1, "未勾选的 1 个被跳过");
+            CheckEqual(readFile(dir / "a.txt"), "alpha needle beta\nsecond line\nneedle again\n",
+                       "未勾选的文件内容不变");
+            std::filesystem::remove_all(dir, ec);
+        }
+
+        // 生成计划后文件被外部改动：必须跳过，不能照着旧内容覆盖
+        {
+            const auto dir = makeTree("stale");
+            config.directories = {dir.wstring()};
+            auto plans = npcc::search::CrossFileReplace::BuildPlanSync(config, options, 2);
+            // 模拟别的程序改了 a.txt
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            writeFile(dir / "a.txt", "别人改过的内容 needle\n");
+            const auto report = npcc::search::CrossFileReplace::Apply(config, options, plans);
+            Check(report.skipped >= 1, "被外部改动的文件被跳过");
+            CheckEqual(readFile(dir / "a.txt"), "别人改过的内容 needle\n",
+                       "绝不能覆盖别人的改动");
+            std::filesystem::remove_all(dir, ec);
+        }
+
+        // 编码保持：UTF-8 BOM 与 GBK 都不能被改掉
+        {
+            const auto dir = std::filesystem::temp_directory_path() / "notepadcc_replace_enc";
+            std::filesystem::remove_all(dir, ec);
+            std::filesystem::create_directories(dir, ec);
+            writeFile(dir / "bom.txt", std::string("\xEF\xBB\xBF") + "needle 中文\r\n");
+            std::string gbk;
+            gbk += "\xB5\xDA\xD2\xBB\xD0\xD0";   // GBK 的「第一行」
+            gbk += " needle\r\n";
+            writeFile(dir / "gbk.txt", gbk);
+
+            config.directories = {dir.wstring()};
+            const auto plans = npcc::search::CrossFileReplace::BuildPlanSync(config, options, 1);
+            const auto report = npcc::search::CrossFileReplace::Apply(config, options, plans);
+            Check(report.applied == 2, "两个编码的文件都写回成功");
+
+            const std::string bomAfter = readFile(dir / "bom.txt");
+            Check(bomAfter.size() > 3 && static_cast<unsigned char>(bomAfter[0]) == 0xEF &&
+                      static_cast<unsigned char>(bomAfter[1]) == 0xBB &&
+                      static_cast<unsigned char>(bomAfter[2]) == 0xBF,
+                  "UTF-8 BOM 保持不变");
+            Check(bomAfter.find("NEEDLE") != std::string::npos, "BOM 文件内容已替换");
+
+            const std::string gbkAfter = readFile(dir / "gbk.txt");
+            Check(gbkAfter.size() >= 6 &&
+                      static_cast<unsigned char>(gbkAfter[0]) == 0xB5 &&
+                      static_cast<unsigned char>(gbkAfter[1]) == 0xDA,
+                  "GBK 的中文原字节未被破坏");
+            Check(gbkAfter.find("NEEDLE") != std::string::npos, "GBK 文件内容已替换");
+            std::filesystem::remove_all(dir, ec);
+        }
+
+        // 替换串无法用目标编码表示：跳过该文件并保留原内容
+        {
+            const auto dir = std::filesystem::temp_directory_path() / "notepadcc_replace_enc2";
+            std::filesystem::remove_all(dir, ec);
+            std::filesystem::create_directories(dir, ec);
+            std::string gbk;
+            gbk += "\xB5\xDA\xD2\xBB\xD0\xD0";
+            gbk += " needle\r\n";
+            writeFile(dir / "gbk.txt", gbk);
+
+            npcc::search::SearchConfig emoji = config;
+            emoji.directories = {dir.wstring()};
+            emoji.replaceTo = L"😀";   // GBK 无法表示
+            const auto plans = npcc::search::CrossFileReplace::BuildPlanSync(emoji, options, 1);
+            Check(plans.size() == 1, "无法表示的文件仍会出现在计划里以便提示用户");
+            Check(!plans.empty() && !plans[0].error.empty(), "计划里带有错误说明");
+            const auto report = npcc::search::CrossFileReplace::Apply(emoji, options, plans);
+            Check(report.applied == 0, "该文件没有被写回");
+            Check(report.failed == 1, "计为失败");
+            const std::string after = readFile(dir / "gbk.txt");
+            Check(after.find("needle") != std::string::npos, "原内容保持不动");
+            Check(after.find("NEEDLE") == std::string::npos, "没有发生替换");
+            std::filesystem::remove_all(dir, ec);
+        }
+
+        // 正则捕获组跨文件替换
+        {
+            const auto dir = std::filesystem::temp_directory_path() / "notepadcc_replace_regex";
+            std::filesystem::remove_all(dir, ec);
+            std::filesystem::create_directories(dir, ec);
+            writeFile(dir / "x.txt", "user@host\nother@place\n");
+
+            npcc::search::SearchConfig regex = config;
+            regex.directories = {dir.wstring()};
+            regex.mode = npcc::search::SearchMode::Regex;
+            regex.pattern = L"(\\w+)@(\\w+)";
+            regex.replaceTo = L"$2#$1";
+            const auto plans = npcc::search::CrossFileReplace::BuildPlanSync(regex, options, 1);
+            Check(plans.size() == 1 && plans[0].replacements == 2, "正则计划命中 2 处");
+            const auto report = npcc::search::CrossFileReplace::Apply(regex, options, plans);
+            Check(report.applied == 1, "正则替换写回成功");
+            CheckEqual(readFile(dir / "x.txt"), "host#user\nplace#other\n", "捕获组已重排");
+            std::filesystem::remove_all(dir, ec);
+        }
     }
 
     std::printf("\n结果: %d 项检查, %d 项失败\n", g_checks, g_failures);
