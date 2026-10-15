@@ -2,25 +2,24 @@
 
 #include <string>
 
+#include "core/CommandText.h"
+
 namespace npcc::shell {
 namespace {
 
-struct CategoryEntry {
-    core::CmdCategory category;
-    const wchar_t*    title;
-};
-
-const CategoryEntry kMenuOrder[] = {
-    {core::CmdCategory::File,   L"文件(&F)"},
-    {core::CmdCategory::Edit,   L"编辑(&E)"},
-    {core::CmdCategory::Search, L"搜索(&S)"},
-    {core::CmdCategory::View,   L"视图(&V)"},
-    {core::CmdCategory::Settings, L"设置(&T)"},
-    {core::CmdCategory::Window, L"窗口(&W)"},
-    {core::CmdCategory::Macro,  L"宏(&M)"},
-    {core::CmdCategory::Run,    L"运行(&R)"},
-    {core::CmdCategory::Plugin, L"插件(&P)"},
-    {core::CmdCategory::Help,   L"帮助(&H)"},
+// 只保留"菜单里有哪些类别、按什么顺序排"；类别名与助记符字母
+// 统一由 core::CategoryText / CategoryMnemonic 提供，避免两处各写一份慢慢长歪。
+const core::CmdCategory kMenuOrder[] = {
+    core::CmdCategory::File,
+    core::CmdCategory::Edit,
+    core::CmdCategory::Search,
+    core::CmdCategory::View,
+    core::CmdCategory::Settings,
+    core::CmdCategory::Window,
+    core::CmdCategory::Macro,
+    core::CmdCategory::Run,
+    core::CmdCategory::Plugin,
+    core::CmdCategory::Help,
 };
 
 std::wstring ShortcutHint(const core::CommandRegistry& registry, core::CmdId id) {
@@ -28,22 +27,7 @@ std::wstring ShortcutHint(const core::CommandRegistry& registry, core::CmdId id)
         if (binding.cmdId != id) {
             continue;
         }
-        std::wstring text;
-        if ((binding.modifiers & core::kModCtrl) != 0) {
-            text += L"Ctrl+";
-        }
-        if ((binding.modifiers & core::kModAlt) != 0) {
-            text += L"Alt+";
-        }
-        if ((binding.modifiers & core::kModShift) != 0) {
-            text += L"Shift+";
-        }
-        wchar_t name[64] = {};
-        const UINT scanCode = ::MapVirtualKeyW(binding.keyCode, MAPVK_VK_TO_VSC);
-        if (::GetKeyNameTextW(static_cast<LONG>(scanCode << 16), name, 64) > 0) {
-            text += name;
-        }
-        return text;
+        return core::ShortcutText(binding.modifiers, binding.keyCode);
     }
     return {};
 }
@@ -56,10 +40,17 @@ HMENU BuildMainMenu(const core::CommandRegistry& registry) {
         return nullptr;
     }
 
-    for (const auto& entry : kMenuOrder) {
-        const std::vector<core::CmdId> ids = registry.ByCategory(entry.category);
+    for (const core::CmdCategory category : kMenuOrder) {
+        const std::vector<core::CmdId> ids = registry.ByCategory(category);
         if (ids.empty()) {
             continue;
+        }
+        std::wstring title = core::CategoryText(category);
+        const wchar_t mnemonic = core::CategoryMnemonic(category);
+        if (mnemonic != L'\0') {
+            title += L"(&";
+            title += mnemonic;
+            title += L")";
         }
         const HMENU popup = ::CreatePopupMenu();
         if (popup == nullptr) {
@@ -88,7 +79,7 @@ HMENU BuildMainMenu(const core::CommandRegistry& registry) {
         }
 
         ::InsertMenuW(mainMenu, static_cast<UINT>(-1), MF_BYPOSITION | MF_POPUP,
-                      reinterpret_cast<UINT_PTR>(popup), entry.title);
+                      reinterpret_cast<UINT_PTR>(popup), title.c_str());
     }
     return mainMenu;
 }

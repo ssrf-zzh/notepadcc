@@ -19,12 +19,20 @@ user32.SendMessageW.restype = ctypes.c_ssize_t
 # 在 x64 上地址会被截断，Scintilla 读到的是野地址。
 user32.SendMessageW.argtypes = [wintypes.HWND, ctypes.c_uint, ctypes.c_size_t,
                                 ctypes.c_ssize_t]
+# SendMessageTimeoutW 带指针参数，同样必须声明签名
+user32.SendMessageTimeoutW.restype = wintypes.LPARAM
+user32.SendMessageTimeoutW.argtypes = [wintypes.HWND, ctypes.c_uint, ctypes.c_size_t,
+                                       ctypes.c_ssize_t, ctypes.c_uint, ctypes.c_uint,
+                                       ctypes.POINTER(ctypes.c_size_t)]
 
 
 def address_of(buffer):
     return ctypes.cast(buffer, ctypes.c_void_p).value
 
 WM_COMMAND = 0x0111
+WM_KEYDOWN = 0x0100
+WM_NULL = 0x0000
+SMTO_ABORTIFHUNG = 0x0002
 WM_SETTEXT = 0x000C
 WM_GETTEXT = 0x000D
 WM_GETTEXTLENGTH = 0x000E
@@ -42,6 +50,7 @@ SCI_GETLENGTH = 2006
 SCI_GETCHARAT = 2007
 SCI_GETSELECTIONS = 2570
 SCI_SELECTIONISRECTANGLE = 2372
+SCI_GETMOUSESELECTIONRECTANGULARSWITCH = 2669
 SCI_SETSELECTIONMODE = 2422
 SCI_SETRECTANGULARSELECTIONANCHOR = 2590
 SCI_SETRECTANGULARSELECTIONCARET = 2588
@@ -69,6 +78,7 @@ PANEL_APPLY = 714
 CMD_REPLACE_IN_FILES = (3 << 12) | 10
 CMD_COLUMN_EDIT = (2 << 12) | 7
 CMD_PREFERENCES = (7 << 12) | 1     # CmdCategory::Settings, index 1
+CMD_SHORTCUTS = (7 << 12) | 2       # 管理快捷键
 
 COLUMN_TEMPLATE_EDIT = 751
 COLUMN_INSERT_BUTTON = 758
@@ -78,6 +88,18 @@ PREF_RESTORE_SESSION = 1001
 PREF_TAB_WIDTH = 1010
 PREF_SHOW_LINE_NUMBERS = 1016
 PREF_OK = 1060
+
+SH_FILTER_EDIT = 1101
+SH_LIST = 1102
+SH_STATUS = 1103
+SH_DELETE = 1110
+SH_RESTORE = 1111
+SH_CLEAR_ALL = 1112
+SH_OK = 1120
+SH_CANCEL = 1121
+
+VK_F2 = 0x71
+VK_F9 = 0x78
 
 SCI_GETMARGINWIDTHN = 2243           # 边距 0 就是行号栏
 TCM_GETITEMCOUNT = 0x1304            # TCM_FIRST + 4
@@ -138,6 +160,27 @@ def visible_scintilla(main_window):
         if class_name(child) == "Scintilla" and user32.IsWindowVisible(child):
             return child
     return None
+
+
+def wait_for_main_window(title, timeout=45.0):
+    """等主窗口真正就绪，而不是睡固定几秒。
+
+    固定 sleep 是不可靠的：机器一忙（后台在跑播放器、浏览器），程序启动
+    就可能超过 4 秒，脚本会在它还没准备好时就开始发消息，于是报出来的是
+    后面某条莫名其妙的断言失败。这里要求三件事同时成立：窗口找得到、
+    已经显示出来（ShowWindow 过了）、UI 线程能立刻回一条 WM_NULL
+    （说明它已经在正常取消息，而不是还卡在启动流程里）。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        window = user32.FindWindowW("notepadccMainWindow", title)
+        if window and user32.IsWindowVisible(window):
+            result = ctypes.c_size_t(0)
+            if user32.SendMessageTimeoutW(window, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 1000,
+                                          ctypes.byref(result)):
+                return window
+        time.sleep(0.25)
+    return user32.FindWindowW("notepadccMainWindow", title)
 
 
 def current_line(scinti):
@@ -258,6 +301,12 @@ def dismiss_dialog(title, command_id, timeout=6.0, quiet=False):
             button = find_message_button(dialog, command_id)
             if button:
                 user32.SendMessageW(button, 0x00F5, 0, 0)   # BM_CLICK
+                if gone(1.5):
+                    return True
+                # BM_CLICK 在对话框不是活动窗口时可能没反应（本机实测过），
+                # 那就按按钮**真实的**控件 ID 给对话框发 WM_COMMAND——
+                # 按钮点的本质就是这条消息，而 ID 不一定等于我们期望的那个。
+                user32.PostMessageW(dialog, WM_COMMAND, user32.GetDlgCtrlID(button), 0)
                 if gone(1.5):
                     return True
             key = 0x0D if command_id in (IDOK, IDYES) else 0x1B   # VK_RETURN / VK_ESCAPE
@@ -382,8 +431,7 @@ def test_column_editing(root):
 
     exe = os.path.join(root, "build", "bin", "notepadcc.exe")
     proc = subprocess.Popen([exe, "-portable", path], cwd=root)
-    time.sleep(4)
-    window = user32.FindWindowW("notepadccMainWindow", "notepadcc - cols.txt")
+    window = wait_for_main_window("notepadcc - cols.txt")
     try:
         if not window:
             print("  FAIL: 找不到打开了 cols.txt 的窗口")
@@ -395,6 +443,9 @@ def test_column_editing(root):
         if scinti_text(scinti) != "aaa\nbbb\nccc":
             print(f"  FAIL: 初始内容不对 {scinti_text(scinti)!r}")
             return False
+        if not user32.SendMessageW(scinti, SCI_GETMOUSESELECTIONRECTANGULARSWITCH, 0, 0):
+            print("  FAIL: 鼠标切矩形选择的开关没打开（ConfigureColumnEditing 没生效）")
+            return False
 
         # 第 0 行第 1 列 → 第 2 行第 3 列，即覆盖三行的同一段两列
         user32.SendMessageW(scinti, SCI_SETSELECTIONMODE, SC_SEL_RECTANGLE, 0)
@@ -404,6 +455,14 @@ def test_column_editing(root):
 
         if not user32.SendMessageW(scinti, SCI_SELECTIONISRECTANGLE, 0, 0):
             print("  FAIL: 选区没有进入矩形模式（ConfigureColumnEditing 可能没生效）")
+            print(f"    [诊断] GETSELECTIONMODE={user32.SendMessageW(scinti, 2423, 0, 0)} "
+                  f"GETSELECTIONS={user32.SendMessageW(scinti, SCI_GETSELECTIONS, 0, 0)} "
+                  f"内容={scinti_text(scinti)!r}")
+            log_path = os.path.join(root, "build", "bin", "config", "logs", "notepadcc.log")
+            if os.path.exists(log_path):
+                with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
+                    for line in handle.read().splitlines()[-6:]:
+                        print(f"    [诊断] 日志: {line}")
             return False
         selections = user32.SendMessageW(scinti, SCI_GETSELECTIONS, 0, 0)
         if selections != 3:
@@ -469,8 +528,8 @@ def test_large_file(root):
     exe = os.path.join(root, "build", "bin", "notepadcc.exe")
     started = time.time()
     proc = subprocess.Popen([exe, "-portable", path], cwd=root)
-    time.sleep(12)
-    window = user32.FindWindowW("notepadccMainWindow", "notepadcc - big.txt")
+    # 大文件装载慢是正常的，这里给足时间等它真正就绪
+    window = wait_for_main_window("notepadcc - big.txt", timeout=90.0)
     try:
         if not window:
             print("  FAIL: 找不到打开了 big.txt 的窗口")
@@ -523,8 +582,7 @@ def test_external_change(root):
 
     exe = os.path.join(root, "build", "bin", "notepadcc.exe")
     proc = subprocess.Popen([exe, "-portable", path], cwd=root)
-    time.sleep(4)
-    window = user32.FindWindowW("notepadccMainWindow", "notepadcc - doc.txt")
+    window = wait_for_main_window("notepadcc - doc.txt")
     try:
         if not window:
             print("  FAIL: 找不到打开了 doc.txt 的窗口")
@@ -577,6 +635,237 @@ def test_external_change(root):
             proc.kill()
 
 
+def test_shortcuts(root):
+    """快捷键管理：改绑 → 冲突确认 → 落盘 → 真的按键触发命令。
+
+    这一段的关键是最后那句"真的按键触发命令"：跨进程没法伪造 GetKeyState，
+    所以用不带修饰键的 F9 / F2 来验证——它们同样走 Windows 的
+    TranslateAccelerator 路径，能证明加速键表确实被重建了。
+
+    对话框里"按组合键"的做法是给列表控件发 WM_KEYDOWN（列表被子类化后自己抓键）。
+    必须用 PostMessage：抢快捷键会弹出模态确认框，SendMessage 会被它同步挡住，
+    脚本就没机会去点确认框了。
+    """
+    work = os.path.join(root, "build", "shortcut_test")
+    os.makedirs(work, exist_ok=True)
+    path = os.path.join(work, "doc.txt")
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write("one\ntwo\nthree\n")
+
+    config_dir = os.path.join(root, "build", "bin", "config")
+    shortcut_file = os.path.join(config_dir, "shortcuts.xml")
+    for leftover in (shortcut_file, os.path.join(config_dir, "config.xml"),
+                     os.path.join(config_dir, "session.xml")):
+        if os.path.exists(leftover):
+            os.remove(leftover)
+
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - doc.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到打开了 doc.txt 的窗口")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到可见的编辑控件")
+            return False
+
+        def margin():
+            return user32.SendMessageW(scinti, SCI_GETMARGINWIDTHN, 0, 0)
+
+        def open_dialog():
+            user32.PostMessageW(window, WM_COMMAND, CMD_SHORTCUTS, 0)
+            deadline = time.time() + 8
+            while time.time() < deadline:
+                dialog = user32.FindWindowW("notepadccShortcutDialog", None)
+                if dialog:
+                    time.sleep(0.6)
+                    return dialog
+                time.sleep(0.2)
+            return None
+
+        def close_dialog(dialog, command_id):
+            user32.PostMessageW(dialog, WM_COMMAND, command_id, 0)
+            deadline = time.time() + 8
+            while time.time() < deadline:
+                if not user32.FindWindowW("notepadccShortcutDialog", None):
+                    time.sleep(0.4)
+                    return True
+                time.sleep(0.2)
+            print("  FAIL: 对话框没有按预期关闭")
+            return False
+
+        def filter_to(dialog, text):
+            set_text(dialog, SH_FILTER_EDIT, text)
+            time.sleep(0.6)
+            return user32.SendMessageW(user32.GetDlgItem(dialog, SH_LIST), LVM_GETITEMCOUNT, 0, 0)
+
+        def status_of(dialog):
+            return window_text(user32.GetDlgItem(dialog, SH_STATUS))
+
+        def press_in_list(dialog, vk):
+            user32.PostMessageW(user32.GetDlgItem(dialog, SH_LIST), WM_KEYDOWN, vk, 0)
+            time.sleep(0.7)
+
+        def press_in_editor(vk):
+            user32.PostMessageW(window, WM_KEYDOWN, vk, 0)
+            time.sleep(0.9)
+
+        if margin() <= 0:
+            print("  FAIL: 默认应显示行号")
+            return False
+
+        # ---- 1) 打开、筛选、改绑、取消要能完整回滚 ----
+        dialog = open_dialog()
+        if not dialog:
+            print("  FAIL: 管理快捷键对话框没有出现")
+            return False
+        if window_text(dialog) != "管理快捷键":
+            print(f"  FAIL: 对话框标题不对 {window_text(dialog)!r}")
+            return False
+        total = user32.SendMessageW(user32.GetDlgItem(dialog, SH_LIST), LVM_GETITEMCOUNT, 0, 0)
+        if total < 30:
+            print(f"  FAIL: 命令列表只有 {total} 行，太少")
+            return False
+        if filter_to(dialog, "显示行号") != 1:
+            print("  FAIL: 按“显示行号”筛选应只剩 1 行")
+            return False
+        press_in_list(dialog, VK_F9)          # F9 没被占用，不该弹确认框
+        status = status_of(dialog)
+        if "显示行号" not in status or "F9" not in status:
+            print(f"  FAIL: 改绑之后状态栏应给出反馈，实际 {status!r}")
+            return False
+        if not close_dialog(dialog, SH_CANCEL):
+            return False
+        press_in_editor(VK_F9)
+        if margin() != 48:
+            print("  FAIL: 取消之后 F9 不该生效（回滚没做成）")
+            return False
+        if os.path.exists(shortcut_file):
+            print("  FAIL: 取消不该写出 shortcuts.xml")
+            return False
+
+        # ---- 2) 冲突：抢 F2（默认属于“标记/取消书签”）----
+        dialog = open_dialog()
+        if not dialog:
+            print("  FAIL: 第二次没能打开对话框")
+            return False
+        if filter_to(dialog, "显示行号") != 1:
+            print("  FAIL: 第二次筛选失败")
+            return False
+        press_in_list(dialog, VK_F2)
+        if not dismiss_dialog("快捷键冲突", IDYES):
+            print("  FAIL: 抢用已被占用的快捷键时没有弹出冲突确认")
+            return False
+        time.sleep(0.6)
+        status = status_of(dialog)
+        if "显示行号" not in status or "F2" not in status:
+            print(f"  FAIL: 抢用之后状态栏应说明改绑结果，实际 {status!r}")
+            return False
+        if not close_dialog(dialog, SH_OK):
+            return False
+        if not os.path.exists(shortcut_file):
+            print("  FAIL: 点确定之后没有写出 shortcuts.xml")
+            return False
+
+        with open(shortcut_file, "r", encoding="utf-8", errors="replace") as handle:
+            xml = handle.read()
+
+        def node_of(text, name):
+            for chunk in text.split("<Shortcut ")[1:]:
+                fragment = chunk.split("/>")[0]
+                if f'name="{name}"' in fragment:
+                    return fragment
+            return None
+
+        node = node_of(xml, "cmd.view.toggleNumbers")
+        if node is None or 'Key="113"' not in node:      # VK_F2 == 113
+            print(f"  FAIL: 「显示行号」应记录成 F2，实际 {node!r}")
+            return False
+        # F2 的默认主人是「下一个书签」（Ctrl+F2 才是标记书签），被抢的应该是它
+        node = node_of(xml, "cmd.search.nextBookmark")
+        if node is None or 'Key="0"' not in node:
+            print(f"  FAIL: 被抢走快捷键的「下一个书签」应记成 Key=\"0\"，实际 {node!r}")
+            return False
+
+        press_in_editor(VK_F2)
+        if margin() != 0:
+            print(f"  FAIL: 保存后按 F2 应关掉行号，边距宽 {margin()}")
+            return False
+        press_in_editor(VK_F2)
+        if margin() != 48:
+            print("  FAIL: 再按一次 F2 应把行号开回来")
+            return False
+
+        # ---- 3) 全部清除：连默认方案一起清掉 ----
+        dialog = open_dialog()
+        if not dialog:
+            print("  FAIL: 第三次没能打开对话框")
+            return False
+        user32.PostMessageW(dialog, WM_COMMAND, SH_CLEAR_ALL, 0)
+        time.sleep(0.8)
+        if not close_dialog(dialog, SH_OK):
+            return False
+        press_in_editor(VK_F2)
+        if margin() != 48:
+            print("  FAIL: 全部清除之后 F2 不该再触发任何命令")
+            return False
+
+        # ---- 4) 恢复默认：F2 应该重新属于「下一个书签」----
+        dialog = open_dialog()
+        if not dialog:
+            print("  FAIL: 第四次没能打开对话框")
+            return False
+        user32.PostMessageW(dialog, WM_COMMAND, SH_RESTORE, 0)
+        time.sleep(0.8)
+        if not close_dialog(dialog, SH_OK):
+            return False
+
+        with open(shortcut_file, "r", encoding="utf-8", errors="replace") as handle:
+            restored = handle.read()
+        node = node_of(restored, "cmd.search.nextBookmark")
+        if node is None or 'Ctrl="no"' not in node or 'Key="113"' not in node:
+            print(f"  FAIL: 恢复默认之后「下一个书签」应重新是 F2，实际 {node!r}")
+            return False
+        node = node_of(restored, "cmd.view.toggleNumbers")
+        if node is None or 'Key="0"' not in node:
+            print(f"  FAIL: 恢复默认之后「显示行号」应回到未绑定，实际 {node!r}")
+            return False
+
+        # 真的按一次 F2：应当跳到书签所在行（而不是再去切换行号）
+        user32.SendMessageW(window, WM_COMMAND, CMD_CLEAR_BOOKMARKS, 0)
+        time.sleep(0.3)
+        user32.SendMessageW(scinti, SCI_GOTOLINE, 3, 0)
+        time.sleep(0.2)
+        user32.SendMessageW(window, WM_COMMAND, CMD_TOGGLE_BOOKMARK, 0)
+        time.sleep(0.3)
+        user32.SendMessageW(scinti, SCI_GOTOLINE, 0, 0)
+        time.sleep(0.2)
+        press_in_editor(VK_F2)
+        line = current_line(scinti)
+        if line != 3:
+            print(f"  FAIL: 恢复默认之后 F2 应跳到书签行（第 3 行），实际第 {line} 行")
+            return False
+        if margin() != 48:
+            print("  FAIL: 恢复默认之后 F2 不该再切换行号")
+            return False
+
+        print("  快捷键：筛选 / 改绑 / 冲突抢占 / 取消回滚 / 全部清除 / 恢复默认，"
+              "且加速键表真的跟着变了")
+        return True
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        # 这一段会写出 shortcuts.xml 与 config.xml，留着会污染后续会话
+        for leftover in (shortcut_file, os.path.join(config_dir, "config.xml")):
+            if os.path.exists(leftover):
+                os.remove(leftover)
+
+
 def test_preferences(root):
     """首选项：开对话框 → 填非法值应被挡下 → 改成合法值 → 核对视图与磁盘配置。
 
@@ -599,8 +888,7 @@ def test_preferences(root):
 
     exe = os.path.join(root, "build", "bin", "notepadcc.exe")
     proc = subprocess.Popen([exe, "-portable", path], cwd=root)
-    time.sleep(4)
-    window = user32.FindWindowW("notepadccMainWindow", "notepadcc - doc.txt")
+    window = wait_for_main_window("notepadcc - doc.txt")
     try:
         if not window:
             print("  FAIL: 找不到打开了 doc.txt 的窗口")
@@ -693,6 +981,9 @@ def test_preferences(root):
             time.sleep(1.5)
         if proc.poll() is None:
             proc.kill()
+        # 这一段把配置改成了"不显示行号"，留着会污染后续会话
+        if os.path.exists(config_path):
+            os.remove(config_path)
 
 
 def test_find_bar(main_window, root):
@@ -805,8 +1096,7 @@ def run():
         os.remove(session)
 
     proc = subprocess.Popen([exe, "-portable", os.path.join(root, "README.md")], cwd=root)
-    time.sleep(5)
-    main_window = user32.FindWindowW("notepadccMainWindow", None)
+    main_window = wait_for_main_window("notepadcc - README.md")
     failed = False
     try:
         if not main_window:
@@ -836,12 +1126,14 @@ def run():
         failed = True
     if not test_preferences(root):
         failed = True
+    if not test_shortcuts(root):
+        failed = True
 
     if failed:
         print("FAIL: 界面回归未通过")
         return 1
     print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + "
-          "大文件 + 外部改动 + 首选项）")
+          "大文件 + 外部改动 + 首选项 + 快捷键）")
     return 0
 
 

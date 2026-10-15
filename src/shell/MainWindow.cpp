@@ -21,6 +21,8 @@
 #include "shell/TabBar.h"
 #include "shell/ColumnDialog.h"
 #include "shell/PreferencesDialog.h"
+#include "shell/ShortcutDialog.h"
+#include "core/ShortcutStore.h"
 
 namespace npcc::shell {
 namespace {
@@ -67,6 +69,7 @@ enum : npcc::core::CmdId {
     kCmdWindowPrev = npcc::core::MakeCmdId(11, 2),
 
     kCmdSettingsPreferences = npcc::core::MakeCmdId(7, 1),
+    kCmdSettingsShortcuts   = npcc::core::MakeCmdId(7, 2),
 
     kCmdHelpAbout = npcc::core::MakeCmdId(12, 1),
 
@@ -195,6 +198,12 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             });
 
             RegisterCommands();
+            // 默认方案先留一份（"恢复默认"要用），随后让 shortcuts.xml 覆盖它
+            defaultShortcuts_ = registry_.AllBindings();
+            std::wstring shortcutError;
+            if (!core::ShortcutStore().Load(registry_, &shortcutError)) {
+                infra::LogWarn(L"shortcut", L"快捷键配置加载失败，改用默认方案: " + shortcutError);
+            }
             menu_ = BuildMainMenu(registry_);
             if (menu_ != nullptr) {
                 ::SetMenu(hwnd_, menu_);
@@ -515,6 +524,9 @@ void MainWindow::RegisterCommands() {
     add(kCmdSettingsPreferences, CmdCategory::Settings, L"cmd.settings.preferences",
         L"首选项(&P)...", core::kCmdNone,
         [this](const CmdContext&) { CommandPreferences(); });
+    add(kCmdSettingsShortcuts, CmdCategory::Settings, L"cmd.settings.shortcuts",
+        L"管理快捷键(&K)...", core::kCmdNone,
+        [this](const CmdContext&) { CommandManageShortcuts(); });
 
     // ---- 帮助 ----
     add(kCmdHelpAbout, CmdCategory::Help, L"cmd.help.about", L"关于 notepadcc(&A)",
@@ -570,6 +582,22 @@ void MainWindow::RegisterCommands() {
     registry_.BindShortcut(kCmdWindowNext, ctrl, VK_NEXT, false);
     registry_.BindShortcut(kCmdWindowPrev, ctrl, VK_PRIOR, false);
     registry_.BindShortcut(kCmdSettingsPreferences, ctrl, VK_OEM_COMMA, true);
+}
+
+void MainWindow::RebuildMenu() {
+    // 重绑快捷键之后菜单里的提示列会变，所以要整份重建。
+    // 先建新的再换上去，中途失败也不至于把菜单弄没。
+    HMENU rebuilt = BuildMainMenu(registry_);
+    if (rebuilt == nullptr) {
+        return;
+    }
+    HMENU previous = menu_;
+    menu_ = rebuilt;
+    ::SetMenu(hwnd_, menu_);
+    ::DrawMenuBar(hwnd_);
+    if (previous != nullptr) {
+        ::DestroyMenu(previous);
+    }
 }
 
 void MainWindow::RebuildAccelerators() {
@@ -1865,6 +1893,24 @@ void MainWindow::CommandPreferences() {
     LayoutChildren();
     UpdateStatus();
     ::InvalidateRect(hwnd_, nullptr, TRUE);
+}
+
+void MainWindow::CommandManageShortcuts() {
+    ShortcutEditResult result;
+    if (!ShowShortcutDialog(hwnd_, registry_, defaultShortcuts_, &result)) {
+        return;   // 取消：对话框已经把绑定回滚了
+    }
+    RebuildAccelerators();
+    RebuildMenu();
+    if (!result.changed) {
+        return;
+    }
+    std::wstring error;
+    if (!core::ShortcutStore().Save(registry_, &error)) {
+        infra::LogWarn(L"shortcut", L"快捷键保存失败: " + error);
+        ::MessageBoxW(hwnd_, (L"快捷键已经生效，但写入 shortcuts.xml 失败：\n" + error).c_str(),
+                      L"保存快捷键失败", MB_ICONWARNING);
+    }
 }
 
 void MainWindow::CommandAbout() {

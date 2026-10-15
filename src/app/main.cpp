@@ -78,7 +78,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
 
     MSG message{};
     while (::GetMessageW(&message, nullptr, 0, 0) > 0) {
-        if (::TranslateAcceleratorW(window.Handle(), window.Accelerators(), &message) == 0) {
+        // 快捷键可能被用户全部清空，这时 hAccel 是 NULL：
+        // 不能把 NULL 递给 TranslateAccelerator，直接走普通分发。
+        const HACCEL accelerators = window.Accelerators();
+        if (accelerators == nullptr ||
+            ::TranslateAcceleratorW(window.Handle(), accelerators, &message) == 0) {
             ::TranslateMessage(&message);
             ::DispatchMessageW(&message);
         }

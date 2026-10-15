@@ -41,6 +41,7 @@ private:
     LRESULT WndProc(UINT message, WPARAM wParam, LPARAM lParam);
 
     void RegisterCommands();
+    void RebuildMenu();
     void RebuildAccelerators();
     void LayoutChildren() const;
     void UpdateTitle() const;
@@ -83,6 +84,7 @@ private:
     void FinishFileSearch(const search::SearchProgress& progress);
     void UpdateSearchProgress();
     void CommandPreferences();
+    void CommandManageShortcuts();
     void CommandAbout();
 
     // ---- 文档操作 ----
@@ -109,6 +111,8 @@ private:
     HACCEL                     accel_ = nullptr;
     core::CommandRegistry      registry_;
     core::ConfigCenter         config_;
+    // 启动时记录的默认快捷键表，"恢复默认"要用（见 ShortcutDialog）
+    std::vector<core::ShortcutBinding> defaultShortcuts_;
     std::unique_ptr<core::DocumentManager> documents_;
     TabBar                     tabBar_;
     StatusBar                  statusBar_;

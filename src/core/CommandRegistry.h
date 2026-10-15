@@ -25,6 +25,16 @@ public:
     std::vector<CmdId> FindConflicts(uint8_t modifiers, uint16_t keyCode) const;
     CmdId ResolveShortcut(uint8_t modifiers, uint16_t keyCode) const;
 
+    // ---- 快捷键管理界面要用的编辑操作 ----
+    // 一个命令可以有多条绑定（如"下一个标签"同时有 Ctrl+Tab 与 Ctrl+PgDn），
+    // 所以"改绑"必须能精确到"清掉这个命令的全部绑定"或"只摘掉某一个组合"。
+    std::vector<ShortcutBinding> BindingsOf(CmdId id) const;
+    void ClearShortcuts();
+    void ClearShortcutsOf(CmdId id);
+    bool UnbindShortcut(CmdId id, uint8_t modifiers, uint16_t keyCode);
+    void AssignShortcut(CmdId id, uint8_t modifiers, uint16_t keyCode);   // 替换该命令的全部绑定
+    void SetShortcuts(std::vector<ShortcutBinding> bindings);             // 整表替换（用于取消时回滚）
+
 private:
     std::vector<Command>         commands_;
     std::vector<ShortcutBinding> bindings_;

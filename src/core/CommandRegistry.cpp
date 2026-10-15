@@ -118,4 +118,44 @@ CmdId CommandRegistry::ResolveShortcut(uint8_t modifiers, uint16_t keyCode) cons
     return 0;
 }
 
+std::vector<ShortcutBinding> CommandRegistry::BindingsOf(CmdId id) const {
+    std::vector<ShortcutBinding> result;
+    for (const auto& b : bindings_) {
+        if (b.cmdId == id) {
+            result.push_back(b);
+        }
+    }
+    return result;
+}
+
+void CommandRegistry::ClearShortcuts() {
+    bindings_.clear();
+}
+
+void CommandRegistry::ClearShortcutsOf(CmdId id) {
+    bindings_.erase(std::remove_if(bindings_.begin(), bindings_.end(),
+                                   [id](const ShortcutBinding& b) { return b.cmdId == id; }),
+                    bindings_.end());
+}
+
+bool CommandRegistry::UnbindShortcut(CmdId id, uint8_t modifiers, uint16_t keyCode) {
+    const auto before = bindings_.size();
+    bindings_.erase(std::remove_if(bindings_.begin(), bindings_.end(),
+                                   [id, modifiers, keyCode](const ShortcutBinding& b) {
+                                       return b.cmdId == id && b.modifiers == modifiers &&
+                                              b.keyCode == keyCode;
+                                   }),
+                    bindings_.end());
+    return bindings_.size() != before;
+}
+
+void CommandRegistry::AssignShortcut(CmdId id, uint8_t modifiers, uint16_t keyCode) {
+    ClearShortcutsOf(id);
+    BindShortcut(id, modifiers, keyCode, true);
+}
+
+void CommandRegistry::SetShortcuts(std::vector<ShortcutBinding> bindings) {
+    bindings_ = std::move(bindings);
+}
+
 }  // namespace npcc::core

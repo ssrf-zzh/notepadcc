@@ -122,9 +122,11 @@ add_subdirectory("${NPCC_PCRE2}" "${CMAKE_BINARY_DIR}/pcre2" EXCLUDE_FROM_ALL)
 # ---------------------------------------------------------------- 核心静态库（主程序与测试共用）
 set(NPCC_CORE_SOURCES
     src/core/CommandRegistry.cpp
+    src/core/CommandText.cpp
     src/core/ConfigCenter.cpp
     src/core/DocumentManager.cpp
     src/core/SessionManager.cpp
+    src/core/ShortcutStore.cpp
     src/edit/ColumnEdit.cpp
     src/edit/ColumnText.cpp
     src/edit/EditView.cpp
@@ -153,6 +155,7 @@ set(NPCC_CORE_SOURCES
     src/shell/FindBar.cpp
     src/shell/ColumnDialog.cpp
     src/shell/PreferencesDialog.cpp
+    src/shell/ShortcutDialog.cpp
     src/shell/SearchPanel.cpp
     src/shell/StatusBar.cpp
     src/shell/TabBar.cpp)

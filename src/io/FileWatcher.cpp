@@ -129,39 +129,52 @@ void WatchLoop(DirectoryWatch* watch, WatchState* state) {
             return;
         }
         DWORD bytes = 0;
-        if (::GetOverlappedResult(watch->handle, &overlapped, &bytes, FALSE) == 0 || bytes == 0) {
+        if (::GetOverlappedResult(watch->handle, &overlapped, &bytes, FALSE) == 0) {
             continue;
         }
 
-        // 先取出要上报的项，再统一回调——回调期间不持有任何锁，
-        // 否则调用方在回调里 Unwatch 就会自锁死。
+        // 先取出要上报的项，再统一回调。
+        //
+        // 扫描必须在锁里做：目录通知里只有文件名，得对着"正在监视的文件"表筛一遍，
+        // 而这张表会被 UI 线程的 Watch/Unwatch 改动。不加锁的话 push_back 触发的
+        // 重分配会让这里读到已释放的内存，文件名匹配不上，这次改动就被静默丢掉了——
+        // 用户看到的现象是"外面改了文件，编辑器毫无反应"。
+        //
+        // 回调则一定要在锁外发：调用方可能在回调里 Unwatch，持锁就会自锁死。
         std::vector<std::pair<std::wstring, FileChangeKind>> events;
-        auto* info = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(buffer.data());
-        for (;;) {
-            const std::wstring name(info->FileName, info->FileNameLength / sizeof(wchar_t));
-            const std::wstring upperName = UpperCase(name);
-            for (const WatchedFile& file : watch->files) {
-                if (file.upperName == upperName) {
-                    events.emplace_back(file.fullPath, KindFromAction(info->Action));
-                    break;
-                }
-            }
-            if (info->NextEntryOffset == 0) {
-                break;
-            }
-            info = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(
-                reinterpret_cast<char*>(info) + info->NextEntryOffset);
-        }
-
-        if (events.empty()) {
-            continue;
-        }
         std::function<void(const std::wstring&, FileChangeKind)> callback;
         {
             std::lock_guard<std::mutex> guard(state->mutex);
             callback = state->callback;
+
+            if (bytes == 0) {
+                // 缓冲区溢出时 Windows 会把这一批通知整批丢掉，返回 0 字节。
+                // 这里不能装作没事：按"这些文件都可能变了"上报，上层会重新比对
+                // 文件的大小与时间戳，没真变就只是静默刷新记录，不会误报。
+                for (const WatchedFile& file : watch->files) {
+                    events.emplace_back(file.fullPath, FileChangeKind::Modified);
+                }
+            } else {
+                auto* info = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(buffer.data());
+                for (;;) {
+                    const std::wstring name(info->FileName,
+                                           info->FileNameLength / sizeof(wchar_t));
+                    const std::wstring upperName = UpperCase(name);
+                    for (const WatchedFile& file : watch->files) {
+                        if (file.upperName == upperName) {
+                            events.emplace_back(file.fullPath, KindFromAction(info->Action));
+                            break;
+                        }
+                    }
+                    if (info->NextEntryOffset == 0) {
+                        break;
+                    }
+                    info = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(
+                        reinterpret_cast<char*>(info) + info->NextEntryOffset);
+                }
+            }
         }
-        if (!callback) {
+        if (!callback || events.empty()) {
             continue;
         }
         for (const auto& event : events) {

@@ -9,9 +9,11 @@
 
 #include "core/Command.h"
 #include "core/CommandRegistry.h"
+#include "core/CommandText.h"
 #include "core/ConfigCenter.h"
 #include "core/DocumentManager.h"
 #include "core/SessionManager.h"
+#include "core/ShortcutStore.h"
 #include "edit/DocBuffer.h"
 #include "edit/ColumnEdit.h"
 #include "edit/ColumnText.h"
@@ -81,6 +83,43 @@ void CheckEqual(const std::string& actual, const std::string& expected, const ch
 
 void Section(const char* name) {
     std::printf("  %s\n", name);
+}
+
+std::string ToUtf8(const std::wstring& text) {
+    if (text.empty()) {
+        return {};
+    }
+    const int size = ::WideCharToMultiByte(CP_UTF8, 0, text.data(),
+                                           static_cast<int>(text.size()), nullptr, 0, nullptr,
+                                           nullptr);
+    if (size <= 0) {
+        return {};
+    }
+    std::string out(static_cast<std::size_t>(size), '\0');
+    ::WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(),
+                          size, nullptr, nullptr);
+    return out;
+}
+
+void CheckWide(const std::wstring& actual, const std::wstring& expected, const char* what) {
+    ++g_checks;
+    if (actual != expected) {
+        ++g_failures;
+        std::printf("    [FAIL] %s\n", what);
+        std::printf("           实际: %s\n", QuoteForLog(ToUtf8(actual)).c_str());
+        std::printf("           期望: %s\n", QuoteForLog(ToUtf8(expected)).c_str());
+    }
+}
+
+npcc::core::CmdId AddTestCommand(npcc::core::CommandRegistry& registry,
+                                 npcc::core::CmdCategory category, const wchar_t* key,
+                                 const wchar_t* text) {
+    npcc::core::Command command;
+    command.category = category;
+    command.key = key;
+    command.text = text;
+    command.execute = [](const npcc::core::CmdContext&) {};
+    return registry.Register(std::move(command));
 }
 
 LRESULT CALLBACK TestHostProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -1954,6 +1993,192 @@ int main() {
             ::DestroyWindow(host);
         }
         std::filesystem::remove_all(dir, ec);
+    }
+
+    Section("快捷键（命令文本 / 绑定编辑 / shortcuts.xml）");
+    {
+        using npcc::core::CmdCategory;
+        using npcc::core::CommandRegistry;
+        using npcc::core::ShortcutBinding;
+        using npcc::core::ShortcutStore;
+
+        // ---- 命令显示文本：菜单助记符与结尾的快捷键提示都要去掉 ----
+        CheckWide(npcc::core::StripAccelerator(L"保存(&S)"), L"保存", "去掉结尾的(&S)");
+        CheckWide(npcc::core::StripAccelerator(L"列块编辑(&C)..."), L"列块编辑",
+                  "省略号与助记符一起去掉");
+        CheckWide(npcc::core::StripAccelerator(L"关于 notepadcc(&A)"), L"关于 notepadcc",
+                  "中英混排的助记符");
+        CheckWide(npcc::core::StripAccelerator(L"普通文本"), L"普通文本", "没有助记符时原样返回");
+        CheckWide(npcc::core::StripAccelerator(L"UTF-8（带 BOM）"), L"UTF-8（带 BOM）",
+                  "普通括号不能被当成助记符砍掉");
+        CheckWide(npcc::core::CategoryText(CmdCategory::File), L"文件", "类别名：文件");
+        CheckWide(npcc::core::CategoryText(CmdCategory::Settings), L"设置", "类别名：设置");
+        CheckWide(npcc::core::CategoryText(CmdCategory::Plugin), L"插件", "类别名：插件");
+        Check(npcc::core::CategoryMnemonic(CmdCategory::File) == L'F', "类别助记符：F");
+
+        // ---- 快捷键显示文本 ----
+        Check(npcc::core::ShortcutText(npcc::core::kModNone, 0).empty(), "未绑定的快捷键显示为空");
+        CheckWide(npcc::core::ShortcutText(npcc::core::kModCtrl, 'S'), L"Ctrl+S", "Ctrl+S 的显示");
+        CheckWide(npcc::core::ShortcutText(
+                      npcc::core::kModCtrl | npcc::core::kModAlt | npcc::core::kModShift, 'S'),
+                  L"Ctrl+Alt+Shift+S", "修饰键顺序固定为 Ctrl→Alt→Shift");
+
+        // ---- 可绑定规则 ----
+        Check(!npcc::core::IsBindableShortcut(npcc::core::kModNone, 0), "空按键不可绑定");
+        Check(!npcc::core::IsBindableShortcut(npcc::core::kModNone, 'A'),
+              "单按字母不可绑定（否则打字就会触发命令）");
+        Check(!npcc::core::IsBindableShortcut(npcc::core::kModShift, 'A'),
+              "Shift+字母不可绑定（Shift+A 就是大写 A）");
+        Check(npcc::core::IsBindableShortcut(npcc::core::kModCtrl, 'A'), "Ctrl+字母可绑定");
+        Check(npcc::core::IsBindableShortcut(npcc::core::kModAlt, 'A'), "Alt+字母可绑定");
+        Check(npcc::core::IsBindableShortcut(npcc::core::kModNone, VK_F2), "F2 可绑定");
+        Check(npcc::core::IsBindableShortcut(npcc::core::kModShift, VK_F3), "Shift+F3 可绑定");
+        Check(npcc::core::IsBindableShortcut(npcc::core::kModNone, VK_INSERT), "Insert 可绑定");
+        Check(!npcc::core::IsBindableShortcut(npcc::core::kModNone, VK_HOME),
+              "Home 不可绑定（要留给界面导航）");
+        Check(!npcc::core::IsBindableShortcut(npcc::core::kModCtrl, VK_CONTROL),
+              "修饰键自己不可绑定");
+
+        // ---- 注册表上的绑定编辑 ----
+        {
+            CommandRegistry registry;
+            const npcc::core::CmdId a = AddTestCommand(registry, CmdCategory::File, L"cmd.a", L"A");
+            const npcc::core::CmdId b = AddTestCommand(registry, CmdCategory::Edit, L"cmd.b", L"B");
+            registry.AssignShortcut(a, npcc::core::kModCtrl, 'K');
+            registry.AssignShortcut(b, npcc::core::kModCtrl, 'L');
+            Check(registry.BindingsOf(a).size() == 1, "AssignShortcut 建立一条绑定");
+
+            // 一个命令多条绑定时，AssignShortcut 要整体替换而不是追加
+            registry.BindShortcut(a, npcc::core::kModCtrl, VK_TAB, false);
+            Check(registry.BindingsOf(a).size() == 2, "允许一个命令挂多条绑定");
+            registry.AssignShortcut(a, npcc::core::kModAlt, 'X');
+            Check(registry.BindingsOf(a).size() == 1, "AssignShortcut 替换该命令的全部绑定");
+            Check(registry.ResolveShortcut(npcc::core::kModAlt, 'X') == a, "替换后新组合生效");
+            Check(registry.ResolveShortcut(npcc::core::kModCtrl, 'K') == 0, "旧组合已被摘掉");
+
+            Check(!registry.BindingsOf(b).empty(), "另一个命令不受影响");
+            registry.ClearShortcutsOf(b);
+            Check(registry.BindingsOf(b).empty(), "ClearShortcutsOf 只清指定命令");
+            Check(registry.BindingsOf(a).size() == 1, "ClearShortcutsOf 不碰别的命令");
+
+            registry.BindShortcut(b, npcc::core::kModCtrl, 'L', false);
+            Check(registry.UnbindShortcut(b, npcc::core::kModCtrl, 'L'), "精确摘掉一条绑定");
+            Check(registry.BindingsOf(b).empty(), "摘掉之后该命令没有绑定");
+            Check(!registry.UnbindShortcut(b, npcc::core::kModCtrl, 'L'), "再摘一次返回失败");
+
+            const std::vector<ShortcutBinding> keep = registry.AllBindings();
+            registry.ClearShortcuts();
+            Check(registry.AllBindings().empty(), "ClearShortcuts 清空全部");
+            registry.SetShortcuts(keep);
+            Check(registry.AllBindings().size() == keep.size(), "SetShortcuts 整表恢复");
+        }
+
+        // ---- shortcuts.xml 往返 ----
+        npcc::infra::InitializePaths(true);
+        const std::filesystem::path path = ShortcutStore::Path();
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+
+        CommandRegistry saved;
+        const npcc::core::CmdId saveA =
+            AddTestCommand(saved, CmdCategory::File, L"cmd.save.a", L"命令 A(&A)");
+        const npcc::core::CmdId saveB =
+            AddTestCommand(saved, CmdCategory::Edit, L"cmd.save.b", L"命令 B(&B)");
+        saved.AssignShortcut(saveA, npcc::core::kModCtrl, 'K');
+        saved.BindShortcut(saveB, npcc::core::kModCtrl, VK_TAB, false);
+        saved.BindShortcut(saveB, npcc::core::kModCtrl, VK_NEXT, false);
+        // cmd.save.c 故意不绑定 → 文件里应出现 Key="0"
+        AddTestCommand(saved, CmdCategory::View, L"cmd.save.c", L"命令 C(&C)");
+        {
+            std::wstring error;
+            Check(ShortcutStore().Save(saved, &error), "保存 shortcuts.xml 成功");
+            Check(std::filesystem::exists(path), "shortcuts.xml 已落盘");
+            const std::string text = [&path] {
+                std::string raw;
+                const HANDLE file = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                                  nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                                                  nullptr);
+                if (file == INVALID_HANDLE_VALUE) {
+                    return raw;
+                }
+                char buffer[4096] = {};
+                DWORD read = 0;
+                if (::ReadFile(file, buffer, sizeof(buffer) - 1, &read, nullptr) != 0) {
+                    raw.assign(buffer, read);
+                }
+                ::CloseHandle(file);
+                return raw;
+            }();
+            Check(text.find("cmd.save.a") != std::string::npos, "文件里按命令键记录");
+            Check(text.find("Key=\"0\"") != std::string::npos, "没绑定的命令记成 Key=\"0\"");
+        }
+
+        {
+            // 新注册表：默认方案与文件不同，且多出一个文件里没有的命令 D
+            CommandRegistry loaded;
+            const npcc::core::CmdId a =
+                AddTestCommand(loaded, CmdCategory::File, L"cmd.save.a", L"命令 A(&A)");
+            const npcc::core::CmdId b =
+                AddTestCommand(loaded, CmdCategory::Edit, L"cmd.save.b", L"命令 B(&B)");
+            const npcc::core::CmdId c =
+                AddTestCommand(loaded, CmdCategory::View, L"cmd.save.c", L"命令 C(&C)");
+            const npcc::core::CmdId d =
+                AddTestCommand(loaded, CmdCategory::Help, L"cmd.save.d", L"命令 D(&D)");
+            loaded.AssignShortcut(a, npcc::core::kModCtrl, 'P');   // 默认值应被文件覆盖
+            loaded.AssignShortcut(b, npcc::core::kModCtrl, VK_TAB);
+            loaded.AssignShortcut(c, npcc::core::kModCtrl, 'L');   // 默认值应被 Key="0" 清掉
+            loaded.AssignShortcut(d, npcc::core::kModCtrl, 'Q');   // 文件里没有 → 保持默认
+
+            std::wstring error;
+            std::vector<std::wstring> warnings;
+            Check(ShortcutStore().Load(loaded, &error, &warnings), "加载 shortcuts.xml 成功");
+            Check(error.empty(), "正常文件不报错");
+            Check(warnings.empty(), "正常文件不产生警告");
+
+            Check(loaded.ResolveShortcut(npcc::core::kModCtrl, 'K') == a, "文件里的绑定覆盖了默认值");
+            Check(loaded.ResolveShortcut(npcc::core::kModCtrl, 'P') == 0, "被覆盖的默认绑定不再存在");
+
+            const std::vector<ShortcutBinding> multi = loaded.BindingsOf(b);
+            Check(multi.size() == 2, "多条绑定原样恢复");
+            Check(loaded.ResolveShortcut(npcc::core::kModCtrl, VK_TAB) == b, "多绑定之一：Ctrl+Tab");
+            Check(loaded.ResolveShortcut(npcc::core::kModCtrl, VK_NEXT) == b, "多绑定之二：Ctrl+PgDn");
+
+            Check(loaded.BindingsOf(c).empty(), "Key=\"0\" 的命令保持无绑定（删除不会被复活）");
+            Check(loaded.ResolveShortcut(npcc::core::kModCtrl, 'Q') == d,
+                  "文件里没有的命令保留默认绑定（新增命令不会失去默认快捷键）");
+        }
+
+        // ---- 文件里出现不认识的命令 / 坏文件 ----
+        {
+            const std::string custom =
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<NotepadPlusCompat schemaVersion=\"1\">\n"
+                "  <InternalCommands>\n"
+                "    <Shortcut name=\"cmd.unknown\" Ctrl=\"yes\" Key=\"75\"/>\n"
+                "    <Shortcut Ctrl=\"yes\" Alt=\"no\" Shift=\"no\" Key=\"76\"/>\n"
+                "    <Shortcut name=\"cmd.save.a\" Ctrl=\"yes\" Key=\"77\"/>\n"
+                "  </InternalCommands>\n"
+                "</NotepadPlusCompat>\n";
+            Check(WriteFileDirect(path, custom), "写入测试用 shortcuts.xml");
+            CommandRegistry registry;
+            const npcc::core::CmdId a =
+                AddTestCommand(registry, CmdCategory::File, L"cmd.save.a", L"命令 A(&A)");
+            std::vector<std::wstring> warnings;
+            std::wstring error;
+            Check(ShortcutStore().Load(registry, &error, &warnings), "含未知命令的文件仍能加载");
+            Check(warnings.size() >= 2, "未知命令名与缺 name 的记录都给出警告");
+            Check(registry.ResolveShortcut(npcc::core::kModCtrl, 'M') == a,
+                  "能识别的记录照常生效");
+        }
+        {
+            Check(WriteFileDirect(path, "这不是 XML"), "写入损坏的 shortcuts.xml");
+            CommandRegistry registry;
+            AddTestCommand(registry, CmdCategory::File, L"cmd.save.a", L"命令 A(&A)");
+            std::wstring error;
+            Check(!ShortcutStore().Load(registry, &error), "损坏文件加载失败");
+            Check(!error.empty(), "失败时给出可读原因");
+        }
+        std::filesystem::remove(path, ec);
     }
 
     std::printf("\n结果: %d 项检查, %d 项失败\n", g_checks, g_failures);
