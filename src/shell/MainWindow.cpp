@@ -2,6 +2,7 @@
 
 #include <commdlg.h>
 #include <shellapi.h>
+#include <shlobj.h>   // SHChangeNotify（文件关联变更后通知资源管理器）
 #include <windowsx.h>   // GET_X_LPARAM / GET_Y_LPARAM
 
 #include <algorithm>
@@ -25,6 +26,7 @@
 #include "shell/ShortcutDialog.h"
 #include "core/ShortcutStore.h"
 #include "infra/SingleInstance.h"
+#include "infra/FileAssociation.h"
 
 namespace npcc::shell {
 namespace {
@@ -94,6 +96,8 @@ enum : npcc::core::CmdId {
 
     kCmdSettingsPreferences = npcc::core::MakeCmdId(7, 1),
     kCmdSettingsShortcuts   = npcc::core::MakeCmdId(7, 2),
+    kCmdSettingsRegisterAssoc   = npcc::core::MakeCmdId(7, 3),
+    kCmdSettingsUnregisterAssoc = npcc::core::MakeCmdId(7, 4),
 
     kCmdHelpAbout = npcc::core::MakeCmdId(12, 1),
 
@@ -737,6 +741,12 @@ void MainWindow::RegisterCommands() {
     add(kCmdSettingsShortcuts, CmdCategory::Settings, L"cmd.settings.shortcuts",
         L"管理快捷键(&K)...", core::kCmdNone,
         [this](const CmdContext&) { CommandManageShortcuts(); });
+    add(kCmdSettingsRegisterAssoc, CmdCategory::Settings, L"cmd.settings.registerAssoc",
+        L"加入打开方式列表(&A)", core::kCmdNone,
+        [this](const CmdContext&) { CommandRegisterAssociations(true); });
+    add(kCmdSettingsUnregisterAssoc, CmdCategory::Settings, L"cmd.settings.unregisterAssoc",
+        L"从打开方式列表移除(&R)", core::kCmdNone,
+        [this](const CmdContext&) { CommandRegisterAssociations(false); });
 
     // ---- 帮助 ----
     add(kCmdHelpAbout, CmdCategory::Help, L"cmd.help.about", L"关于 notepadcc(&A)",
@@ -2463,6 +2473,40 @@ void MainWindow::CommandPreferences() {
     UpdateStatus();
     ::InvalidateRect(hwnd_, nullptr, TRUE);
     ScheduleAutosave();   // 快照开关与间隔都可能刚被改过
+}
+
+void MainWindow::CommandRegisterAssociations(bool registerThem) {
+    std::wstring exePath(MAX_PATH, L'\0');
+    const DWORD written = ::GetModuleFileNameW(nullptr, exePath.data(),
+                                              static_cast<DWORD>(exePath.size()));
+    exePath.resize(written);
+    if (exePath.empty()) {
+        ::MessageBoxW(hwnd_, L"取不到程序自身的路径，无法登记文件关联。", L"文件关联",
+                      MB_ICONWARNING);
+        return;
+    }
+    constexpr const wchar_t* kClasses = L"Software\\Classes";
+    std::wstring error;
+    if (registerThem) {
+        if (!infra::RegisterAssociations(HKEY_CURRENT_USER, kClasses, exePath, &error)) {
+            ::MessageBoxW(hwnd_, (L"加入打开方式列表失败：\n" + error).c_str(), L"文件关联",
+                          MB_ICONWARNING);
+            return;
+        }
+    } else {
+        infra::UnregisterAssociations(HKEY_CURRENT_USER, kClasses, &error);
+    }
+    // 通知资源管理器刷新关联缓存，否则"打开方式"里要等一会儿才看得到变化
+    ::SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+
+    const std::wstring message =
+        registerThem
+            ? L"已把 notepadcc 登记到常见文本与源码扩展名的「打开方式」列表里。\n\n"
+              L"说明：这里**没有**改动默认关联。Windows 8 起默认关联带哈希保护，程序改不动，"
+              L"硬写也会被系统重置。想让它成为默认，请在资源管理器里右键该文件 →"
+              L"「打开方式」→「选择其他应用」→ 勾选「始终使用此应用打开」。"
+            : L"已把 notepadcc 从「打开方式」列表里移除。默认关联不受影响。";
+    ::MessageBoxW(hwnd_, message.c_str(), L"文件关联", MB_ICONINFORMATION);
 }
 
 void MainWindow::WriteConvertBackup(const std::wstring& path) const {

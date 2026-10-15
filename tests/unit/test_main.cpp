@@ -16,6 +16,7 @@
 #include "core/ShortcutStore.h"
 #include "core/SnapshotStore.h"
 #include "infra/SingleInstance.h"
+#include "infra/FileAssociation.h"
 #include "edit/DocBuffer.h"
 #include "edit/ColumnEdit.h"
 #include "edit/ColumnText.h"
@@ -2508,6 +2509,56 @@ int main() {
     // ---------------------------------------------------------------- 单实例交接
     // 两个进程之间的交接只能靠一段自定格式的字节流，所以至少把打包/解析单独测了：
     // 路径里有空格、中文、反斜杠都不能出错。
+    // ---------------------------------------------------------------- 文件关联
+    // 这一段只写 HKCU\Software\notepadcc-selftest 这个临时键，跑完就删，
+    // **不会碰机器上真实的关联**。注册表操作要是测不了，就只能靠"点了按钮看着像好了"，
+    // 而关联这种东西恰恰是最容易悄悄写错、用户过几天才发现的地方。
+    Section("文件关联（只进打开方式列表，不抢默认关联）");
+    {
+        const std::wstring testRoot = L"Software\\notepadcc-selftest";
+        const std::wstring classes = testRoot + L"\\Classes";
+        ::RegDeleteTreeW(HKEY_CURRENT_USER, testRoot.c_str());   // 清掉上次跑剩下的
+
+        Check(npcc::infra::CountRegistered(HKEY_CURRENT_USER, classes) == 0,
+              "初始状态没有任何登记");
+        std::wstring error;
+        Check(npcc::infra::RegisterAssociations(HKEY_CURRENT_USER, classes,
+                                                L"D:\\t\\notepadcc.exe", &error),
+              "登记到打开方式列表成功");
+        const int expected = static_cast<int>(npcc::infra::DefaultAssociations().size());
+        Check(npcc::infra::CountRegistered(HKEY_CURRENT_USER, classes) == expected,
+              "所有扩展名都登记上了");
+
+        HKEY command = nullptr;
+        const std::wstring commandPath = classes + L"\\notepadcc.txt\\shell\\open\\command";
+        if (::RegOpenKeyExW(HKEY_CURRENT_USER, commandPath.c_str(), 0, KEY_READ, &command) ==
+            ERROR_SUCCESS) {
+            wchar_t buffer[512] = {};
+            DWORD size = sizeof(buffer);
+            DWORD type = 0;
+            const bool read = ::RegQueryValueExW(command, nullptr, nullptr, &type,
+                                                 reinterpret_cast<BYTE*>(buffer), &size) ==
+                              ERROR_SUCCESS;
+            Check(read, "能读到打开命令");
+            const std::wstring value(buffer);
+            Check(value.find(L"\"%1\"") != std::wstring::npos,
+                  "打开命令里的 %1 带引号（路径有空格时不会被拆成两个参数）");
+            Check(value.find(L"D:\\t\\notepadcc.exe") != std::wstring::npos, "命令里是程序自身路径");
+            ::RegCloseKey(command);
+        } else {
+            Check(false, "打开命令的注册表项不存在");
+        }
+
+        Check(npcc::infra::UnregisterAssociations(HKEY_CURRENT_USER, classes, &error),
+              "从打开方式列表移除成功");
+        Check(npcc::infra::CountRegistered(HKEY_CURRENT_USER, classes) == 0, "移除后没有登记");
+
+        ::RegDeleteTreeW(HKEY_CURRENT_USER, testRoot.c_str());
+        Check(::RegOpenKeyExW(HKEY_CURRENT_USER, testRoot.c_str(), 0, KEY_READ, &command) !=
+                  ERROR_SUCCESS,
+              "测试用的临时注册表键已删除（没有污染真实关联）");
+    }
+
     Section("单实例交接（路径打包与解析）");
     {
         const std::vector<std::wstring> paths = {

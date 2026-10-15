@@ -103,6 +103,7 @@ private:
     void CommandConvertEol(edit::EolMode target);
     void CommandConvertEncoding(edit::UniMode target);
     void WriteConvertBackup(const std::wstring& path) const;
+    void CommandRegisterAssociations(bool registerThem);
     void CommandAbout();
 
     // ---- 分屏 / 克隆视图（设计文档 6.3）----

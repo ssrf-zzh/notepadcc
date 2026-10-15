@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import time
+import winreg
 from ctypes import wintypes
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -91,6 +92,8 @@ CMD_FILE_SAVE = (1 << 12) | 3
 CMD_FORMAT_EOL_CRLF = (5 << 12) | 1
 CMD_ENCODING_ANSI = (13 << 12) | 1
 CMD_ENCODING_UTF8 = (13 << 12) | 2
+CMD_SETTINGS_REGISTER_ASSOC = (7 << 12) | 3
+CMD_SETTINGS_UNREGISTER_ASSOC = (7 << 12) | 4
 
 COLUMN_TEMPLATE_EDIT = 751
 COLUMN_INSERT_BUTTON = 758
@@ -839,6 +842,79 @@ def test_folding(root):
                 os.remove(target)
 
     print("  代码折叠：边距与层级正确、折叠/展开命令生效、折叠状态随会话恢复")
+    return True
+
+
+def assoc_registered(extension=".txt", prog_id="notepadcc.txt"):
+    """查这台机器上 notepadcc 是否已经登记在该扩展名的「打开方式」里。"""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            f"Software\\Classes\\{extension}\\OpenWithProgids") as key:
+            winreg.QueryValueEx(key, prog_id)
+            return True
+    except OSError:
+        return False
+
+
+def test_associated_commands(root):
+    """文件关联：核对命令真的把程序写进「打开方式」列表，并且能干净移除。
+
+    测试会**先记下既有状态**：如果这台机器上本来就把 notepadcc 登记过，就不做移除那一步，
+    免得把用户的既有设置抹掉——测试不该改动用户机器上已经存在的状态。
+    """
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    work = os.path.join(root, "build", "assoc_test")
+    os.makedirs(work, exist_ok=True)
+    path = os.path.join(work, "assoc.txt")
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write("hello\n")
+
+    had_it_before = assoc_registered()
+    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - assoc.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_SETTINGS_REGISTER_ASSOC, 0)
+        if not dismiss_dialog("文件关联", IDOK, timeout=10.0):
+            print("  FAIL: 登记文件关联之后应当给出说明")
+            return False
+        time.sleep(0.5)
+        if not assoc_registered():
+            print("  FAIL: 登记之后 .txt 的打开方式列表里应当有 notepadcc")
+            return False
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                "Software\\Classes\\notepadcc.txt\\shell\\open\\command") as key:
+                command, _ = winreg.QueryValueEx(key, "")
+            if exe not in command or '"%1"' not in command:
+                print(f"  FAIL: 打开命令不对：{command!r}")
+                return False
+        except OSError as error:
+            print(f"  FAIL: 读不到打开命令：{error}")
+            return False
+
+        if had_it_before:
+            print("  （这台机器上本来就登记过 notepadcc，跳过移除那一步以免动到既有设置）")
+        else:
+            user32.PostMessageW(window, WM_COMMAND, CMD_SETTINGS_UNREGISTER_ASSOC, 0)
+            if not dismiss_dialog("文件关联", IDOK, timeout=10.0):
+                print("  FAIL: 移除文件关联之后应当给出说明")
+                return False
+            time.sleep(0.5)
+            if assoc_registered():
+                print("  FAIL: 移除之后打开方式列表里不该还有 notepadcc")
+                return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    print("  文件关联：命令把程序登记进「打开方式」列表（命令带引号），并能干净移除")
     return True
 
 
@@ -2006,13 +2082,15 @@ def run():
         failed = True
     if not test_single_instance(root):
         failed = True
+    if not test_associated_commands(root):
+        failed = True
 
     if failed:
         print("FAIL: 界面回归未通过")
         return 1
     print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + "
           "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + "
-          "编码转换 + 单实例）")
+          "编码转换 + 单实例 + 文件关联）")
     return 0
 
 

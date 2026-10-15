@@ -135,6 +135,7 @@ set(NPCC_CORE_SOURCES
     src/infra/Log.cpp
     src/infra/Paths.cpp
     src/infra/SingleInstance.cpp
+    src/infra/FileAssociation.cpp
     src/infra/CrashGuard.cpp
     src/infra/ThreadPool.cpp
     src/infra/Xml.cpp
