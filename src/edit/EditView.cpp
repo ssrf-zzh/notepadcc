@@ -447,6 +447,20 @@ void EditView::RestoreFoldedLines(const std::vector<int32_t>& lines) const {
     }
 }
 
+bool EditView::ShareDocumentWith(const EditView& source) {
+    if (hwnd_ == nullptr || source.hwnd_ == nullptr || hwnd_ == source.hwnd_) {
+        return false;
+    }
+    const intptr_t document = source.Send(SCI_GETDOCPOINTER);
+    if (document == 0) {
+        return false;
+    }
+    // SETDOCPOINTER 自己会给新文档加一次引用、并释放本视图原先持有的那份，
+    // 所以这里不需要（也不应该）手工调 ADDREFDOCUMENT/RELEASEDOCUMENT。
+    Send(SCI_SETDOCPOINTER, 0, document);
+    return true;
+}
+
 void EditView::ConfigureColumnEditing() const {
     // 默认情况下 Scintilla 不允许鼠标切到矩形选择，必须显式打开
     Send(SCI_SETMOUSESELECTIONRECTANGULARSWITCH, 1);

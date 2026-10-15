@@ -98,7 +98,16 @@ private:
     void UpdateSearchProgress();
     void CommandPreferences();
     void CommandManageShortcuts();
+    void CommandToggleSplit();
+    void CommandCyclePane();
     void CommandAbout();
+
+    // ---- 分屏 / 克隆视图（设计文档 6.3）----
+    void  SyncSplitView();
+    void  FocusActivePane();
+    bool  PointInDivider(POINT point) const;
+    void  DragDividerTo(int x);
+    edit::EditView* SecondaryView() const;
 
     // ---- 文档操作 ----
     bool SaveDocument(edit::Document& document);
@@ -156,6 +165,13 @@ private:
     bool showEol_ = false;
     bool showLineNumbers_ = true;
     bool wrapEnabled_ = false;
+    // 分屏：左右两个视图共用同一份文档，比例与"在哪一侧编辑"随会话保存
+    bool          splitEnabled_ = false;
+    int           splitRatioPercent_ = 50;
+    bool          splitScrollSync_ = true;
+    bool          splitFocusSecondary_ = false;
+    bool          splitDragging_ = false;
+    mutable RECT  dividerRect_ = {};
 };
 
 }  // namespace npcc::shell

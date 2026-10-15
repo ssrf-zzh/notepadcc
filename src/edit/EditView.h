@@ -24,6 +24,8 @@ enum class EditorEvent : uint32_t {
     Modified         = 2008,
     MarginClick      = 2010,
     Zoom             = 2018,
+    FocusIn          = 2028,
+    FocusOut         = 2029,
     Unknown          = 0,
 };
 
@@ -206,6 +208,12 @@ public:
     // 折叠状态随会话保存：收集折叠头所在行；恢复时逐行折叠回去
     std::vector<int32_t> FoldedLines() const;
     void RestoreFoldedLines(const std::vector<int32_t>& lines) const;
+
+    // ---- 克隆视图（设计文档 6.3 / ADR-07）----
+    // 让本视图显示 source 正在编辑的那份文档：两个 Scintilla 控件共用同一个
+    // Document，文本、标记、折叠状态是同一份，各自只保留自己的光标与滚动位置。
+    // Scintilla 内部对 Document 做引用计数，用不着我们手工 AddRef/Release。
+    bool ShareDocumentWith(const EditView& source);
 
 private:
     HWND hwnd_ = nullptr;

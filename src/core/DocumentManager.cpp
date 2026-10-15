@@ -268,6 +268,51 @@ bool DocumentManager::LoadInto(edit::Document& document, std::wstring& error,
     return true;
 }
 
+bool DocumentManager::SplitEnableView() {
+    if (splitView_ != nullptr) {
+        return true;
+    }
+    auto view = std::make_unique<edit::EditView>();
+    if (!view->Create(viewParent_, kSplitControlId)) {
+        infra::LogError(L"doc", L"创建克隆视图失败");
+        return false;
+    }
+    view->ApplyLightTheme();
+    view->ConfigureColumnEditing();
+    view->SetVisible(false);
+    splitView_ = std::move(view);
+    if (edit::Document* document = Active(); document != nullptr) {
+        SplitAttach(*document);
+    }
+    return true;
+}
+
+void DocumentManager::SplitDisableView() {
+    if (splitView_ == nullptr) {
+        return;
+    }
+    // 先隐藏再销毁：它可能正指向活动文档，销毁时 Scintilla 会释放自己的那份引用，
+    // 而原文档仍由它自己的视图持有，所以这里不需要额外处理文档的生命周期。
+    splitView_->SetVisible(false);
+    splitView_.reset();
+}
+
+void DocumentManager::SplitAttach(edit::Document& document) const {
+    if (splitView_ == nullptr || document.view == nullptr) {
+        return;
+    }
+    splitView_->ShareDocumentWith(*document.view);
+    splitView_->SetVisible(true);
+}
+
+void DocumentManager::SplitResize(const RECT& area) const {
+    if (splitView_ == nullptr) {
+        return;
+    }
+    ::MoveWindow(splitView_->Handle(), area.left, area.top, area.right - area.left,
+                 area.bottom - area.top, TRUE);
+}
+
 bool DocumentManager::HasExternallyChanged(const edit::Document& document) const {
     if (!document.buffer.HasPath()) {
         return false;

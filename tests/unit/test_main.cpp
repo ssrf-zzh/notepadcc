@@ -950,6 +950,10 @@ int main() {
         Check(!error.empty(), "失败时给出原因");
 
         npcc::core::SessionSnapshot snapshot;
+        snapshot.split = true;
+        snapshot.splitRatioPercent = 37;
+        snapshot.splitSyncScroll = false;
+        snapshot.splitActiveSlot = 1;
         snapshot.documents.push_back(npcc::core::SessionDocument{
             L"D:\\工程\\main.cpp", 128, 30, 2, false, {3, 9}, {14, 40}});
         snapshot.documents.push_back(npcc::core::SessionDocument{
@@ -976,6 +980,10 @@ int main() {
                       reloaded.documents[0].folds[1] == 40,
                   "折叠行号往返一致");
             Check(reloaded.documents[1].folds.empty(), "没有折叠的文档不会多出折叠记录");
+            Check(reloaded.split, "分屏状态往返一致");
+            Check(reloaded.splitRatioPercent == 37, "分屏比例往返一致");
+            Check(!reloaded.splitSyncScroll, "同步滚动开关往返一致");
+            Check(reloaded.splitActiveSlot == 1, "分屏焦点槽位往返一致");
         }
 
         // 来自更新版本的会话文件应当被拒绝，而不是按错误结构猜测
@@ -2412,6 +2420,77 @@ int main() {
                 view.ApplyLargeFileDisplayMode();
                 Check(!view.FoldingEnabled(), "大文件档关闭折叠");
                 Check(view.VisibleLineCount() == allVisible, "关掉折叠时会把已折的行展开");
+            }
+            ::DestroyWindow(host);
+        }
+    }
+
+    // ---------------------------------------------------------------- 分屏与克隆视图
+    // 这一段的重点是把 ADR-07 的假设**实测**一遍：共享文档到底共享到什么程度、
+    // "只读"是按视图还是按文档、销毁克隆视图会不会连带影响原视图。
+    Section("分屏与克隆视图（共享文档 / 引用计数 / 只读范围）");
+    {
+        const HWND host = CreateHiddenHost();
+        if (host == nullptr) {
+            Check(false, "创建隐藏宿主窗口失败");
+        } else {
+            npcc::edit::EditView primary;
+            if (!primary.Create(host, 910)) {
+                Check(false, "创建主视图失败");
+            } else {
+                primary.ApplyLightTheme();
+                primary.SetCodePage(npcc::edit::kCodePageUtf8);
+                primary.SetText("alpha\nbeta\n");
+
+                {
+                    npcc::edit::EditView clone;
+                    Check(clone.Create(host, 911), "创建克隆视图");
+                    clone.ApplyLightTheme();
+                    Check(clone.ShareDocumentWith(primary), "克隆视图接上同一份文档");
+                    CheckEqual(clone.GetAllText(), "alpha\nbeta\n",
+                               "克隆视图立刻显示同一份内容");
+
+                    primary.InsertTextAt(0, "X");
+                    CheckEqual(clone.GetAllText(), "Xalpha\nbeta\n",
+                               "主视图编辑后克隆视图跟着变（共享的是同一份文档）");
+                    clone.InsertTextAt(0, "Y");
+                    CheckEqual(primary.GetAllText(), "YXalpha\nbeta\n",
+                               "反方向也一样：克隆视图能写，主视图立刻可见");
+
+                    // 光标与滚动是各视图自己的
+                    primary.SetCaretPosition(0);
+                    clone.SetCaretPosition(3);
+                    Check(primary.CaretPosition() == 0, "主视图光标不受影响");
+                    Check(clone.CaretPosition() == 3, "克隆视图有自己的光标");
+                    primary.SetFirstVisibleLine(0);
+                    clone.SetFirstVisibleLine(1);
+                    Check(primary.FirstVisibleLine() == 0 && clone.FirstVisibleLine() == 1,
+                          "两个视图各有一份滚动位置");
+
+                    // 折叠层级与标记存在文档里，所以两边看到的是同一份
+                    primary.ApplyLanguageForPath(L"D:\\t\\clone.cpp");
+                    Check(primary.FoldingEnabled(), "主视图按语言启用折叠");
+
+                    // ADR-07 原本打算用 SCI_SETREADONLY 把克隆视图设成只读。
+                    // 实测：Scintilla 的只读是**文档级**开关，设到克隆视图上会把
+                    // 主视图一起锁住。所以最后没有采用它，这条断言把这个结论钉住。
+                    const int32_t beforeReadOnly = primary.ByteLength();
+                    clone.SetReadOnly(true);
+                    primary.InsertTextAt(0, "Z");
+                    Check(primary.ByteLength() == beforeReadOnly,
+                          "给克隆视图设只读会连带锁住主视图（只读是文档级，不是视图级）");
+                    clone.SetReadOnly(false);
+                    primary.InsertTextAt(0, "Z");
+                    Check(primary.ByteLength() == beforeReadOnly + 1, "取消只读后主视图恢复可写");
+                }
+
+                // 克隆视图销毁之后，原文档必须还在、还能编辑（引用计数没被弄坏）
+                Check(primary.Valid(), "销毁克隆视图后主视图仍然存在");
+                const int32_t beforeDestroy = primary.ByteLength();
+                primary.InsertTextAt(0, "W");
+                Check(primary.ByteLength() == beforeDestroy + 1,
+                      "销毁克隆视图后主视图仍可编辑");
+                CheckEqual(primary.GetAllText().substr(0, 3), "WZY", "内容完好");
             }
             ::DestroyWindow(host);
         }

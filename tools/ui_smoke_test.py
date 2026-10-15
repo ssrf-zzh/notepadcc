@@ -83,6 +83,10 @@ CMD_SHORTCUTS = (7 << 12) | 2       # 管理快捷键
 CMD_FOLD_TOGGLE = (4 << 12) | 8     # 折叠/展开当前层级
 CMD_FOLD_ALL = (4 << 12) | 9
 CMD_UNFOLD_ALL = (4 << 12) | 10
+CMD_SPLIT_TOGGLE = (4 << 12) | 11   # 分屏查看（克隆当前文档）
+CMD_CYCLE_PANE = (4 << 12) | 12
+CMD_SCROLL_SYNC = (4 << 12) | 13
+CMD_EDIT_UNDO = (2 << 12) | 1
 
 COLUMN_TEMPLATE_EDIT = 751
 COLUMN_INSERT_BUTTON = 758
@@ -111,11 +115,20 @@ SCI_VISIBLEFROMDOCLINE = 2220
 SCI_GETFOLDLEVEL = 2223
 SCI_GETFOLDEXPANDED = 2230
 SC_FOLDLEVELHEADERFLAG = 0x2000
+SCI_GETFIRSTVISIBLELINE = 2152
+SCI_GETMODIFY = 2159
+
+WM_VSCROLL = 0x0115
+SB_PAGEDOWN = 3
+WM_LBUTTONDOWN = 0x0201
+WM_LBUTTONUP = 0x0202
+WM_MOUSEMOVE = 0x0200
 TCM_GETITEMCOUNT = 0x1304            # TCM_FIRST + 4
 BM_SETCHECK = 0x00F1
 BST_UNCHECKED = 0
 
 IDYES = 6
+IDNO = 7
 IDOK = 1
 
 MARKER_BOOKMARK_MASK = 1            # EditView::kMarkerBookmark == 0
@@ -169,6 +182,34 @@ def visible_scintilla(main_window):
         if class_name(child) == "Scintilla" and user32.IsWindowVisible(child):
             return child
     return None
+
+
+def wait_until_equal(reader, first, second, timeout=4.0):
+    """等两个视图的同一个读数收敛到一致。
+
+    通知是异步投递的，而这台机器上还有真实的鼠标在动，读一次就下结论容易冤判。
+    同步真的坏了的话，等多久都不会一致。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if reader(first) == reader(second):
+            time.sleep(0.2)
+            if reader(first) == reader(second):   # 连续两次一致才算数
+                return True
+        time.sleep(0.2)
+    return reader(first) == reader(second)
+
+
+def visible_scintillas_sorted(main_window):
+    """按左边界排序返回可见的编辑控件：分屏时第一个是主视图，第二个是克隆视图。"""
+    found = []
+    for child in children(main_window):
+        if class_name(child) == "Scintilla" and user32.IsWindowVisible(child):
+            rect = wintypes.RECT()
+            user32.GetWindowRect(child, ctypes.byref(rect))
+            found.append((rect.left, child))
+    found.sort(key=lambda item: item[0])
+    return [child for _, child in found]
 
 
 def wait_for_main_window(title, timeout=45.0):
@@ -779,6 +820,219 @@ def test_folding(root):
                 os.remove(target)
 
     print("  代码折叠：边距与层级正确、折叠/展开命令生效、折叠状态随会话恢复")
+    return True
+
+
+def test_split_view(root):
+    """分屏与克隆视图：两个视图共用一份文档、同步滚动、分隔条拖动、随会话恢复。
+
+    跨进程没法伪造鼠标，所以分隔条是真发 WM_LBUTTONDOWN / WM_MOUSEMOVE / WM_LBUTTONUP
+    过去拖的——这几个都是只传值的消息，能过进程边界，验证的是真正那条交互路径。
+    """
+    work = os.path.join(root, "build", "split_test")
+    os.makedirs(work, exist_ok=True)
+    path = os.path.join(work, "split.txt")
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        for i in range(200):
+            handle.write(f"line {i:03d}\n")
+
+    cfg = os.path.join(root, "build", "bin", "config")
+    for name in ("config.xml", "session.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+
+    def client_size(window):
+        rect = wintypes.RECT()
+        user32.GetClientRect(window, ctypes.byref(rect))
+        return rect.right - rect.left, rect.bottom - rect.top
+
+    def width_of(view):
+        rect = wintypes.RECT()
+        user32.GetWindowRect(view, ctypes.byref(rect))
+        return rect.right - rect.left
+
+    def first_visible(view):
+        return user32.SendMessageW(view, SCI_GETFIRSTVISIBLELINE, 0, 0)
+
+    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - split.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        if len(visible_scintillas_sorted(window)) != 1:
+            print("  FAIL: 未分屏时应当只有 1 个可见的编辑控件")
+            return False
+
+        user32.PostMessageW(window, WM_COMMAND, CMD_SPLIT_TOGGLE, 0)
+        time.sleep(1.0)
+        views = visible_scintillas_sorted(window)
+        if len(views) != 2:
+            print(f"  FAIL: 分屏之后应有 2 个可见的编辑控件，实际 {len(views)}")
+            return False
+        primary, clone = views
+        if scinti_text(primary) != scinti_text(clone):
+            print("  FAIL: 两个视图显示的内容应当一致")
+            return False
+        if scinti_text(clone).splitlines()[0] != "line 000":
+            print(f"  FAIL: 克隆视图内容不对 {scinti_text(clone)[:40]!r}")
+            return False
+
+        user32.SendMessageW(primary, SCI_SETSELECTIONMODE, SC_SEL_RECTANGLE, 0)
+        user32.SendMessageW(primary, SCI_SETRECTANGULARSELECTIONANCHOR, 1, 0)
+        user32.SendMessageW(primary, SCI_SETRECTANGULARSELECTIONCARET, 21, 0)
+        time.sleep(0.3)
+        user32.PostMessageW(window, WM_COMMAND, CMD_COLUMN_EDIT, 0)
+        time.sleep(1.5)
+        dialog = user32.FindWindowW("notepadccColumnDialog", None)
+        if not dialog:
+            print("  FAIL: 列块对话框没有出现")
+            return False
+        set_text(dialog, COLUMN_TEMPLATE_EDIT, "K")
+        user32.PostMessageW(dialog, WM_COMMAND, COLUMN_INSERT_BUTTON, 0)
+        time.sleep(1.0)
+        # 矩形选区从第 1 列开始，所以 "line 000" 会变成 "lKine 000"
+        if "lKine 000" not in scinti_text(clone):
+            print(f"  FAIL: 主视图编辑后克隆视图没有同步\n{scinti_text(clone)[:80]!r}")
+            return False
+        if scinti_text(clone) != scinti_text(primary):
+            print("  FAIL: 两个视图的内容不一致（共享文档没生效）")
+            return False
+
+        for _ in range(4):
+            user32.PostMessageW(primary, WM_VSCROLL, SB_PAGEDOWN, 0)
+            time.sleep(0.2)
+        if first_visible(primary) <= 0:
+            print("  FAIL: 主视图没有滚动起来，后面的同步断言没有意义")
+            return False
+        # 等两边收敛再判：通知是异步到的，而且这台机器上还有真实鼠标在动，
+        # 读一次就下结论容易冤判。同步真的坏了的话，等多久都不会一致。
+        if not wait_until_equal(first_visible, primary, clone, timeout=4.0):
+            print(f"  FAIL: 同步滚动失效：主 {first_visible(primary)} / "
+                  f"克隆 {first_visible(clone)}")
+            return False
+
+        user32.PostMessageW(window, WM_COMMAND, CMD_SCROLL_SYNC, 0)
+        time.sleep(0.4)
+        before = first_visible(clone)
+        for _ in range(2):
+            user32.PostMessageW(primary, WM_VSCROLL, SB_PAGEDOWN, 0)
+            time.sleep(0.2)
+        time.sleep(0.8)
+        if first_visible(clone) != before:
+            print("  FAIL: 关掉同步滚动之后克隆视图不该跟着动")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_SCROLL_SYNC, 0)
+        time.sleep(0.4)
+
+        width, height = client_size(window)
+        if width < 300:
+            print(f"  FAIL: 客户区太窄（{width}），没法测分隔条拖动")
+            return False
+        # 分隔条的位置不要自己算：问程序主视图的右边界在哪，那就是分隔条。
+        # （自己按 50% 算会和实际差一两个像素，点在分隔条外面就整段测不到了。）
+        # 这一小段要重试：按下之后程序会 SetCapture，此后收到的是**真实鼠标**的
+        # 移动。测试机上的物理光标停在哪儿、有没有人在动鼠标，都会影响结果，
+        # 所以每次重新量一遍分隔条位置再拖。重试的是输入模拟，不是断言。
+        target_client_x = width * 3 // 4
+        dragged = False
+        for _ in range(3):
+            rect = wintypes.RECT()
+            user32.GetWindowRect(primary, ctypes.byref(rect))
+            point = wintypes.POINT(rect.right, (rect.top + rect.bottom) // 2)
+            user32.ScreenToClient(window, ctypes.byref(point))
+            divider_x = point.x + 2
+            screen_y = (rect.top + rect.bottom) // 2
+            target_point = wintypes.POINT(target_client_x, (rect.top + rect.bottom) // 2)
+            user32.ClientToScreen(window, ctypes.byref(target_point))
+
+            user32.SetCursorPos(rect.right + 2, screen_y)
+            time.sleep(0.2)
+            user32.PostMessageW(window, WM_LBUTTONDOWN, 1,
+                                ((height // 2) << 16) | divider_x)
+            time.sleep(0.3)
+            user32.SetCursorPos(target_point.x, target_point.y)
+            time.sleep(0.3)
+            # 再补一次投递过去的移动：真实输入与投递的消息同队列按序处理，
+            # 最后落定的坐标就是目标点。
+            target_lparam = ((height // 2) << 16) | target_client_x
+            user32.PostMessageW(window, WM_MOUSEMOVE, 1, target_lparam)
+            time.sleep(0.3)
+            user32.PostMessageW(window, WM_LBUTTONUP, 0, target_lparam)
+            time.sleep(0.6)
+            ratio = width_of(primary) * 100 // width
+            if 65 <= ratio <= 85:
+                dragged = True
+                break
+        if not dragged:
+            print(f"  FAIL: 拖到 3/4 之后主视图应占约 75%，实际 {ratio}%"
+                  f"（客户区宽 {width}，点击点 x={divider_x}，目标 x={target_client_x}）")
+            return False
+
+        user32.PostMessageW(window, WM_COMMAND, CMD_CYCLE_PANE, 0)
+        time.sleep(0.4)
+        if len(visible_scintillas_sorted(window)) != 2:
+            print("  FAIL: 切换焦点之后分屏不该消失")
+            return False
+
+        # 收尾：撤销刚才那次列块插入。文档必须回到"未修改"，否则退出时会卡在
+        # "是否保存"上——那是模态框，没人点它，会话就写不出去。
+        user32.PostMessageW(window, WM_COMMAND, CMD_EDIT_UNDO, 0)
+        time.sleep(1.0)
+        if user32.SendMessageW(primary, SCI_GETMODIFY, 0, 0) != 0:
+            print("  FAIL: 撤销之后文档仍是已修改状态，退出会卡在保存提示上")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(2)
+        if proc.poll() is None:
+            proc.kill()
+
+    session = os.path.join(cfg, "session.xml")
+    if not os.path.exists(session):
+        print("  FAIL: 退出时没有写出 session.xml")
+        return False
+    with open(session, "r", encoding="utf-8", errors="replace") as handle:
+        session_text = handle.read()
+    if "<ViewGroup" not in session_text or 'axis="Vertical"' not in session_text:
+        print(f"  FAIL: 会话里没有分屏状态\n{session_text[:400]}")
+        return False
+
+    proc = subprocess.Popen([exe, "-portable"], cwd=root)
+    window = wait_for_main_window("notepadcc - split.txt")
+    try:
+        if not window:
+            print("  FAIL: 重启后没有恢复出上次的文件")
+            return False
+        views = visible_scintillas_sorted(window)
+        if len(views) != 2:
+            print(f"  FAIL: 分屏状态没有被会话恢复，可见编辑控件 {len(views)} 个")
+            return False
+        width, _ = client_size(window)
+        restored = width_of(views[0]) * 100 // width
+        if not 65 <= restored <= 85:
+            print(f"  FAIL: 恢复后的分屏比例不对：{restored}%")
+            return False
+        if scinti_text(views[1]) != scinti_text(views[0]):
+            print("  FAIL: 恢复出来的两个视图内容不一致")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        for name in ("session.xml", "config.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    print("  分屏与克隆视图：共享文档实时同步、同步滚动、分隔条拖动、随会话恢复")
     return True
 
 
@@ -1502,12 +1756,14 @@ def run():
         failed = True
     if not test_folding(root):
         failed = True
+    if not test_split_view(root):
+        failed = True
 
     if failed:
         print("FAIL: 界面回归未通过")
         return 1
     print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + "
-          "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠）")
+          "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆）")
     return 0
 
 

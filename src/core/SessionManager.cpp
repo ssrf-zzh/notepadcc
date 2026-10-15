@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <algorithm>
+
 #include "infra/Paths.h"
 #include "infra/Xml.h"
 #include "io/XmlFile.h"
@@ -22,6 +24,14 @@ bool SessionManager::Save(const SessionSnapshot& snapshot, std::wstring* error) 
     infra::XmlDocument document;
     infra::XmlElementPtr root = document.CreateRoot(kRootName);
     root->SetAttributeInt(L"schemaVersion", static_cast<int>(kSchemaVersion));
+
+    if (snapshot.split) {
+        infra::XmlElementPtr group = root->AddChild(L"ViewGroup");
+        group->SetAttribute(L"axis", L"Vertical");   // 竖分隔线 = 左右并排
+        group->SetAttributeInt(L"ratio", snapshot.splitRatioPercent);
+        group->SetAttributeBool(L"syncScrollVertical", snapshot.splitSyncScroll);
+        group->SetAttributeInt(L"activeSlot", snapshot.splitActiveSlot);
+    }
 
     for (const SessionDocument& entry : snapshot.documents) {
         infra::XmlElementPtr node = root->AddChild(L"Doc");
@@ -86,6 +96,12 @@ bool SessionManager::Load(SessionSnapshot& snapshot, std::wstring* error) {
 
     SessionSnapshot parsed;
     parsed.schemaVersion = static_cast<std::uint32_t>(version > 0 ? version : 1);
+    if (const infra::XmlElement* group = root->Child(L"ViewGroup"); group != nullptr) {
+        parsed.split = true;
+        parsed.splitRatioPercent = std::max(10, std::min(90, group->AttributeInt(L"ratio", 50)));
+        parsed.splitSyncScroll = group->AttributeBool(L"syncScrollVertical", true);
+        parsed.splitActiveSlot = group->AttributeInt(L"activeSlot", 0) == 1 ? 1 : 0;
+    }
     for (const infra::XmlElement* node : root->Children(L"Doc")) {
         SessionDocument entry;
         entry.filePath = node->AttributeOr(L"path", L"");

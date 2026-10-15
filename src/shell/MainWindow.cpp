@@ -2,6 +2,7 @@
 
 #include <commdlg.h>
 #include <shellapi.h>
+#include <windowsx.h>   // GET_X_LPARAM / GET_Y_LPARAM
 
 #include <algorithm>
 #include <cstring>
@@ -71,6 +72,9 @@ enum : npcc::core::CmdId {
     kCmdViewFoldToggle    = npcc::core::MakeCmdId(4, 8),
     kCmdViewFoldAll       = npcc::core::MakeCmdId(4, 9),
     kCmdViewUnfoldAll     = npcc::core::MakeCmdId(4, 10),
+    kCmdViewSplitToggle   = npcc::core::MakeCmdId(4, 11),
+    kCmdViewCyclePane     = npcc::core::MakeCmdId(4, 12),
+    kCmdViewScrollSync    = npcc::core::MakeCmdId(4, 13),
 
     kCmdWindowNext = npcc::core::MakeCmdId(11, 1),
     kCmdWindowPrev = npcc::core::MakeCmdId(11, 2),
@@ -130,7 +134,7 @@ MainWindow::~MainWindow() {
 bool MainWindow::RegisterWindowClass(HINSTANCE instance) const {
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
-    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;   // 分隔条要能接双击
     wc.lpfnWndProc = &MainWindow::WndProcThunk;
     wc.hInstance = instance;
     wc.hIcon = ::LoadIconW(nullptr, IDI_APPLICATION);
@@ -256,6 +260,66 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             // 窗口重新获得焦点时也做一次兜底检查
             CheckActiveDocumentForExternalChange();
             return 0;
+        }
+        case WM_PAINT: {
+            // 主窗口自己只剩分隔条要画：视图区域被两个 Scintilla 子窗口盖住了
+            PAINTSTRUCT paint{};
+            const HDC dc = ::BeginPaint(hwnd_, &paint);
+            if (dividerRect_.right > dividerRect_.left) {
+                RECT strip = dividerRect_;
+                ::FillRect(dc, &strip, reinterpret_cast<HBRUSH>(COLOR_BTNSHADOW + 1));
+            }
+            ::EndPaint(hwnd_, &paint);
+            return 0;
+        }
+        case WM_SETCURSOR: {
+            POINT point{};
+            ::GetCursorPos(&point);
+            ::ScreenToClient(hwnd_, &point);
+            if (PointInDivider(point)) {
+                ::SetCursor(::LoadCursorW(nullptr, IDC_SIZEWE));
+                return TRUE;
+            }
+            break;
+        }
+        case WM_LBUTTONDOWN: {
+            const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            if (PointInDivider(point)) {
+                splitDragging_ = true;
+                ::SetCapture(hwnd_);
+                return 0;
+            }
+            break;
+        }
+        case WM_MOUSEMOVE:
+            if (splitDragging_) {
+                DragDividerTo(GET_X_LPARAM(lParam));
+                return 0;
+            }
+            break;
+        case WM_LBUTTONUP:
+            if (splitDragging_) {
+                splitDragging_ = false;
+                ::ReleaseCapture();
+                return 0;
+            }
+            break;
+        case WM_LBUTTONDBLCLK: {
+            const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            if (PointInDivider(point)) {
+                // 双击分隔条：在 50% 与"把当前一侧放大到 75%"之间切换
+                if (splitRatioPercent_ == 50) {
+                    splitRatioPercent_ = splitFocusSecondary_ ? 25 : 75;
+                } else {
+                    splitRatioPercent_ = 50;
+                }
+                const RECT previous = dividerRect_;
+                LayoutChildren();
+                ::InvalidateRect(hwnd_, &previous, TRUE);
+                ::InvalidateRect(hwnd_, &dividerRect_, TRUE);
+                return 0;
+            }
+            break;
         }
         case WM_COMMAND: {
             const int controlId = LOWORD(wParam);
@@ -580,6 +644,15 @@ void MainWindow::RegisterCommands() {
                 document->view->UnfoldAll();
             }
         });
+    add(kCmdViewSplitToggle, CmdCategory::View, L"cmd.view.splitToggle",
+        L"分屏查看（克隆当前文档）(&P)", core::kCmdCheckable | needsBuffer,
+        [this](const CmdContext&) { CommandToggleSplit(); });
+    add(kCmdViewCyclePane, CmdCategory::View, L"cmd.view.cyclePane", L"切换到另一视图(&W)",
+        core::kCmdNone, [this](const CmdContext&) { CommandCyclePane(); });
+    add(kCmdViewScrollSync, CmdCategory::View, L"cmd.view.scrollSync", L"分屏同步滚动(&Y)",
+        core::kCmdCheckable, [this](const CmdContext&) {
+            splitScrollSync_ = !splitScrollSync_;
+        });
 
     // ---- 窗口 ----
     add(kCmdWindowNext, CmdCategory::Window, L"cmd.window.next", L"下一个标签(&N)",
@@ -610,6 +683,8 @@ void MainWindow::RegisterCommands() {
     bindChecked(kCmdViewToggleSpaces, [this] { return showWhitespace_; });
     bindChecked(kCmdViewToggleEol, [this] { return showEol_; });
     bindChecked(kCmdViewToggleNumbers, [this] { return showLineNumbers_; });
+    bindChecked(kCmdViewSplitToggle, [this] { return splitEnabled_; });
+    bindChecked(kCmdViewScrollSync, [this] { return splitScrollSync_; });
 
     // ---- 默认快捷键 ----
     const uint8_t ctrl = core::kModCtrl;
@@ -647,6 +722,9 @@ void MainWindow::RegisterCommands() {
     registry_.BindShortcut(kCmdViewFoldToggle, ctrlAlt, 'F', true);
     registry_.BindShortcut(kCmdViewFoldAll, core::kModAlt, '0', true);
     registry_.BindShortcut(kCmdViewUnfoldAll, core::kModAlt | core::kModShift, '0', true);
+    registry_.BindShortcut(kCmdViewSplitToggle, ctrlAlt, 'V', true);
+    // 设计附录 A 把 Ctrl+Alt+M 给了"移到另一视图"（还没实现），这里先用 F6 切换焦点
+    registry_.BindShortcut(kCmdViewCyclePane, core::kModNone, VK_F6, true);
     registry_.BindShortcut(kCmdWindowNext, ctrl, VK_TAB, true);
     registry_.BindShortcut(kCmdWindowPrev, ctrlShift, VK_TAB, true);
     registry_.BindShortcut(kCmdWindowNext, ctrl, VK_NEXT, false);
@@ -735,7 +813,30 @@ void MainWindow::LayoutChildren() const {
     if (viewRect.bottom < viewRect.top) {
         viewRect.bottom = viewRect.top;
     }
-    documents_->ResizeActive(viewRect);
+
+    // 分屏：把视图区域左右切开，中间留一条可拖动的分隔条。
+    // 分隔条由主窗口自己画/自己接鼠标——它只是两块之间的空白，不需要额外的子窗口。
+    dividerRect_ = RECT{0, 0, 0, 0};
+    if (splitEnabled_ && documents_->SplitEnabled() && viewRect.right - viewRect.left > 120) {
+        const int width = viewRect.right - viewRect.left;
+        constexpr int kDividerWidth = 5;
+        int left = width * splitRatioPercent_ / 100;
+        left = std::max(80, std::min(width - 80 - kDividerWidth, left));
+
+        RECT primary = viewRect;
+        primary.right = viewRect.left + left;
+        RECT secondary = viewRect;
+        secondary.left = primary.right + kDividerWidth;
+        dividerRect_.left = primary.right;
+        dividerRect_.right = secondary.left;
+        dividerRect_.top = viewRect.top;
+        dividerRect_.bottom = viewRect.bottom;
+
+        documents_->ResizeActive(primary);
+        documents_->SplitResize(secondary);
+    } else {
+        documents_->ResizeActive(viewRect);
+    }
 }
 
 void MainWindow::ApplyConfigToRuntime() {
@@ -1111,6 +1212,8 @@ void MainWindow::SyncTabBar() {
     SyncFileWatcher();
     // 崩溃抢救的槽位也要跟着变，否则崩了会抢救错文档
     RefreshRescueSlots();
+    // 活动文档可能换了，克隆视图要跟着指过去
+    SyncSplitView();
 }
 
 void MainWindow::SyncFileWatcher() {
@@ -1170,7 +1273,7 @@ void MainWindow::ActivateDocument(core::BufferId id) {
     documents_->Activate(id);
     if (edit::Document* document = documents_->Active(); document != nullptr && document->view) {
         ApplyViewToggles(*document);
-        ::SetFocus(document->view->Handle());
+        FocusActivePane();   // 分屏时焦点可能落在另一侧
     }
     tabBar_.SetActive(id);
     LayoutChildren();
@@ -1199,6 +1302,10 @@ core::SessionSnapshot MainWindow::BuildSessionSnapshot() const {
     if (!documents_) {
         return snapshot;
     }
+    snapshot.split = splitEnabled_;
+    snapshot.splitRatioPercent = splitRatioPercent_;
+    snapshot.splitSyncScroll = splitScrollSync_;
+    snapshot.splitActiveSlot = splitFocusSecondary_ ? 1 : 0;
     for (const core::BufferId id : documents_->TabOrder()) {
         edit::Document* document = documents_->Find(id);
         // 只记有路径的文档，见 SessionManager 的说明
@@ -1268,6 +1375,16 @@ bool MainWindow::RestoreSession() {
     const core::BufferId target =
         active != nullptr ? active->buffer.id : documents_->TabOrder().front();
     ActivateDocument(target);
+    // 分屏状态放在最后恢复：它要在文档都开好、活动文档定下来之后才接得上
+    if (snapshot.split) {
+        splitEnabled_ = true;
+        splitRatioPercent_ = snapshot.splitRatioPercent;
+        splitScrollSync_ = snapshot.splitSyncScroll;
+        splitFocusSecondary_ = snapshot.splitActiveSlot == 1;
+        SyncSplitView();
+        LayoutChildren();
+        FocusActivePane();
+    }
     infra::LogInfo(L"session", L"已恢复 " + std::to_wstring(restored) + L" 个文档");
     return true;
 }
@@ -1446,7 +1563,11 @@ void MainWindow::HandleEditorNotify(const NMHDR& header) {
     if (!edit::EditView::TranslateNotify(&header, note)) {
         return;
     }
-    edit::Document* document = DocumentOfView(header.hwndFrom);
+    // 克隆视图不属于任何文档（它只是"看着"活动文档），所以先认出它，
+    // 再把它的通知归到活动文档上——两边本来就是同一份文档。
+    edit::EditView* clone = SecondaryView();
+    const bool fromClone = clone != nullptr && clone->Valid() && header.hwndFrom == clone->Handle();
+    edit::Document* document = fromClone ? documents_->Active() : DocumentOfView(header.hwndFrom);
     if (document == nullptr) {
         return;
     }
@@ -1468,7 +1589,24 @@ void MainWindow::HandleEditorNotify(const NMHDR& header) {
             if (document == documents_->Active()) {
                 UpdateStatus();
             }
+            // 分屏同步滚动：按"首可见行"对齐另一侧。
+            // 先比一次再设：两边行号已经一样就别动，否则会来回互相触发。
+            if (splitEnabled_ && splitScrollSync_ &&
+                (note.updated & 0x4 /* SC_UPDATE_V_SCROLL */) != 0) {
+                edit::EditView* source = fromClone ? clone : document->view.get();
+                edit::EditView* other = fromClone ? document->view.get() : clone;
+                if (source != nullptr && other != nullptr && other->Valid()) {
+                    const int32_t line = source->FirstVisibleLine();
+                    if (other->FirstVisibleLine() != line) {
+                        other->SetFirstVisibleLine(line);
+                    }
+                }
+            }
             return;
+        case edit::EditorEvent::FocusIn:
+            // 鼠标点进哪一侧，就把"当前侧"记成哪一侧，快捷键才知道该往哪儿用
+            splitFocusSecondary_ = fromClone;
+            break;
         case edit::EditorEvent::MarginClick:
             // 点击书签边距直接切换该行的书签，比"先把光标移过去再按键"顺手
             if (note.margin == edit::EditView::kMarginBookmark && note.line >= 0) {
@@ -2255,6 +2393,100 @@ void MainWindow::CommandPreferences() {
     UpdateStatus();
     ::InvalidateRect(hwnd_, nullptr, TRUE);
     ScheduleAutosave();   // 快照开关与间隔都可能刚被改过
+}
+
+edit::EditView* MainWindow::SecondaryView() const {
+    return documents_ != nullptr ? documents_->SplitView() : nullptr;
+}
+
+void MainWindow::SyncSplitView() {
+    if (documents_ == nullptr) {
+        return;
+    }
+    if (!splitEnabled_) {
+        documents_->SplitDisableView();
+        dividerRect_ = RECT{0, 0, 0, 0};
+        return;
+    }
+    if (!documents_->SplitEnableView()) {
+        splitEnabled_ = false;
+        return;
+    }
+    edit::Document* document = documents_->Active();
+    edit::EditView* clone = documents_->SplitView();
+    if (document == nullptr || document->view == nullptr || clone == nullptr) {
+        return;
+    }
+    // 文档换了（或刚建出来），克隆视图要重新指向它
+    documents_->SplitAttach(*document);
+    // 克隆视图是独立的 Scintilla 控件：显示开关、字号缩放、语法着色都得再来一遍，
+    // 否则它会用一份默认样式显示同一份文档，看起来像另一个程序。
+    ApplyEditConfigToView(*clone);
+    clone->ApplyLanguageForPath(document->buffer.filePath);
+    clone->SetFirstVisibleLine(document->view->FirstVisibleLine());
+}
+
+void MainWindow::FocusActivePane() {
+    if (splitFocusSecondary_) {
+        if (edit::EditView* view = SecondaryView(); view != nullptr && view->Valid()) {
+            ::SetFocus(view->Handle());
+            return;
+        }
+    }
+    if (documents_ != nullptr) {
+        if (edit::Document* document = documents_->Active();
+            document != nullptr && document->view) {
+            ::SetFocus(document->view->Handle());
+        }
+    }
+}
+
+void MainWindow::CommandToggleSplit() {
+    splitEnabled_ = !splitEnabled_;
+    if (!splitEnabled_) {
+        splitFocusSecondary_ = false;
+    }
+    SyncSplitView();
+    LayoutChildren();
+    FocusActivePane();
+    ::InvalidateRect(hwnd_, nullptr, TRUE);
+}
+
+void MainWindow::CommandCyclePane() {
+    if (!splitEnabled_ || SecondaryView() == nullptr) {
+        return;   // 没分屏就没什么可切的
+    }
+    splitFocusSecondary_ = !splitFocusSecondary_;
+    FocusActivePane();
+}
+
+bool MainWindow::PointInDivider(POINT point) const {
+    return dividerRect_.right > dividerRect_.left &&
+           ::PtInRect(&dividerRect_, point) != 0;
+}
+
+void MainWindow::DragDividerTo(int x) {
+    RECT client{};
+    ::GetClientRect(hwnd_, &client);
+    if (client.right <= 0) {
+        return;
+    }
+    // 用视图区域的宽度算比例，才能和 LayoutChildren 里的换算对上
+    const int top = tabBar_.Height();
+    const int width = client.right;
+    if (width <= 1 || client.bottom <= top) {
+        return;
+    }
+    int percent = (x * 100) / width;
+    percent = std::max(10, std::min(90, percent));
+    if (percent == splitRatioPercent_) {
+        return;
+    }
+    const RECT previous = dividerRect_;
+    splitRatioPercent_ = percent;
+    LayoutChildren();
+    ::InvalidateRect(hwnd_, &previous, TRUE);
+    ::InvalidateRect(hwnd_, &dividerRect_, TRUE);
 }
 
 void MainWindow::CommandManageShortcuts() {

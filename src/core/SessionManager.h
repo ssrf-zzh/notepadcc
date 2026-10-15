@@ -21,6 +21,12 @@ struct SessionDocument {
 struct SessionSnapshot {
     std::uint32_t                schemaVersion = 1;
     std::vector<SessionDocument> documents;   // 顺序即标签顺序
+    // 分屏状态（设计文档 7.4 的 <ViewGroup>，6.3 的落地形态）。只在分屏时才写出去：
+    // 元素在不在，就代表分屏开着没开着，不必再加一个 split 属性。
+    bool                         split = false;
+    int                          splitRatioPercent = 50;
+    bool                         splitSyncScroll = true;
+    int                          splitActiveSlot = 0;
 };
 
 // 会话文件（<配置根>/session.xml）的读写。

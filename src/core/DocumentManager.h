@@ -91,6 +91,17 @@ public:
     void ShowOnly(edit::Document* document) const;
     void ResizeActive(const RECT& area) const;
 
+    // ---- 分屏 / 克隆视图（设计文档 6.3，ADR-07：一文档多视图）----
+    // 第二个视图与主视图共用同一份 Scintilla Document：文本、标记、折叠状态是同一份，
+    // 各自只保留自己的光标与滚动位置。它不持有文档，只"指向"当前活动文档。
+    bool            SplitEnableView();
+    void            SplitDisableView();
+    bool            SplitEnabled() const noexcept { return splitView_ != nullptr; }
+    edit::EditView* SplitView() const noexcept { return splitView_.get(); }
+    // 让克隆视图跟着某个文档走（活动文档变化、文档关闭后都要调）
+    void SplitAttach(edit::Document& document) const;
+    void SplitResize(const RECT& area) const;
+
     static std::wstring FileNameOf(const std::wstring& path);
     static std::wstring DirectoryOf(const std::wstring& path);
 
@@ -106,6 +117,9 @@ private:
     std::vector<BufferId>                    tabOrder_;
     edit::Document*                          active_ = nullptr;
     int                                      nextControlId_ = 100;
+    // 克隆视图用的控件 ID 固定：同一时刻只会有一个
+    static constexpr int                     kSplitControlId = 900;
+    std::unique_ptr<edit::EditView>          splitView_;
     int                                      nextBufferId_ = 1;   // 0 保留给"无效"
     int                                      untitledCounter_ = 0;
     edit::TierPolicy                         tierPolicy_;
