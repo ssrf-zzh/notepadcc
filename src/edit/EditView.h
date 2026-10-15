@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "edit/Encoding.h"
 
@@ -21,6 +22,7 @@ enum class EditorEvent : uint32_t {
     SavePointLeft    = 2003,
     UpdateUI         = 2007,
     Modified         = 2008,
+    MarginClick      = 2010,
     Zoom             = 2018,
     Unknown          = 0,
 };
@@ -31,6 +33,8 @@ struct EditorNotification {
     int32_t  position = 0;
     int32_t  modificationType = 0;
     int32_t  updated = 0;          // SCN_UPDATEUI 的 SC_UPDATE_* 位
+    int32_t  line = 0;             // SCN_MARGINCLICK
+    int32_t  margin = 0;           // SCN_MARGINCLICK
 };
 
 // Scintilla 的唯一适配层。全程序只有这里调用 Scintilla 消息（设计文档 2.2 第 1 条）。
@@ -109,6 +113,11 @@ public:
     static constexpr int32_t kSearchFlagWholeWord = 0x00000002;
     static constexpr int32_t kSearchFlagMatchCase = 0x00000004;
 
+    // 书签用的边距与标记编号。
+    // 标记编号必须落在 0~24：25~31 被 Scintilla 的折叠标记占用了。
+    static constexpr int kMarginBookmark = 1;
+    static constexpr int kMarkerBookmark = 0;
+
     void        SetSearchFlags(int32_t flags) const;
     void        SetTarget(int64_t start, int64_t end) const;
     int64_t     SearchInTarget(std::string_view bytes) const;
@@ -123,6 +132,17 @@ public:
     void        ConfigureSearchIndicators() const;
     void        MarkRange(int indicatorId, int64_t start, int64_t end) const;
     void        ClearIndicator(int indicatorId) const;
+
+    // ---- 书签 ----
+    void                 ConfigureBookmarkMargin() const;
+    bool                 HasBookmark(int32_t line) const;
+    void                 AddBookmark(int32_t line) const;
+    void                 RemoveBookmark(int32_t line) const;
+    void                 ToggleBookmark(int32_t line) const;
+    void                 ClearAllBookmarks() const;
+    int32_t              NextBookmarkLine(int32_t fromLine, bool wrap) const;   // -1 = 没有
+    int32_t              PrevBookmarkLine(int32_t fromLine, bool wrap) const;
+    std::vector<int32_t> AllBookmarkLines() const;
 
 private:
     HWND hwnd_ = nullptr;

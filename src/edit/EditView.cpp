@@ -154,6 +154,9 @@ bool EditView::TranslateNotify(const void* nmhdr, EditorNotification& out) {
     out.position = static_cast<int32_t>(notification->position);
     out.modificationType = notification->modificationType;
     out.updated = notification->updated;
+    // SCNotification::line 是 Sci_Position（64 位），显式收窄避免 /W4 的 C4244
+    out.line = static_cast<int32_t>(notification->line);
+    out.margin = notification->margin;
     return true;
 }
 
@@ -222,6 +225,7 @@ void EditView::ApplyLightTheme() const {
     Send(SCI_STYLESETBACK, STYLE_LINENUMBER, RGB(0xF5, 0xF5, 0xF5));
     Send(SCI_SETMARGINTYPEN, 0, SC_MARGIN_NUMBER);
     Send(SCI_SETMARGINWIDTHN, 0, 48);
+    ConfigureBookmarkMargin();
 
     Send(SCI_SETCARETFORE, RGB(0x00, 0x00, 0x00));
     Send(SCI_SETCARETLINEVISIBLE, 1);
@@ -232,6 +236,90 @@ void EditView::ApplyLightTheme() const {
 
 void EditView::ShowLineNumbers(bool visible) const {
     Send(SCI_SETMARGINWIDTHN, 0, visible ? 48 : 0);
+}
+
+void EditView::ConfigureBookmarkMargin() const {
+    // 书签放在独立边距里：可以"在行号右侧、可点击"，而不必去动行号边距
+    Send(SCI_MARKERDEFINE, static_cast<uintptr_t>(kMarkerBookmark), SC_MARK_CIRCLE);
+    Send(SCI_MARKERSETFORE, static_cast<uintptr_t>(kMarkerBookmark), RGB(0xFF, 0xFF, 0xFF));
+    Send(SCI_MARKERSETBACK, static_cast<uintptr_t>(kMarkerBookmark), RGB(0x2E, 0x86, 0xC1));
+    Send(SCI_SETMARGINTYPEN, static_cast<uintptr_t>(kMarginBookmark), SC_MARGIN_SYMBOL);
+    Send(SCI_SETMARGINMASKN, static_cast<uintptr_t>(kMarginBookmark), 1u << kMarkerBookmark);
+    Send(SCI_SETMARGINWIDTHN, static_cast<uintptr_t>(kMarginBookmark), 16);
+    Send(SCI_SETMARGINSENSITIVEN, static_cast<uintptr_t>(kMarginBookmark), 1);
+}
+
+bool EditView::HasBookmark(int32_t line) const {
+    const intptr_t mask = Send(SCI_MARKERGET, static_cast<uintptr_t>(line));
+    return (mask & (1 << kMarkerBookmark)) != 0;
+}
+
+void EditView::AddBookmark(int32_t line) const {
+    if (!HasBookmark(line)) {
+        Send(SCI_MARKERADD, static_cast<uintptr_t>(line), kMarkerBookmark);
+    }
+}
+
+void EditView::RemoveBookmark(int32_t line) const {
+    Send(SCI_MARKERDELETE, static_cast<uintptr_t>(line), kMarkerBookmark);
+}
+
+void EditView::ToggleBookmark(int32_t line) const {
+    if (HasBookmark(line)) {
+        RemoveBookmark(line);
+    } else {
+        AddBookmark(line);
+    }
+}
+
+void EditView::ClearAllBookmarks() const {
+    Send(SCI_MARKERDELETEALL, static_cast<uintptr_t>(kMarkerBookmark));
+}
+
+int32_t EditView::NextBookmarkLine(int32_t fromLine, bool wrap) const {
+    const intptr_t mask = 1 << kMarkerBookmark;
+    if (fromLine < 0) {
+        fromLine = 0;
+    }
+    const intptr_t found = Send(SCI_MARKERNEXT, static_cast<uintptr_t>(fromLine),
+                                static_cast<intptr_t>(mask));
+    if (found >= 0) {
+        return static_cast<int32_t>(found);
+    }
+    if (!wrap) {
+        return -1;
+    }
+    const intptr_t wrapped = Send(SCI_MARKERNEXT, 0, static_cast<intptr_t>(mask));
+    return wrapped >= 0 ? static_cast<int32_t>(wrapped) : -1;
+}
+
+int32_t EditView::PrevBookmarkLine(int32_t fromLine, bool wrap) const {
+    const intptr_t mask = 1 << kMarkerBookmark;
+    const intptr_t found = Send(SCI_MARKERPREVIOUS, static_cast<uintptr_t>(fromLine),
+                                static_cast<intptr_t>(mask));
+    if (found >= 0) {
+        return static_cast<int32_t>(found);
+    }
+    if (!wrap) {
+        return -1;
+    }
+    // 回绕到最后一个书签：从末行往前找
+    const intptr_t wrapped = Send(SCI_MARKERPREVIOUS,
+                                  static_cast<uintptr_t>(LineCount() - 1),
+                                  static_cast<intptr_t>(mask));
+    return wrapped >= 0 ? static_cast<int32_t>(wrapped) : -1;
+}
+
+std::vector<int32_t> EditView::AllBookmarkLines() const {
+    std::vector<int32_t> lines;
+    const intptr_t mask = 1 << kMarkerBookmark;
+    intptr_t line = Send(SCI_MARKERNEXT, 0, static_cast<intptr_t>(mask));
+    while (line >= 0) {
+        lines.push_back(static_cast<int32_t>(line));
+        line = Send(SCI_MARKERNEXT, static_cast<uintptr_t>(line + 1),
+                    static_cast<intptr_t>(mask));
+    }
+    return lines;
 }
 
 void EditView::SetShowWhitespace(bool enabled) const {

@@ -24,10 +24,18 @@ WM_CLOSE = 0x0010
 
 SCI_GETSELECTIONSTART = 2143
 SCI_GETSELECTIONEND = 2145
+SCI_GETCURRENTPOS = 2008
+SCI_LINEFROMPOSITION = 2166
+SCI_GOTOLINE = 2024
+SCI_MARKERGET = 2046
 LVM_GETITEMCOUNT = 0x1004
 
 CMD_FIND = (3 << 12) | 1            # CmdCategory::Search, index 1
 CMD_FIND_IN_FILES = (3 << 12) | 5   # index 5
+CMD_TOGGLE_BOOKMARK = (3 << 12) | 6
+CMD_NEXT_BOOKMARK = (3 << 12) | 7
+CMD_PREV_BOOKMARK = (3 << 12) | 8
+CMD_CLEAR_BOOKMARKS = (3 << 12) | 9
 BTN_FIND_NEXT = 908                 # FindBarControl::kFindNextButton
 CTRL_FIND_EDIT = 901
 
@@ -36,6 +44,8 @@ PANEL_DIR = 702
 PANEL_FILTER = 703
 PANEL_START = 707
 PANEL_LIST = 710
+
+MARKER_BOOKMARK_MASK = 1            # EditView::kMarkerBookmark == 0
 
 
 def children(hwnd):
@@ -80,6 +90,68 @@ def set_text(hwnd, control_id, text):
     return True
 
 
+def visible_scintilla(main_window):
+    for child in children(main_window):
+        if class_name(child) == "Scintilla" and user32.IsWindowVisible(child):
+            return child
+    return None
+
+
+def current_line(scinti):
+    position = user32.SendMessageW(scinti, SCI_GETCURRENTPOS, 0, 0)
+    return user32.SendMessageW(scinti, SCI_LINEFROMPOSITION, position, 0)
+
+
+def test_bookmarks(main_window):
+    """书签：标记两个位置，再验证跳转与清除。"""
+    scinti = visible_scintilla(main_window)
+    if scinti is None:
+        print("  FAIL: 找不到可见的编辑控件")
+        return False
+
+    user32.SendMessageW(main_window, WM_COMMAND, CMD_CLEAR_BOOKMARKS, 0)
+    time.sleep(0.3)
+
+    # 在第 0 行与第 10 行各打一个书签
+    for line in (0, 10):
+        user32.SendMessageW(scinti, SCI_GOTOLINE, line, 0)
+        time.sleep(0.2)
+        user32.SendMessageW(main_window, WM_COMMAND, CMD_TOGGLE_BOOKMARK, 0)
+        time.sleep(0.3)
+        mask = user32.SendMessageW(scinti, SCI_MARKERGET, line, 0)
+        if not (mask & MARKER_BOOKMARK_MASK):
+            print(f"  FAIL: 第 {line} 行没有出现书签标记（margin mask = {mask}）")
+            return False
+
+    # 回到开头，F2 应跳到第 10 行
+    user32.SendMessageW(scinti, SCI_GOTOLINE, 0, 0)
+    time.sleep(0.2)
+    user32.SendMessageW(main_window, WM_COMMAND, CMD_NEXT_BOOKMARK, 0)
+    time.sleep(0.3)
+    line = current_line(scinti)
+    if line != 10:
+        print(f"  FAIL: 下一个书签应跳到第 10 行，实际第 {line} 行")
+        return False
+
+    # Shift+F2 应回到第 0 行
+    user32.SendMessageW(main_window, WM_COMMAND, CMD_PREV_BOOKMARK, 0)
+    time.sleep(0.3)
+    line = current_line(scinti)
+    if line != 0:
+        print(f"  FAIL: 上一个书签应回到第 0 行，实际第 {line} 行")
+        return False
+
+    user32.SendMessageW(main_window, WM_COMMAND, CMD_CLEAR_BOOKMARKS, 0)
+    time.sleep(0.3)
+    mask = user32.SendMessageW(scinti, SCI_MARKERGET, 10, 0)
+    if mask & MARKER_BOOKMARK_MASK:
+        print("  FAIL: 清除全部书签之后边距上还有标记")
+        return False
+
+    print("  书签：标记 / 跳转 / 清除均正确")
+    return True
+
+
 def test_find_bar(main_window, root):
     """查找栏：填词、点下一个，核对编辑器选区是否落在第一个匹配上。"""
     target = os.path.join(root, "README.md")
@@ -104,11 +176,7 @@ def test_find_bar(main_window, root):
     user32.SendMessageW(main_window, WM_COMMAND, BTN_FIND_NEXT, 0)
     time.sleep(1.2)
 
-    scinti = None
-    for child in children(main_window):
-        if class_name(child) == "Scintilla" and user32.IsWindowVisible(child):
-            scinti = child
-            break
+    scinti = visible_scintilla(main_window)
     if scinti is None:
         print("  FAIL: 找不到可见的编辑控件")
         return False
@@ -205,6 +273,8 @@ def run():
             failed = True
         if not test_search_panel(main_window, root):
             failed = True
+        if not test_bookmarks(main_window):
+            failed = True
     finally:
         if main_window:
             user32.PostMessageW(main_window, WM_CLOSE, 0, 0)
@@ -215,7 +285,7 @@ def run():
     if failed:
         print("FAIL: 界面回归未通过")
         return 1
-    print("PASS: 界面回归通过（查找栏 + 在文件中查找）")
+    print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签）")
     return 0
 
 

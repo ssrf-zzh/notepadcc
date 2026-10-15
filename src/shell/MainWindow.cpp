@@ -43,6 +43,10 @@ enum : npcc::core::CmdId {
     kCmdSearchFindNext = npcc::core::MakeCmdId(3, 3),
     kCmdSearchFindPrev = npcc::core::MakeCmdId(3, 4),
     kCmdSearchInFiles  = npcc::core::MakeCmdId(3, 5),
+    kCmdSearchToggleBookmark = npcc::core::MakeCmdId(3, 6),
+    kCmdSearchNextBookmark   = npcc::core::MakeCmdId(3, 7),
+    kCmdSearchPrevBookmark   = npcc::core::MakeCmdId(3, 8),
+    kCmdSearchClearBookmarks = npcc::core::MakeCmdId(3, 9),
 
     kCmdViewZoomIn        = npcc::core::MakeCmdId(4, 1),
     kCmdViewZoomOut       = npcc::core::MakeCmdId(4, 2),
@@ -373,6 +377,18 @@ void MainWindow::RegisterCommands() {
     add(kCmdSearchInFiles, CmdCategory::Search, L"cmd.search.inFiles",
         L"在文件中查找(&I)...", core::kCmdNone,
         [this](const CmdContext&) { CommandFindInFiles(); });
+    add(kCmdSearchToggleBookmark, CmdCategory::Search, L"cmd.search.toggleBookmark",
+        L"标记/取消书签(&B)", needsBuffer,
+        [this](const CmdContext&) { CommandToggleBookmark(); });
+    add(kCmdSearchNextBookmark, CmdCategory::Search, L"cmd.search.nextBookmark",
+        L"下一个书签(&N)", needsBuffer,
+        [this](const CmdContext&) { CommandGotoBookmark(true); });
+    add(kCmdSearchPrevBookmark, CmdCategory::Search, L"cmd.search.prevBookmark",
+        L"上一个书签(&P)", needsBuffer,
+        [this](const CmdContext&) { CommandGotoBookmark(false); });
+    add(kCmdSearchClearBookmarks, CmdCategory::Search, L"cmd.search.clearBookmarks",
+        L"清除全部书签(&C)", needsBuffer,
+        [this](const CmdContext&) { CommandClearBookmarks(); });
 
     // ---- 视图 ----
     add(kCmdViewZoomIn, CmdCategory::View, L"cmd.view.zoomIn", L"放大(&I)",
@@ -453,6 +469,9 @@ void MainWindow::RegisterCommands() {
     registry_.BindShortcut(kCmdSearchFindNext, core::kModNone, VK_F3, true);
     registry_.BindShortcut(kCmdSearchFindPrev, core::kModShift, VK_F3, true);
     registry_.BindShortcut(kCmdSearchInFiles, ctrlShift, 'F', true);
+    registry_.BindShortcut(kCmdSearchToggleBookmark, ctrl, VK_F2, true);
+    registry_.BindShortcut(kCmdSearchNextBookmark, core::kModNone, VK_F2, true);
+    registry_.BindShortcut(kCmdSearchPrevBookmark, core::kModShift, VK_F2, true);
     registry_.BindShortcut(kCmdViewZoomIn, ctrl, VK_OEM_PLUS, true);
     registry_.BindShortcut(kCmdViewZoomOut, ctrl, VK_OEM_MINUS, true);
     registry_.BindShortcut(kCmdViewZoomReset, ctrl, '0', true);
@@ -642,6 +661,7 @@ core::SessionSnapshot MainWindow::BuildSessionSnapshot() const {
         entry.firstVisibleLine = document->view->FirstVisibleLine();
         entry.zoomLevel = document->view->ZoomLevel();
         entry.isActive = (document == documents_->Active());
+        entry.bookmarks = document->view->AllBookmarkLines();
         snapshot.documents.push_back(std::move(entry));
     }
     return snapshot;
@@ -678,6 +698,9 @@ bool MainWindow::RestoreSession() {
         document->view->SetCaretPosition(entry.caretPos);
         document->view->SetFirstVisibleLine(entry.firstVisibleLine);
         document->view->SetZoom(entry.zoomLevel);
+        for (const std::int32_t line : entry.bookmarks) {
+            document->view->AddBookmark(line);
+        }
         if (entry.isActive) {
             active = document;
         }
@@ -885,6 +908,12 @@ void MainWindow::HandleEditorNotify(const NMHDR& header) {
         case edit::EditorEvent::UpdateUI:
             if (document == documents_->Active()) {
                 UpdateStatus();
+            }
+            return;
+        case edit::EditorEvent::MarginClick:
+            // 点击书签边距直接切换该行的书签，比"先把光标移过去再按键"顺手
+            if (note.margin == edit::EditView::kMarginBookmark && note.line >= 0) {
+                document->view->ToggleBookmark(note.line);
             }
             return;
         default:
@@ -1164,6 +1193,40 @@ bool MainWindow::HandleFindBarCommand(int controlId) {
             break;
     }
     return true;   // 输入框的其它通知先不管
+}
+
+void MainWindow::CommandToggleBookmark() {
+    if (edit::Document* document = ActiveDocument();
+        document != nullptr && document->view) {
+        document->view->ToggleBookmark(document->view->CurrentLine());
+    }
+}
+
+void MainWindow::CommandGotoBookmark(bool forward) {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || !document->view) {
+        return;
+    }
+    const int32_t currentLine = document->view->CurrentLine();
+    // 从当前行的下一行/上一行开始找，否则会停在原地不动
+    const int32_t target = forward
+                               ? document->view->NextBookmarkLine(currentLine + 1, true)
+                               : document->view->PrevBookmarkLine(currentLine - 1, true);
+    if (target < 0) {
+        statusBar_.SetMessage(L"没有书签");
+        return;
+    }
+    document->view->ScrollToLine(target);
+    document->view->SetCaretPosition(
+        static_cast<int32_t>(document->view->PositionFromLine(target)));
+}
+
+void MainWindow::CommandClearBookmarks() {
+    if (edit::Document* document = ActiveDocument();
+        document != nullptr && document->view) {
+        document->view->ClearAllBookmarks();
+        statusBar_.SetMessage(L"已清除全部书签");
+    }
 }
 
 void MainWindow::CommandFindInFiles() {

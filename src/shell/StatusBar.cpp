@@ -60,4 +60,8 @@ void StatusBar::SetDocumentInfo(const std::wstring& encoding, const std::wstring
     SetText(2, language + (modified ? L"  |  已修改" : L""));
 }
 
+void StatusBar::SetMessage(const std::wstring& text) const {
+    SetText(0, text);
+}
+
 }  // namespace npcc::shell

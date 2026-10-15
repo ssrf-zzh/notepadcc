@@ -12,6 +12,7 @@ struct SessionDocument {
     std::int32_t firstVisibleLine = 0;
     std::int32_t zoomLevel = 0;
     bool         isActive = false;
+    std::vector<std::int32_t> bookmarks;   // 行号为 0 基，与 Scintilla 一致
 };
 
 struct SessionSnapshot {

@@ -14,6 +14,8 @@ public:
     void Resize(const RECT& client) const;
 
     void SetPosition(int32_t line, int32_t column, int32_t selectedBytes) const;
+    // 临时消息：写进第一段，下一次 UpdateStatus 会被正常内容覆盖
+    void SetMessage(const std::wstring& text) const;
     void SetDocumentInfo(const std::wstring& encoding, const std::wstring& eol,
                          const std::wstring& language, bool modified) const;
 

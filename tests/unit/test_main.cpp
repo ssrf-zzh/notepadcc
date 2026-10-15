@@ -364,6 +364,95 @@ int main() {
         ::DestroyWindow(host);
     }
 
+    // ---------------------------------------------------------------- 书签
+    Section("书签（标记 / 跳转 / 清除 / 随会话保存）");
+    {
+        HWND host = CreateHiddenHost();
+        Check(host != nullptr, "创建隐藏宿主窗口");
+        if (host != nullptr) {
+            auto view = std::make_unique<npcc::edit::EditView>();
+            Check(view->Create(host, 601), "创建编辑视图");
+
+            std::string text;
+            for (int i = 0; i < 10; ++i) {
+                if (i > 0) {
+                    text += '\n';   // 行间换行；结尾不加，否则 Scintilla 会多出一个空行
+                }
+                text += "line" + std::to_string(i);
+            }
+            view->SetText(text);
+            view->ClearUndoBuffer();
+            view->MarkSavePoint();
+            view->ConfigureBookmarkMargin();
+            Check(view->LineCount() == 10, "文档共 10 行");
+
+            Check(view->AllBookmarkLines().empty(), "初始没有书签");
+            Check(!view->HasBookmark(2), "第 2 行本来没有书签");
+
+            view->AddBookmark(2);
+            view->AddBookmark(5);
+            view->AddBookmark(9);
+            Check(view->HasBookmark(2) && view->HasBookmark(5) && view->HasBookmark(9),
+                  "三个书签都已加上");
+            Check(!view->HasBookmark(3), "未标记的行没有书签");
+            {
+                const std::vector<int32_t> lines = view->AllBookmarkLines();
+                Check(lines.size() == 3 && lines[0] == 2 && lines[1] == 5 && lines[2] == 9,
+                      "书签行号按升序返回");
+            }
+            view->AddBookmark(2);
+            Check(view->AllBookmarkLines().size() == 3, "重复添加不会产生两个书签");
+
+            // 向后跳转
+            Check(view->NextBookmarkLine(0, false) == 2, "从第 0 行找到第 2 行");
+            Check(view->NextBookmarkLine(3, false) == 5, "从第 3 行找到第 5 行");
+            Check(view->NextBookmarkLine(6, false) == 9, "从第 6 行找到第 9 行");
+            Check(view->NextBookmarkLine(10, false) == -1, "关闭循环时末尾之后没有书签");
+            Check(view->NextBookmarkLine(10, true) == 2, "开启循环时回到第一个书签");
+
+            // 向前跳转
+            Check(view->PrevBookmarkLine(8, false) == 5, "从第 8 行向前找到第 5 行");
+            Check(view->PrevBookmarkLine(4, false) == 2, "从第 4 行向前找到第 2 行");
+            Check(view->PrevBookmarkLine(1, false) == -1, "关闭循环时开头之前没有书签");
+            Check(view->PrevBookmarkLine(1, true) == 9, "开启循环时回到最后一个书签");
+
+            // 取消与清除
+            view->ToggleBookmark(5);
+            Check(!view->HasBookmark(5), "切换后第 5 行书签被取消");
+            Check(view->AllBookmarkLines().size() == 2, "剩余两个书签");
+            view->ToggleBookmark(5);
+            Check(view->HasBookmark(5), "再次切换又加回来");
+            view->ClearAllBookmarks();
+            Check(view->AllBookmarkLines().empty(), "清除全部书签");
+
+            // 随会话保存与恢复
+            view->AddBookmark(3);
+            view->AddBookmark(7);
+            npcc::core::SessionSnapshot snapshot;
+            npcc::core::SessionDocument entry;
+            entry.filePath = L"D:\\工程\\bookmarks.txt";
+            entry.bookmarks = view->AllBookmarkLines();
+            snapshot.documents.push_back(entry);
+
+            std::wstring error;
+            Check(npcc::core::SessionManager::Save(snapshot, &error), "保存含书签的会话");
+            npcc::core::SessionSnapshot reloaded;
+            Check(npcc::core::SessionManager::Load(reloaded, &error), "重新加载会话");
+            Check(reloaded.documents.size() == 1, "会话里有 1 个文档");
+            if (reloaded.documents.size() == 1) {
+                const std::vector<int32_t>& marks = reloaded.documents[0].bookmarks;
+                Check(marks.size() == 2, "书签数量往返一致");
+                Check(marks.size() == 2 && marks[0] == 3 && marks[1] == 7,
+                      "书签行号往返一致");
+            }
+            std::error_code ec;
+            std::filesystem::remove(npcc::core::SessionManager::SessionPath(), ec);
+
+            view->Destroy();
+            ::DestroyWindow(host);
+        }
+    }
+
     // ---------------------------------------------------------------- XML
     Section("Xml 解析与序列化");
     {
@@ -489,9 +578,9 @@ int main() {
 
         npcc::core::SessionSnapshot snapshot;
         snapshot.documents.push_back(npcc::core::SessionDocument{
-            L"D:\\工程\\main.cpp", 128, 30, 2, false});
+            L"D:\\工程\\main.cpp", 128, 30, 2, false, {}});
         snapshot.documents.push_back(npcc::core::SessionDocument{
-            L"D:\\工程\\含中文 与空格.txt", 7, 0, 0, true});
+            L"D:\\工程\\含中文 与空格.txt", 7, 0, 0, true, {}});
         Check(npcc::core::SessionManager::Save(snapshot, &error), "保存会话成功");
         Check(std::filesystem::exists(path), "会话文件已落盘");
 

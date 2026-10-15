@@ -32,6 +32,12 @@ bool SessionManager::Save(const SessionSnapshot& snapshot, std::wstring* error) 
         if (entry.isActive) {
             node->SetAttributeBool(L"active", true);
         }
+        if (!entry.bookmarks.empty()) {
+            infra::XmlElementPtr marks = node->AddChild(L"Bookmarks");
+            for (const std::int32_t line : entry.bookmarks) {
+                marks->AddChild(L"Line")->SetAttributeInt(L"n", line);
+            }
+        }
     }
 
     return io::SaveXmlFile(SessionPath(), document, error);
@@ -84,6 +90,14 @@ bool SessionManager::Load(SessionSnapshot& snapshot, std::wstring* error) {
         entry.firstVisibleLine = node->AttributeInt(L"firstVisibleLine", 0);
         entry.zoomLevel = node->AttributeInt(L"zoom", 0);
         entry.isActive = node->AttributeBool(L"active", false);
+        if (const infra::XmlElement* marks = node->Child(L"Bookmarks"); marks != nullptr) {
+            for (const infra::XmlElement* line : marks->Children(L"Line")) {
+                const int value = line->AttributeInt(L"n", -1);
+                if (value >= 0) {
+                    entry.bookmarks.push_back(value);
+                }
+            }
+        }
         parsed.documents.push_back(std::move(entry));
     }
 

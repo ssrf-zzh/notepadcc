@@ -59,6 +59,9 @@ private:
     void CommandFindNext(bool forward);
     bool HandleFindBarCommand(int controlId);
     void CommandFindInFiles();
+    void CommandToggleBookmark();
+    void CommandGotoBookmark(bool forward);
+    void CommandClearBookmarks();
     void StartFileSearch();
     bool HandleSearchPanelCommand(int controlId);
     void JumpToSearchResult();
