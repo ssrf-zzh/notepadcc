@@ -19,6 +19,7 @@
 #include "edit/EditView.h"
 #include "io/AtomicFile.h"
 #include "io/FileReader.h"
+#include "io/FileWatcher.h"
 #include "io/MappedFile.h"
 #include "io/XmlFile.h"
 #include "search/EscapeSequence.h"
@@ -83,6 +84,20 @@ void Section(const char* name) {
 
 LRESULT CALLBACK TestHostProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     return ::DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+// 直接写文件。不要用 WriteFileAtomic——它走"临时文件 + 改名替换"，
+// 系统上报的是替换/改名而不是修改，测不出 Modified 通知。
+bool WriteFileDirect(const std::filesystem::path& path, std::string_view bytes) {
+    const HANDLE file = ::CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                      FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    DWORD written = 0;
+    ::WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr);
+    ::CloseHandle(file);
+    return true;
 }
 
 // 建立一个隐藏宿主窗口。多文档逻辑要创建真实的 Scintilla 控件，
@@ -1623,6 +1638,195 @@ int main() {
             std::filesystem::remove_all(dir, ec);
             ::DestroyWindow(host);
         }
+    }
+
+    // ---------------------------------------------------------------- 文件状态检测
+    Section("FileWatcher（外部改动检测）");
+    {
+        const auto plainWrite = [](const std::filesystem::path& path, std::string_view bytes) {
+            return WriteFileDirect(path, bytes);
+        };
+
+        const std::filesystem::path dir =
+            std::filesystem::temp_directory_path() / "notepadcc_watch_test";
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+        std::filesystem::create_directories(dir, ec);
+        const std::filesystem::path target = dir / "watched.txt";
+        plainWrite(target, "first\n");
+
+        npcc::io::FileWatcher watcher;
+        std::mutex mutex;
+        std::vector<std::pair<std::wstring, npcc::io::FileChangeKind>> events;
+        watcher.SetCallback([&mutex, &events](const std::wstring& path,
+                                              npcc::io::FileChangeKind kind) {
+            std::lock_guard<std::mutex> guard(mutex);
+            events.emplace_back(path, kind);
+        });
+
+        Check(watcher.WatchedCount() == 0, "初始没有监视任何文件");
+        watcher.Watch(target.wstring());
+        Check(watcher.WatchedCount() == 1, "监视了一个文件");
+        watcher.Watch(target.wstring());
+        Check(watcher.WatchedCount() == 1, "重复监视同一个文件不会算两次");
+
+        // 等回调：目录通知是异步的，给它一点时间
+        const auto waitForEvent = [&mutex, &events](std::size_t wanted,
+                                                    int timeoutMs) -> bool {
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::milliseconds(timeoutMs);
+            while (std::chrono::steady_clock::now() < deadline) {
+                {
+                    std::lock_guard<std::mutex> guard(mutex);
+                    if (events.size() >= wanted) {
+                        return true;
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            return false;
+        };
+
+        // 目录通知是异步的，偶尔会有秒级延迟；窗口给宽一点，
+        // 免得留下一个偶发失败的测试
+        plainWrite(target, "second\n");
+        Check(waitForEvent(1, 10000), "外部修改触发了通知");
+        {
+            std::lock_guard<std::mutex> guard(mutex);
+            Check(!events.empty(), "收到了事件");
+            if (!events.empty()) {
+                Check(events[0].second == npcc::io::FileChangeKind::Modified,
+                      "事件类型是 Modified");
+                Check(events[0].first.size() >= target.wstring().size() &&
+                          events[0].first.compare(events[0].first.size() -
+                                                      target.wstring().size(),
+                                                  target.wstring().size(),
+                                                  target.wstring()) == 0,
+                      "事件指向被监视的那个文件");
+            }
+        }
+
+        // 取消监视之后不该再有通知
+        {
+            std::lock_guard<std::mutex> guard(mutex);
+            events.clear();
+        }
+        watcher.Unwatch(target.wstring());
+        Check(watcher.WatchedCount() == 0, "取消监视后计数归零");
+        plainWrite(target, "third\n");
+        std::this_thread::sleep_for(std::chrono::milliseconds(600));
+        {
+            std::lock_guard<std::mutex> guard(mutex);
+            Check(events.empty(), "取消监视后不再收到通知");
+        }
+
+        // 删除文件应当上报 Deleted
+        watcher.Watch(target.wstring());
+        {
+            std::lock_guard<std::mutex> guard(mutex);
+            events.clear();
+        }
+        std::filesystem::remove(target, ec);
+        Check(waitForEvent(1, 10000), "删除文件触发了通知");
+        {
+            std::lock_guard<std::mutex> guard(mutex);
+            if (!events.empty()) {
+                Check(events[0].second == npcc::io::FileChangeKind::Deleted,
+                      "事件类型是 Deleted");
+            }
+        }
+
+        watcher.Clear();
+        Check(watcher.WatchedCount() == 0, "Clear 之后不再监视任何文件");
+
+        // 文件身份：改了内容之后 size/时间必须变
+        {
+            const auto idPath = dir / "identity.txt";
+            plainWrite(idPath, "abc");
+            std::uint64_t size1 = 0;
+            std::uint64_t time1 = 0;
+            Check(npcc::io::QueryFileIdentity(idPath.wstring(), size1, time1),
+                  "查询文件身份成功");
+            Check(size1 == 3, "身份里的体积正确");
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            plainWrite(idPath, "abcdef");
+            std::uint64_t size2 = 0;
+            std::uint64_t time2 = 0;
+            Check(npcc::io::QueryFileIdentity(idPath.wstring(), size2, time2),
+                  "再次查询文件身份成功");
+            Check(size2 == 6 && (size2 != size1 || time2 != time1),
+                  "体积或时间戳能反映出改动");
+        }
+
+        std::filesystem::remove_all(dir, ec);
+    }
+
+    // ---------------------------------------------------------------- 外部改动与重新加载
+    Section("外部改动检测与重新加载");
+    {
+        const std::filesystem::path dir =
+            std::filesystem::temp_directory_path() / "notepadcc_reload_test";
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+        std::filesystem::create_directories(dir, ec);
+        const std::filesystem::path path = dir / "doc.txt";
+        WriteFileDirect(path, "first\n");
+
+        HWND host = CreateHiddenHost();
+        Check(host != nullptr, "创建隐藏宿主窗口");
+        if (host != nullptr) {
+            npcc::core::DocumentManager manager(host);
+            const auto opened = manager.Open(path.wstring());
+            Check(opened.status == npcc::core::OpenStatus::Ok, "打开文件成功");
+
+            if (opened.document != nullptr) {
+                Check(!manager.HasExternallyChanged(*opened.document),
+                      "刚打开时没有外部改动");
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                WriteFileDirect(path, "second\n");
+                Check(manager.HasExternallyChanged(*opened.document),
+                      "磁盘上的改动被检测到");
+
+                // 用户选择"保留当前内容"时刷新记录，之后不该反复提示
+                manager.RefreshIdentity(*opened.document);
+                Check(!manager.HasExternallyChanged(*opened.document),
+                      "刷新记录之后不再报改动");
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                WriteFileDirect(path, "third\n");
+                Check(manager.HasExternallyChanged(*opened.document), "再次改动被检测到");
+
+                std::wstring error;
+                Check(manager.Reload(*opened.document, error), "重新加载成功");
+                CheckEqual(opened.document->view->GetAllText(), "third\n",
+                           "重新加载后内容来自磁盘");
+                Check(!manager.HasExternallyChanged(*opened.document),
+                      "重新加载后不再报改动");
+
+                // 有未保存改动时重新加载：应当以磁盘为准并清掉修改标记
+                opened.document->view->SetCaretPosition(0);
+                opened.document->view->ReplaceSelection("X");
+                Check(opened.document->view->IsModified(), "编辑之后处于已修改状态");
+                std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                WriteFileDirect(path, "fourth\n");
+                Check(manager.Reload(*opened.document, error),
+                      "覆盖未保存改动也能重新加载");
+                CheckEqual(opened.document->view->GetAllText(), "fourth\n",
+                           "内容被磁盘版本替换");
+                Check(!opened.document->view->IsModified(), "重新加载后修改标记被清除");
+
+                // 文件被删除同样算"变了"
+                std::filesystem::remove(path, ec);
+                Check(manager.HasExternallyChanged(*opened.document),
+                      "文件被删除也算外部改动");
+                Check(!manager.Reload(*opened.document, error),
+                      "文件不存在时重新加载应当失败");
+                Check(!error.empty(), "失败时给出可读原因");
+            }
+            ::DestroyWindow(host);
+        }
+        std::filesystem::remove_all(dir, ec);
     }
 
     std::printf("\n结果: %d 项检查, %d 项失败\n", g_checks, g_failures);

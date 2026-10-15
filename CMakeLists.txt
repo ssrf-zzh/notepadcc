@@ -134,6 +134,7 @@ set(NPCC_CORE_SOURCES
     src/infra/Xml.cpp
     src/io/AtomicFile.cpp
     src/io/FileReader.cpp
+    src/io/FileWatcher.cpp
     src/io/MappedFile.cpp
     src/io/XmlFile.cpp
     src/search/EscapeSequence.cpp

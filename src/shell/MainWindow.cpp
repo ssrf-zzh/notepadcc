@@ -100,6 +100,8 @@ void CopyTextToClipboard(HWND owner, const std::wstring& text) {
 }  // namespace
 
 MainWindow::~MainWindow() {
+    // 先停掉监视线程：它的回调会往本窗口投消息，窗口没了就不该再跑
+    fileWatcher_.reset();
     tabBar_.Destroy();
     documents_.reset();
     if (accel_ != nullptr) {
@@ -172,6 +174,15 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             documents_ = std::make_unique<core::DocumentManager>(hwnd_);
             crossSearch_ = std::make_unique<search::CrossFileSearch>();
             crossReplace_ = std::make_unique<search::CrossFileReplace>();
+            // 外部改动监视：回调在监视线程上，转发回 UI 线程处理
+            fileWatcher_ = std::make_unique<io::FileWatcher>();
+            fileWatcher_->SetCallback([this](const std::wstring& path, io::FileChangeKind kind) {
+                auto* copy = new std::pair<std::wstring, io::FileChangeKind>(path, kind);
+                if (::PostMessageW(hwnd_, core::kMsgFileChanged, 0,
+                                   reinterpret_cast<LPARAM>(copy)) == 0) {
+                    delete copy;
+                }
+            });
 
             RegisterCommands();
             menu_ = BuildMainMenu(registry_);
@@ -194,6 +205,8 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             if (edit::Document* document = documents_->Active(); document != nullptr && document->view) {
                 ::SetFocus(document->view->Handle());
             }
+            // 窗口重新获得焦点时也做一次兜底检查
+            CheckActiveDocumentForExternalChange();
             return 0;
         }
         case WM_COMMAND: {
@@ -266,6 +279,12 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             searchPanel_.SetStatus(text);
             infra::LogInfo(L"replace", text);
             replaceJob_.reset();
+            return 0;
+        }
+        case core::kMsgFileChanged: {
+            std::unique_ptr<std::pair<std::wstring, io::FileChangeKind>> change(
+                reinterpret_cast<std::pair<std::wstring, io::FileChangeKind>*>(lParam));
+            HandleExternalChange(change->first, change->second);
             return 0;
         }
         case WM_DROPFILES: {
@@ -626,6 +645,22 @@ void MainWindow::SyncTabBar() {
     const core::BufferId active =
         documents_->Active() != nullptr ? documents_->Active()->buffer.id : 0;
     tabBar_.SetItems(std::move(items), active);
+    // 标签集合变了，被监视的文件集合也跟着变
+    SyncFileWatcher();
+}
+
+void MainWindow::SyncFileWatcher() {
+    if (!fileWatcher_ || !documents_) {
+        return;
+    }
+    // 整体重建比增量增删可靠得多：任何一条打开/关闭/另存为的路径漏掉
+    // 增删都会导致监视集与标签集不一致，而这种不一致很难被发现。
+    fileWatcher_->Clear();
+    for (edit::Document* document : documents_->All()) {
+        if (document->buffer.HasPath() && !document->buffer.isUntitled) {
+            fileWatcher_->Watch(document->buffer.filePath);
+        }
+    }
 }
 
 void MainWindow::UpdateTitle() const {
@@ -677,6 +712,8 @@ void MainWindow::ActivateDocument(core::BufferId id) {
     LayoutChildren();
     UpdateTitle();
     UpdateStatus();
+    // 兜底检查：目录通知可能因为缓冲区溢出而漏掉，切到某个标签时再确认一次
+    CheckActiveDocumentForExternalChange();
 }
 
 void MainWindow::EnsureAtLeastOneDocument() {
@@ -1242,6 +1279,74 @@ bool MainWindow::HandleFindBarCommand(int controlId) {
             break;
     }
     return true;   // 输入框的其它通知先不管
+}
+
+void MainWindow::HandleExternalChange(const std::wstring& path, io::FileChangeKind kind) {
+    if (!documents_) {
+        return;
+    }
+    // 只有"当前正显示的文档"才弹窗；其余的只做标记，等切过去再说，
+    // 免得后台一堆标签同时被改动时弹出一串对话框。
+    edit::Document* target = nullptr;
+    for (edit::Document* document : documents_->All()) {
+        if (document->buffer.HasPath() &&
+            ::CompareStringOrdinal(document->buffer.filePath.c_str(), -1, path.c_str(), -1,
+                                   TRUE) == CSTR_EQUAL) {
+            target = document;
+            break;
+        }
+    }
+    if (target == nullptr) {
+        return;   // 不在我们打开的范围内（可能是别的程序在同目录里改文件）
+    }
+    if (target != documents_->Active()) {
+        return;   // 切到该标签时由兜底检查处理
+    }
+
+    // 内容其实没变（比如只是时间戳被动过）就静默刷新记录
+    if (!documents_->HasExternallyChanged(*target)) {
+        documents_->RefreshIdentity(*target);
+        return;
+    }
+    CheckActiveDocumentForExternalChange(kind);
+}
+
+void MainWindow::CheckActiveDocumentForExternalChange(io::FileChangeKind kind) {
+    if (!documents_) {
+        return;
+    }
+    edit::Document* document = documents_->Active();
+    if (document == nullptr || !document->buffer.HasPath()) {
+        return;
+    }
+    if (!documents_->HasExternallyChanged(*document)) {
+        return;
+    }
+
+    // 把变更类型写进提示：被删除和被修改，用户该做的事是不一样的
+    const std::wstring question =
+        L"文件「" + document->buffer.displayName + L"」" + io::FileChangeKindName(kind) +
+        L"。\n\n"
+        L"· 选择「是」重新加载磁盘上的最新内容（编辑器里未保存的改动会丢失）；\n"
+        L"· 选择「否」保留当前编辑的内容，之后保存会覆盖磁盘上的版本。\n\n"
+        L"是否重新加载？";
+    const int answer = ::MessageBoxW(hwnd_, question.c_str(), L"文件已被外部修改",
+                                     MB_ICONWARNING | MB_YESNO);
+    if (answer == IDYES) {
+        std::wstring error;
+        if (!documents_->Reload(*document, error)) {
+            ::MessageBoxW(hwnd_, error.c_str(), L"重新加载失败", MB_ICONERROR);
+            return;
+        }
+        infra::LogInfo(L"file", L"已重新加载: " + document->buffer.filePath);
+    } else {
+        // 保留当前内容：刷新记录，这样下次磁盘再变才会再问一次
+        documents_->RefreshIdentity(*document);
+        infra::LogInfo(L"file", L"保留当前内容（外部改动被忽略）: " + document->buffer.filePath);
+    }
+    SyncTabBar();
+    UpdateTitle();
+    UpdateStatus();
 }
 
 void MainWindow::CommandColumnEdit() {

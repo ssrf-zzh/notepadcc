@@ -56,6 +56,14 @@ public:
     SaveOutcome Save(edit::Document& document);
     SaveOutcome SaveAs(edit::Document& document, const std::wstring& path);
 
+    // ---- 外部改动检测（设计文档 2.3 第 3 条） ----
+    // 把磁盘上的身份与最近一次记录的比较。文件被删除也算"变了"。
+    bool HasExternallyChanged(const edit::Document& document) const;
+    // 用当前磁盘状态刷新记录。用户选择"保留当前内容"时调用。
+    void RefreshIdentity(edit::Document& document);
+    // 从磁盘重新装载，保留光标与滚动位置。
+    bool Reload(edit::Document& document, std::wstring& error);
+
     // 关闭并从标签顺序中移除（不询问"是否保存"，由外壳决定）
     bool Close(edit::Document* document);
 
@@ -84,6 +92,8 @@ public:
 
 private:
     edit::Document* AddDocument(std::unique_ptr<edit::Document> document);
+    // 把文件内容装载进文档（Open 与 Reload 共用）
+    bool LoadInto(edit::Document& document, std::wstring& error, OpenStatus& status);
     void RemoveFromTabOrder(BufferId id);
     int  NextControlId();
 

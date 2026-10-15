@@ -178,6 +178,7 @@ public:
 
     bool OverwriteMode() const;
     void SetOverwriteMode(bool enabled) const;
+    void SetUndoCollection(bool enabled) const;
 
 private:
     HWND hwnd_ = nullptr;

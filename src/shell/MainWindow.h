@@ -16,6 +16,7 @@
 #include "shell/SearchPanel.h"
 #include "search/CrossFileSearch.h"
 #include "search/CrossFileReplace.h"
+#include "io/FileWatcher.h"
 
 namespace npcc::shell {
 
@@ -44,6 +45,7 @@ private:
     void UpdateTitle() const;
     void UpdateStatus() const;
     void SyncTabBar();
+    void SyncFileWatcher();
     void ApplyViewToggles(edit::EditView& view) const;
     core::CmdContext Context();
 
@@ -68,6 +70,9 @@ private:
     void CommandClearBookmarks();
     void CommandColumnEdit();
     void CommandToggleOverwrite();
+    void HandleExternalChange(const std::wstring& path, io::FileChangeKind kind);
+    void CheckActiveDocumentForExternalChange(
+        io::FileChangeKind kind = io::FileChangeKind::Modified);
     void StartFileSearch();
     bool HandleSearchPanelCommand(int controlId);
     void JumpToSearchResult();
@@ -109,6 +114,7 @@ private:
     std::shared_ptr<search::CrossSearchJob>   replaceJob_;
     search::SearchConfig                      pendingReplaceConfig_;
     search::ReplaceOptions                    replaceOptions_;
+    std::unique_ptr<io::FileWatcher>          fileWatcher_;
 
     std::wstring lastDirectory_;
     bool showWhitespace_ = false;

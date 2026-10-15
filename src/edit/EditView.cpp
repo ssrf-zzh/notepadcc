@@ -389,6 +389,10 @@ void EditView::SetOverwriteMode(bool enabled) const {
     Send(SCI_SETOVERTYPE, enabled ? 1u : 0u);
 }
 
+void EditView::SetUndoCollection(bool enabled) const {
+    Send(SCI_SETUNDOCOLLECTION, enabled ? 1u : 0u);
+}
+
 bool EditView::HasBookmark(int32_t line) const {
     const intptr_t mask = Send(SCI_MARKERGET, static_cast<uintptr_t>(line));
     return (mask & (1 << kMarkerBookmark)) != 0;

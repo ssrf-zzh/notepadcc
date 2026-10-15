@@ -203,7 +203,13 @@ def dismiss_dialog(title, command_id, timeout=6.0, quiet=False):
     while time.time() < deadline:
         dialog = user32.FindWindowW("#32770", title)
         if dialog:
-            user32.PostMessageW(dialog, WM_COMMAND, command_id, 0)
+            # 直接给按钮发 BM_CLICK。早先试过给对话框发 WM_COMMAND，
+            # 对替换确认框有效，对这个却点不掉——按按钮才是可靠的路子。
+            button = user32.GetDlgItem(dialog, command_id)
+            if button:
+                user32.SendMessageW(button, 0x00F5, 0, 0)   # BM_CLICK
+            else:
+                user32.PostMessageW(dialog, WM_COMMAND, command_id, 0)
             time.sleep(0.4)
             return True
         time.sleep(0.2)
@@ -447,6 +453,77 @@ def test_large_file(root):
             proc.kill()
 
 
+def test_external_change(root):
+    """外部改动检测：在程序之外改文件，看它能不能发现并重新加载。"""
+    work = os.path.join(root, "build", "extern_test")
+    os.makedirs(work, exist_ok=True)
+    path = os.path.join(work, "doc.txt")
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write("alpha\n")
+
+    log_path = os.path.join(root, "build", "bin", "config", "logs", "notepadcc.log")
+    if os.path.exists(log_path):
+        os.remove(log_path)
+    session = os.path.join(root, "build", "bin", "config", "session.xml")
+    if os.path.exists(session):
+        os.remove(session)
+
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    time.sleep(4)
+    window = user32.FindWindowW("notepadccMainWindow", "notepadcc - doc.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到打开了 doc.txt 的窗口")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到可见的编辑控件")
+            return False
+        if scinti_text(scinti) != "alpha\n":
+            print(f"  FAIL: 初始内容不对 {scinti_text(scinti)!r}")
+            return False
+
+        # 在程序之外直接改文件
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            handle.write("beta\n")
+
+        # 等程序自己发现（目录通知），弹确认框
+        if not dismiss_dialog("文件已被外部修改", IDYES, timeout=15.0):
+            print("  FAIL: 外部改动没有被检测到（没等到确认框）")
+            return False
+        time.sleep(1.0)
+
+        after = scinti_text(scinti)
+        if after != "beta\n":
+            still_open = user32.FindWindowW("#32770", "文件已被外部修改")
+            print(f"  FAIL: 重新加载后内容应被磁盘版本替换，实际 {after!r}；"
+                  f"确认框是否仍在 = {bool(still_open)}")
+            if os.path.exists(log_path):
+                with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
+                    print("    日志尾部：")
+                    for line in handle.read().splitlines()[-6:]:
+                        print("     ", line)
+            return False
+
+        log_text = ""
+        if os.path.exists(log_path):
+            with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
+                log_text = handle.read()
+        if "已重新加载" not in log_text:
+            print("  FAIL: 日志里没有重新加载的记录")
+            return False
+
+        print("  外部改动：检测到磁盘变动并完成重新加载")
+        return True
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            time.sleep(2)
+        if proc.poll() is None:
+            proc.kill()
+
+
 def test_find_bar(main_window, root):
     """查找栏：填词、点下一个，核对编辑器选区是否落在第一个匹配上。"""
     target = os.path.join(root, "README.md")
@@ -584,11 +661,14 @@ def run():
         failed = True
     if not test_large_file(root):
         failed = True
+    if not test_external_change(root):
+        failed = True
 
     if failed:
         print("FAIL: 界面回归未通过")
         return 1
-    print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + 大文件）")
+    print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + "
+          "大文件 + 外部改动）")
     return 0
 
 

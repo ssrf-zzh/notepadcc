@@ -112,77 +112,12 @@ OpenOutcome DocumentManager::Open(const std::wstring& path) {
         }
     }
 
-    // 先看体积定档：这决定了后面走"全量读入"还是"映射 + 分块装载"
-    std::uint64_t fileSize = 0;
-    std::uint64_t lastWrite = 0;
-    if (!io::QueryFileIdentity(target, fileSize, lastWrite)) {
-        outcome.status = OpenStatus::NotFound;
-        outcome.message = L"文件不存在或无法访问。";
-        return outcome;
-    }
-    const edit::FileTier tier = tierPolicy_.Classify(fileSize);
-    if (!tierPolicy_.Acceptable(fileSize)) {
-        outcome.status = OpenStatus::TooLarge;
-        outcome.message = L"文件超过 " + std::to_wstring(tierPolicy_.refuseAboveBytes >> 20) +
-                          L" MB，当前版本暂不支持打开。";
-        return outcome;
-    }
-
     auto document = std::make_unique<edit::Document>();
     document->buffer.id = static_cast<BufferId>(nextBufferId_++);
     document->buffer.filePath = target;
     document->buffer.displayName = FileNameOf(target);
     document->buffer.isUntitled = false;
     document->buffer.isModified = false;
-    document->buffer.tier = tier;
-
-    // 大文件路径用的是一份临时映射，装载完成后即可释放——
-    // ILoader 会把数据拷进 Scintilla 的文档模型里
-    io::MappedFile mapped;
-    std::string loadedBytes;   // 仅常规路径使用
-
-    if (tier == edit::FileTier::Normal) {
-        const io::ReadResult read = io::ReadWholeFile(target, tierPolicy_.normalMaxBytes);
-        if (!read.ok) {
-            outcome.message = read.message;
-            if (read.lastError == ERROR_ACCESS_DENIED) {
-                outcome.status = OpenStatus::AccessDenied;
-            } else {
-                outcome.status = OpenStatus::InternalError;
-            }
-            return outcome;
-        }
-        const edit::LoadResult loaded = edit::DetectAndPrepare(read.bytes, kFallbackCodePage);
-        document->buffer.encoding = loaded.encoding;
-        document->buffer.eol = loaded.eol;
-        document->buffer.detectedEol = loaded.eol;
-        outcome.message = loaded.warning;
-        loadedBytes = loaded.editorBytes;
-    } else {
-        if (!mapped.Open(target)) {
-            outcome.status = OpenStatus::InternalError;
-            outcome.message = mapped.Error();
-            return outcome;
-        }
-        const std::string_view mappedBytes(mapped.Data(), static_cast<size_t>(mapped.Size()));
-        const std::string_view head = mappedBytes.substr(0, std::min<size_t>(mappedBytes.size(),
-                                                                            kEncodingProbeBytes));
-        const edit::EncodingState encoding = edit::DetectEncodingFromHead(head, kFallbackCodePage);
-        if (encoding.uniMode == edit::UniMode::Utf16LE ||
-            encoding.uniMode == edit::UniMode::Utf16BE) {
-            // UTF-16 必须先转成 UTF-8 才能交给 Scintilla，那就要整份复制，
-            // 大文件下等于把映射省下的内存又花回去。如实告知而不是硬撑。
-            outcome.status = OpenStatus::EncodingFailed;
-            outcome.message = L"大文件模式下暂不支持 UTF-16 编码，请先用其他工具转换。";
-            return outcome;
-        }
-        document->buffer.encoding = encoding;
-        document->buffer.eol = edit::DetectEol(head);
-        document->buffer.detectedEol = document->buffer.eol;
-        outcome.message = (tier == edit::FileTier::Huge)
-                              ? L"文件较大，已以只读方式打开。"
-                              : L"文件较大，已进入大文件模式（已关闭自动换行等显示项）。";
-    }
 
     document->view = std::make_unique<edit::EditView>();
     if (!document->view->Create(viewParent_, NextControlId())) {
@@ -192,48 +127,184 @@ OpenOutcome DocumentManager::Open(const std::wstring& path) {
     }
     document->view->ApplyLightTheme();
     document->view->ConfigureColumnEditing();
-    document->view->SetCodePage(document->buffer.encoding.uniMode == edit::UniMode::Ansi
-                                    ? document->buffer.encoding.codePage
-                                    : edit::kCodePageUtf8);
-    document->view->SetEolMode(document->buffer.eol);
-
-    if (tier == edit::FileTier::Normal) {
-        document->view->SetText(loadedBytes);
-        document->view->ApplyLanguageForPath(target);
-        document->view->ClearUndoBuffer();
-    } else {
-        // BOM 不能交给 Scintilla：它按代码页解释缓冲区，BOM 会变成一个可见字符
-        const std::size_t skip = document->buffer.encoding.hasBom ? 3u : 0u;
-        const char* data = mapped.Data() + skip;
-        const std::uint64_t dataSize = mapped.Size() - skip;
-        if (!document->view->LoadFromChunkedData(data, dataSize, true)) {
-            outcome.status = OpenStatus::InternalError;
-            outcome.message = L"装载大文件失败。";
-            return outcome;
-        }
-        if (tier == edit::FileTier::Huge) {
-            document->view->ApplyHugeFileMode();
-            document->buffer.isReadOnly = true;
-        } else {
-            document->view->ApplyLargeFileDisplayMode();
-            document->view->ApplyLanguageForPath(target);
-        }
-        // 大文件不保留撤销历史会是更大的损失，所以这里只在超大文件下关闭
-        document->view->MarkSavePoint();
-    }
     document->view->SetVisible(false);
+
+    std::wstring loadError;
+    OpenStatus loadStatus = OpenStatus::InternalError;
+    if (!LoadInto(*document, loadError, loadStatus)) {
+        outcome.message = loadError;
+        outcome.status = loadStatus;
+        return outcome;
+    }
+    outcome.message = document->buffer.loadWarning;
+
+    document->view->ClearUndoBuffer();
+    document->view->MarkSavePoint();
 
     edit::Document* added = AddDocument(std::move(document));
     Activate(added);
     std::wstring log = L"已打开: " + target;
-    if (tier != edit::FileTier::Normal) {
-        log += L"（" + std::wstring(edit::TierName(tier)) + L"，" +
-               std::to_wstring(fileSize / 1024) + L" KB）";
+    if (added->buffer.tier != edit::FileTier::Normal) {
+        log += L"（" + std::wstring(edit::TierName(added->buffer.tier)) + L"，" +
+               std::to_wstring(added->buffer.lastKnown.size / 1024) + L" KB）";
     }
     infra::LogInfo(L"file", log);
     outcome.document = added;
     outcome.status = OpenStatus::Ok;
     return outcome;
+}
+
+bool DocumentManager::LoadInto(edit::Document& document, std::wstring& error,
+                               OpenStatus& status) {
+    const std::wstring& target = document.buffer.filePath;
+    if (document.view == nullptr) {
+        error = L"文档视图无效。";
+        return false;
+    }
+    document.buffer.loadWarning.clear();
+
+    // 先看体积定档：这决定了走"全量读入"还是"映射 + 分块装载"
+    std::uint64_t fileSize = 0;
+    std::uint64_t lastWrite = 0;
+    if (!io::QueryFileIdentity(target, fileSize, lastWrite)) {
+        error = L"文件不存在或无法访问。";
+        status = OpenStatus::NotFound;
+        return false;
+    }
+    if (!tierPolicy_.Acceptable(fileSize)) {
+        error = L"文件超过 " + std::to_wstring(tierPolicy_.refuseAboveBytes >> 20) +
+                L" MB，当前版本暂不支持打开。";
+        status = OpenStatus::TooLarge;
+        return false;
+    }
+    const edit::FileTier tier = tierPolicy_.Classify(fileSize);
+    document.buffer.tier = tier;
+    document.buffer.lastKnown.size = fileSize;
+    document.buffer.lastKnown.lastWriteMs = lastWrite;
+
+    // 大文件路径用的是一份临时映射，装载完成后即可释放——
+    // ILoader 会把数据拷进 Scintilla 的文档模型里
+    io::MappedFile mapped;
+    std::string loadedBytes;   // 仅常规路径使用
+
+    if (tier == edit::FileTier::Normal) {
+        const io::ReadResult read = io::ReadWholeFile(target, tierPolicy_.normalMaxBytes);
+        if (!read.ok) {
+            error = read.message;
+            return false;
+        }
+        const edit::LoadResult loaded = edit::DetectAndPrepare(read.bytes, kFallbackCodePage);
+        document.buffer.encoding = loaded.encoding;
+        document.buffer.eol = loaded.eol;
+        document.buffer.detectedEol = loaded.eol;
+        document.buffer.loadWarning = loaded.warning;
+        loadedBytes = loaded.editorBytes;
+    } else {
+        if (!mapped.Open(target)) {
+            error = mapped.Error();
+            status = (::GetLastError() == ERROR_ACCESS_DENIED) ? OpenStatus::AccessDenied
+                                                               : OpenStatus::InternalError;
+            return false;
+        }
+        const std::string_view mappedBytes(mapped.Data(), static_cast<size_t>(mapped.Size()));
+        const std::string_view head = mappedBytes.substr(
+            0, std::min<size_t>(mappedBytes.size(), kEncodingProbeBytes));
+        const edit::EncodingState encoding =
+            edit::DetectEncodingFromHead(head, kFallbackCodePage);
+        if (encoding.uniMode == edit::UniMode::Utf16LE ||
+            encoding.uniMode == edit::UniMode::Utf16BE) {
+            // UTF-16 必须先转成 UTF-8 才能交给 Scintilla，那就要整份复制，
+            // 大文件下等于把映射省下的内存又花回去。如实告知而不是硬撑。
+            error = L"大文件模式下暂不支持 UTF-16 编码，请先用其他工具转换。";
+            status = OpenStatus::EncodingFailed;
+            return false;
+        }
+        document.buffer.encoding = encoding;
+        document.buffer.eol = edit::DetectEol(head);
+        document.buffer.detectedEol = document.buffer.eol;
+        document.buffer.loadWarning = (tier == edit::FileTier::Huge)
+                                          ? L"文件较大，已以只读方式打开。"
+                                          : L"文件较大，已进入大文件模式。";
+    }
+
+    edit::EditView& view = *document.view;
+    view.SetReadOnly(false);
+    view.SetUndoCollection(true);
+    view.SetCodePage(document.buffer.encoding.uniMode == edit::UniMode::Ansi
+                         ? document.buffer.encoding.codePage
+                         : edit::kCodePageUtf8);
+    view.SetEolMode(document.buffer.eol);
+
+    if (tier == edit::FileTier::Normal) {
+        view.SetText(loadedBytes);
+        view.ApplyLanguageForPath(target);
+    } else {
+        // BOM 不能交给 Scintilla：它按代码页解释缓冲区，BOM 会变成一个可见字符
+        const std::size_t skip = document.buffer.encoding.hasBom ? 3u : 0u;
+        const char* data = mapped.Data() + skip;
+        const std::uint64_t dataSize = mapped.Size() - skip;
+        if (!view.LoadFromChunkedData(data, dataSize, true)) {
+            error = L"装载大文件失败。";
+            return false;
+        }
+        if (tier == edit::FileTier::Huge) {
+            view.ApplyHugeFileMode();
+            document.buffer.isReadOnly = true;
+        } else {
+            view.ApplyLargeFileDisplayMode();
+            view.ApplyLanguageForPath(target);
+        }
+    }
+    return true;
+}
+
+bool DocumentManager::HasExternallyChanged(const edit::Document& document) const {
+    if (!document.buffer.HasPath()) {
+        return false;
+    }
+    std::uint64_t size = 0;
+    std::uint64_t lastWrite = 0;
+    if (!io::QueryFileIdentity(document.buffer.filePath, size, lastWrite)) {
+        // 文件已经查不到了（被删或被改名）：只要之前记录过身份就算"变了"
+        return document.buffer.lastKnown.Valid();
+    }
+    if (!document.buffer.lastKnown.Valid()) {
+        return false;
+    }
+    return size != document.buffer.lastKnown.size ||
+           lastWrite != document.buffer.lastKnown.lastWriteMs;
+}
+
+void DocumentManager::RefreshIdentity(edit::Document& document) {
+    if (!document.buffer.HasPath()) {
+        return;
+    }
+    io::QueryFileIdentity(document.buffer.filePath, document.buffer.lastKnown.size,
+                          document.buffer.lastKnown.lastWriteMs);
+}
+
+bool DocumentManager::Reload(edit::Document& document, std::wstring& error) {
+    if (!document.buffer.HasPath() || document.view == nullptr) {
+        error = L"文档没有对应的磁盘文件，无法重新加载。";
+        return false;
+    }
+    // 记下视图状态，重新装载之后原样恢复——用户的注意力位置不该因为
+    // 一次后台改动而丢掉
+    const int32_t caret = document.view->CaretPosition();
+    const int32_t firstLine = document.view->FirstVisibleLine();
+    const int32_t zoom = document.view->ZoomLevel();
+
+    OpenStatus status = OpenStatus::InternalError;
+    if (!LoadInto(document, error, status)) {
+        return false;
+    }
+    document.view->ClearUndoBuffer();
+    document.view->MarkSavePoint();
+    document.view->SetZoom(zoom);
+    document.view->SetCaretPosition(caret);
+    document.view->SetFirstVisibleLine(firstLine);
+    document.buffer.isModified = false;
+    return true;
 }
 
 SaveOutcome DocumentManager::Save(edit::Document& document) {
@@ -273,6 +344,7 @@ SaveOutcome DocumentManager::SaveAs(edit::Document& document, const std::wstring
     document.buffer.isUntitled = false;
     document.buffer.isModified = false;
     document.view->MarkSavePoint();
+    RefreshIdentity(document);
     if (pathChanged) {
         // 扩展名可能变了，重新按新路径识别语言
         document.view->ApplyLanguageForPath(target);
