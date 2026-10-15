@@ -223,13 +223,14 @@ void PreferencesDialog::BuildAdvancedPage() {
     const int page = 3;
     Row(page, nullptr, Check(kPrefBackupEnabled, L"启用崩溃恢复快照"));
     Row(page, Label(L"快照间隔（秒，5~3600）："), Edit(kPrefBackupInterval, L"30"), Scale(90));
-    Row(page, Label(L"保留快照数量（1~100）："), Edit(kPrefBackupKeep, L"10"), Scale(90));
+    Row(page, Label(L"保留崩溃快照数（1~100）："), Edit(kPrefBackupKeep, L"10"), Scale(90));
     Row(page, Label(L"降级阈值（MB，超过改用映射装载）："), Edit(kPrefTier1MB, L"8"), Scale(90));
     Row(page, Label(L"只读阈值（MB，超过只读打开）："), Edit(kPrefTier2MB, L"64"), Scale(90));
     Row(page, Label(L"拒绝阈值（MB，超过不再打开）："), Edit(kPrefRefuseMB, L"512"), Scale(90));
     noteLabel_ = Label(
-        L"说明：三个阈值必须严格递增，保存后立即生效。崩溃快照的定时落盘尚未接入，"
-        L"此处设置会被保存，并在后续版本生效。");
+        L"说明：三个阈值必须严格递增，保存后立即生效。未保存的内容按上面的间隔定时写入"
+        L"配置目录的 backup 下；超过降级阈值的文档不做定时快照（仍会在崩溃时抢救），"
+        L"异常退出时另会生成一份崩溃报告与内存转储。");
     Row(page, noteLabel_, nullptr);
 }
 

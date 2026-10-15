@@ -285,6 +285,59 @@ EncodingState DetectEncodingFromHead(std::string_view head, uint32_t fallbackCod
     return state;
 }
 
+const char* UniModeToken(UniMode mode) {
+    switch (mode) {
+        case UniMode::Ansi:    return "Ansi";
+        case UniMode::Utf8Bom: return "Utf8Bom";
+        case UniMode::Utf16LE: return "Utf16LE";
+        case UniMode::Utf16BE: return "Utf16BE";
+        case UniMode::Utf8:
+        default:               return "Utf8";
+    }
+}
+
+const char* EolToken(EolMode eol) {
+    switch (eol) {
+        case EolMode::Lf:    return "Lf";
+        case EolMode::Cr:    return "Cr";
+        case EolMode::Mixed: return "Mixed";
+        case EolMode::Crlf:
+        default:             return "Crlf";
+    }
+}
+
+bool ParseUniModeToken(std::string_view token, UniMode& out) {
+    if (token == "Utf8") {
+        out = UniMode::Utf8;
+    } else if (token == "Utf8Bom") {
+        out = UniMode::Utf8Bom;
+    } else if (token == "Ansi") {
+        out = UniMode::Ansi;
+    } else if (token == "Utf16LE") {
+        out = UniMode::Utf16LE;
+    } else if (token == "Utf16BE") {
+        out = UniMode::Utf16BE;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+bool ParseEolToken(std::string_view token, EolMode& out) {
+    if (token == "Crlf") {
+        out = EolMode::Crlf;
+    } else if (token == "Lf") {
+        out = EolMode::Lf;
+    } else if (token == "Cr") {
+        out = EolMode::Cr;
+    } else if (token == "Mixed") {
+        out = EolMode::Mixed;
+    } else {
+        return false;
+    }
+    return true;
+}
+
 std::string EncodeForSave(std::string_view editorBytes, const EncodingState& state) {
     switch (state.uniMode) {
         case UniMode::Ansi:

@@ -6,6 +6,7 @@
 """
 import ctypes
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -635,6 +636,229 @@ def test_external_change(root):
             proc.kill()
 
 
+def test_snapshots(root):
+    """崩溃快照：定时快照扛硬杀，崩溃抢救扛异常退出，两条都要能恢复回来。
+
+    两段都用同一套手法制造"未保存的改动"：建立矩形选区 → Alt+C → 列块插入。
+    跨进程没法用 SCI_SETTEXT 塞文本（指针参数不封送），而这条路径是纯命令驱动的，
+    顺带也验证了列编辑与快照两条链路能配合。
+    """
+    work = os.path.join(root, "build", "snapshot_test")
+    os.makedirs(work, exist_ok=True)
+    path = os.path.join(work, "doc.txt")
+
+    cfg = os.path.join(root, "build", "bin", "config")
+    backup = os.path.join(cfg, "backup")
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    recovery_title = "恢复未保存的内容"
+    crash_title = "notepadcc 崩溃"
+
+    def reset(content, interval=5):
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+        for name in ("config.xml", "session.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+        # 定时快照默认 30 秒，测试等不起，先用配置文件把它调到 5 秒
+        with open(os.path.join(cfg, "config.xml"), "w", encoding="utf-8") as handle:
+            handle.write('<?xml version="1.0" encoding="UTF-8"?>\n'
+                         '<NotepadccConfig schemaVersion="1">\n'
+                         f'  <backup enabled="yes" intervalSeconds="{interval}" '
+                         'keepSnapshots="3"/>\n'
+                         '</NotepadccConfig>\n')
+        if os.path.isdir(backup):
+            for name in os.listdir(backup):
+                shutil.rmtree(os.path.join(backup, name), ignore_errors=True)
+
+    def snapshot_files():
+        found = []
+        if not os.path.isdir(backup):
+            return found
+        for name in os.listdir(backup):
+            full = os.path.join(backup, name)
+            if os.path.isdir(full):
+                found.extend(os.path.join(full, f) for f in os.listdir(full)
+                             if f.endswith(".snap"))
+        return found
+
+    def edit_via_column_insert(window, text):
+        """用"矩形选区 + Alt+C + 列块插入"造出未保存的改动。"""
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            return None
+        user32.SendMessageW(scinti, SCI_SETSELECTIONMODE, SC_SEL_RECTANGLE, 0)
+        user32.SendMessageW(scinti, SCI_SETRECTANGULARSELECTIONANCHOR, 1, 0)
+        user32.SendMessageW(scinti, SCI_SETRECTANGULARSELECTIONCARET, 11, 0)
+        time.sleep(0.3)
+        user32.PostMessageW(window, WM_COMMAND, CMD_COLUMN_EDIT, 0)
+        time.sleep(1.5)
+        dialog = user32.FindWindowW("notepadccColumnDialog", None)
+        if not dialog:
+            return None
+        set_text(dialog, COLUMN_TEMPLATE_EDIT, text)
+        user32.PostMessageW(dialog, WM_COMMAND, COLUMN_INSERT_BUTTON, 0)
+        time.sleep(1.0)
+        return scinti
+
+    # ---- 1) 定时快照：硬杀进程后仍能恢复 ----
+    reset("aaa\nbbb\nccc")
+    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - doc.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口（定时快照）")
+            return False
+        if user32.FindWindowW("#32770", recovery_title):
+            print("  FAIL: 没有任何快照时不该弹恢复提示")
+            return False
+        scinti = edit_via_column_insert(window, "T")
+        if scinti is None:
+            print("  FAIL: 没能通过列块插入造出改动")
+            return False
+        expected = "aTaa\nbTbb\ncTcc"
+        if scinti_text(scinti) != expected:
+            print(f"  FAIL: 改动后的内容不对 {scinti_text(scinti)!r}")
+            return False
+
+        deadline = time.time() + 25
+        while time.time() < deadline and not snapshot_files():
+            time.sleep(0.5)
+        written = snapshot_files()
+        if not written:
+            print("  FAIL: 等了 25 秒也没写出定时快照")
+            return False
+    finally:
+        if proc.poll() is None:
+            proc.kill()          # 硬杀：不给任何收尾机会，模拟任务管理器结束进程
+        time.sleep(1.0)
+
+    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - doc.txt")
+    try:
+        if not window:
+            print("  FAIL: 重启后找不到主窗口")
+            return False
+        if not dismiss_dialog(recovery_title, IDYES, timeout=15.0):
+            print("  FAIL: 硬杀之后没有弹出恢复提示")
+            return False
+        time.sleep(1.5)
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 恢复后找不到编辑控件")
+            return False
+        if scinti_text(scinti) != expected:
+            print(f"  FAIL: 恢复出来的内容不对 {scinti_text(scinti)!r}，期望 {expected!r}")
+            return False
+        if snapshot_files():
+            print("  FAIL: 恢复之后快照应当已被消费掉")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    # ---- 2) 崩溃抢救：异常退出时把未保存内容写进 crash 目录 ----
+    reset("aaa\nbbb\nccc")
+    crash_dir = None
+    proc = subprocess.Popen([exe, "-portable", "--crash-test", path], cwd=root)
+    window = wait_for_main_window("notepadcc - doc.txt", timeout=40.0)
+    try:
+        if not window:
+            print("  FAIL: 自检开关下没能启动出窗口")
+            return False
+        if edit_via_column_insert(window, "C") is None:
+            print("  FAIL: 崩溃前没能造出改动")
+            return False
+        if not dismiss_dialog(crash_title, IDOK, timeout=30.0):
+            print("  FAIL: 崩溃处理器没有弹出提示（说明异常过滤器没接上）")
+            return False
+        deadline = time.time() + 15
+        while time.time() < deadline and proc.poll() is None:
+            time.sleep(0.3)
+        if proc.poll() is None:
+            print("  FAIL: 崩溃之后进程没有退出")
+            return False
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+    if not os.path.isdir(backup):
+        print("  FAIL: 没有生成 backup 目录")
+        return False
+    dirs = [d for d in os.listdir(backup) if d.startswith("crash_")]
+    if len(dirs) != 1:
+        print(f"  FAIL: 崩溃目录应恰好 1 个，实际 {dirs}")
+        return False
+    crash_dir = os.path.join(backup, dirs[0])
+    report_path = os.path.join(crash_dir, "crash.txt")
+    if not os.path.exists(report_path):
+        print("  FAIL: 没有写出 crash.txt")
+        return False
+    with open(report_path, "r", encoding="utf-8", errors="replace") as handle:
+        report = handle.read()
+    if "异常代码: 0xC0000005" not in report:
+        print(f"  FAIL: crash.txt 里没有访问违例记录\n{report[:400]}")
+        return False
+    if "抢救成功 1 份" not in report:
+        print(f"  FAIL: crash.txt 显示没有抢救到内容\n{report[:600]}")
+        return False
+
+    dumps = [f for f in os.listdir(crash_dir) if f.endswith(".dmp")]
+    if len(dumps) != 1:
+        print(f"  FAIL: 应恰好 1 个 minidump，实际 {dumps}")
+        return False
+    with open(os.path.join(crash_dir, dumps[0]), "rb") as handle:
+        magic = handle.read(4)
+    if magic != b"MDMP":
+        print(f"  FAIL: minidump 文件头不是 MDMP，实际 {magic!r}")
+        return False
+
+    rescued = [f for f in os.listdir(crash_dir) if f.endswith(".snap")]
+    if len(rescued) != 1:
+        print(f"  FAIL: 应恰好 1 份抢救出来的内容，实际 {rescued}")
+        return False
+    with open(os.path.join(crash_dir, rescued[0]), "r", encoding="utf-8",
+              errors="replace") as handle:
+        rescued_text = handle.read()
+    if "aCaa" not in rescued_text:
+        print(f"  FAIL: 抢救出来的内容不对\n{rescued_text[:300]}")
+        return False
+
+    # ---- 3) 崩溃之后重启，应当提示并恢复 ----
+    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - doc.txt")
+    try:
+        if not window:
+            print("  FAIL: 崩溃后重启找不到主窗口")
+            return False
+        if not dismiss_dialog(recovery_title, IDYES, timeout=15.0):
+            print("  FAIL: 崩溃后重启没有提示恢复")
+            return False
+        time.sleep(1.5)
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 恢复后找不到编辑控件")
+            return False
+        if scinti_text(scinti) != "aCaa\nbCbb\ncCcc":
+            print(f"  FAIL: 崩溃恢复的内容不对 {scinti_text(scinti)!r}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        if os.path.exists(os.path.join(cfg, "config.xml")):
+            os.remove(os.path.join(cfg, "config.xml"))
+        shutil.rmtree(backup, ignore_errors=True)
+
+    print("  崩溃快照：定时快照扛住硬杀、崩溃抢救拿到内容与 minidump，两条都恢复了")
+    return True
+
+
 def test_shortcuts(root):
     """快捷键管理：改绑 → 冲突确认 → 落盘 → 真的按键触发命令。
 
@@ -1128,12 +1352,14 @@ def run():
         failed = True
     if not test_shortcuts(root):
         failed = True
+    if not test_snapshots(root):
+        failed = True
 
     if failed:
         print("FAIL: 界面回归未通过")
         return 1
     print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + "
-          "大文件 + 外部改动 + 首选项 + 快捷键）")
+          "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照）")
     return 0
 
 

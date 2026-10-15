@@ -9,8 +9,10 @@
 #include "core/DocumentManager.h"
 #include "core/ConfigCenter.h"
 #include "core/SessionManager.h"
+#include "core/SnapshotStore.h"
 #include "edit/Document.h"
 #include "edit/EditView.h"
+#include "infra/CrashGuard.h"
 #include "shell/StatusBar.h"
 #include "shell/TabBar.h"
 #include "shell/FindBar.h"
@@ -35,6 +37,9 @@ public:
 
     HWND   Handle() const noexcept { return hwnd_; }
     HACCEL Accelerators() const noexcept { return accel_; }
+
+    // 自检开关（--crash-test）：等窗口就绪后故意崩一次，用来验证崩溃处理这条路径
+    void SetCrashTest(bool enabled) noexcept { crashTest_ = enabled; }
 
 private:
     static LRESULT CALLBACK WndProcThunk(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -73,6 +78,14 @@ private:
     void CommandColumnEdit();
     void CommandToggleOverwrite();
     void ApplyConfigToRuntime();
+    void ScheduleAutosave();
+    void WriteSnapshots();
+    void RemoveSnapshotFor(core::BufferId id);
+    void CheckStartupRecovery();
+    void RestoreSnapshot(const core::SnapshotInfo& info);
+    void RefreshRescueSlots();
+    static int RescueLengthOf(void* context, int index);
+    static int RescueCopyInto(void* context, int index, char* buffer, int capacity);
     void ApplyEditConfigToAllViews() const;
     void ApplyEditConfigToView(edit::EditView& view) const;
     void HandleExternalChange(const std::wstring& path, io::FileChangeKind kind);
@@ -111,8 +124,20 @@ private:
     HACCEL                     accel_ = nullptr;
     core::CommandRegistry      registry_;
     core::ConfigCenter         config_;
+    core::SnapshotStore        snapshots_;
     // 启动时记录的默认快捷键表，"恢复默认"要用（见 ShortcutDialog）
     std::vector<core::ShortcutBinding> defaultShortcuts_;
+    // 崩溃抢救的文档槽位。数组必须活到进程结束：崩溃处理器只持有指针。
+    std::unique_ptr<infra::crashguard::RescueDocument[]> rescueDocs_;
+    // 每个文档上一次快照的内容指纹，用来避免"内容没变也反复写盘"
+    struct SnapshotState {
+        core::BufferId id = core::kInvalidId;
+        std::uint64_t  hash = 0;
+        bool           tooLargeWarned = false;
+    };
+    std::vector<SnapshotState> snapshotStates_;
+    bool recoveryPending_ = false;
+    bool crashTest_ = false;
     std::unique_ptr<core::DocumentManager> documents_;
     TabBar                     tabBar_;
     StatusBar                  statusBar_;

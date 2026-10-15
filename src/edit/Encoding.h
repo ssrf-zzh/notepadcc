@@ -54,4 +54,14 @@ const char* EolSequence(EolMode eol);
 std::wstring EolName(EolMode eol);
 std::wstring EncodingName(const EncodingState& state);
 
+// ---- 持久化用的稳定标识 ----
+// config.xml 与快照文件都写这几个词，别再各写一份映射：抄成几份之后，
+// 早晚会出现"某一份把 Utf8 与 Utf8Bom 的顺序记反了"这种安静的错误。
+// 改动这些字符串等于改文件格式（老配置、老快照会读不懂），不要随手改。
+const char* UniModeToken(UniMode mode);
+const char* EolToken(EolMode eol);
+// 不认识时返回 false，且不改动 out（调用方据此记警告并回退默认值）
+bool ParseUniModeToken(std::string_view token, UniMode& out);
+bool ParseEolToken(std::string_view token, EolMode& out);
+
 }  // namespace npcc::edit

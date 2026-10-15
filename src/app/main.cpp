@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "edit/EditView.h"
+#include "infra/CrashGuard.h"
 #include "infra/Log.h"
 #include "infra/Paths.h"
 #include "shell/MainWindow.h"
@@ -15,6 +16,7 @@ namespace {
 
 struct StartupOptions {
     bool                      portable = false;
+    bool                      crashTest = false;   // 自检开关：故意崩一次，验证崩溃处理
     std::vector<std::wstring> filesToOpen;
 };
 
@@ -29,6 +31,10 @@ StartupOptions ParseCommandLine() {
         const std::wstring argument = argv[i];
         if (argument == L"-portable" || argument == L"--portable") {
             options.portable = true;
+            continue;
+        }
+        if (argument == L"--crash-test") {
+            options.crashTest = true;
             continue;
         }
         if (!argument.empty() && argument[0] == L'-') {
@@ -49,6 +55,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
 
     npcc::infra::InitializePaths(options.portable);
     npcc::infra::InitLogging(npcc::infra::LogDir());
+    // 越早安装越好：窗口还没建起来时崩了，同样要留下崩溃报告与转储
+    npcc::infra::crashguard::Install(npcc::infra::BackupDir().wstring().c_str());
     npcc::infra::LogInfo(L"app", L"notepadcc 启动");
 
     ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -68,6 +76,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     }
 
     npcc::shell::MainWindow window;
+    window.SetCrashTest(options.crashTest);
     if (!window.RegisterWindowClass(instance) || !window.Create(instance, options.filesToOpen)) {
         ::MessageBoxW(nullptr, L"创建主窗口失败。", L"notepadcc", MB_ICONERROR);
         return 1;

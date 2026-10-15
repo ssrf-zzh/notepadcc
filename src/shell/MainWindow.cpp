@@ -28,6 +28,10 @@ namespace npcc::shell {
 namespace {
 
 // 命令 ID：高 4 位类别 + 低 12 位序号（见 core/Ids.h 的 MakeCmdId）
+// 定时器 ID
+constexpr UINT_PTR kTimerAutosave = 1;
+constexpr UINT_PTR kTimerCrashTest = 2;
+
 enum : npcc::core::CmdId {
     kCmdFileNew     = npcc::core::MakeCmdId(1, 1),
     kCmdFileOpen    = npcc::core::MakeCmdId(1, 2),
@@ -215,6 +219,28 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             if (!RestoreSession()) {
                 EnsureAtLeastOneDocument();
             }
+
+            // 崩溃抢救槽位：数组在这里一次性分配好，之后只改内容，不再动指针
+            rescueDocs_ = std::make_unique<infra::crashguard::RescueDocument[]>(
+                infra::crashguard::kMaxRescueDocuments);
+            infra::crashguard::RescueProvider provider;
+            provider.lengthOf = &MainWindow::RescueLengthOf;
+            provider.copyInto = &MainWindow::RescueCopyInto;
+            provider.context = this;
+            infra::crashguard::SetDocuments(rescueDocs_.get(),
+                                            infra::crashguard::kMaxRescueDocuments, provider);
+            RefreshRescueSlots();
+
+            ScheduleAutosave();
+            if (crashTest_) {
+                // 自检开关：给脚本留几秒钟制造"未保存的改动"，然后再崩
+                ::SetTimer(hwnd_, kTimerCrashTest, 6000, nullptr);
+            }
+            // 恢复提示必须放在窗口显示之后：WM_CREATE 里弹模态框会把启动卡住，
+            // 用户看到的先是对话框、后是主窗口，体验很怪。
+            // 答复之前不许写快照，否则会把上一轮没来得及恢复的内容直接覆盖掉。
+            recoveryPending_ = true;
+            ::PostMessageW(hwnd_, core::kMsgStartupRecovery, 0, 0);
             return 0;
         }
         case WM_SIZE:
@@ -306,6 +332,20 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             HandleExternalChange(change->first, change->second);
             return 0;
         }
+        case core::kMsgStartupRecovery:
+            CheckStartupRecovery();
+            return 0;
+        case WM_TIMER:
+            if (wParam == kTimerAutosave) {
+                WriteSnapshots();
+                return 0;
+            }
+            if (wParam == kTimerCrashTest) {
+                ::KillTimer(hwnd_, kTimerCrashTest);
+                infra::crashguard::RaiseTestCrash();   // 自检开关：这里之后不会再返回
+                return 0;
+            }
+            break;
         case WM_DROPFILES: {
             const HDROP drop = reinterpret_cast<HDROP>(wParam);
             const UINT count = ::DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
@@ -335,6 +375,9 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             // 会话要在关闭文档之前取快照——CloseAllDocuments 之后就没得记了
             const core::SessionSnapshot snapshot = BuildSessionSnapshot();
             if (CloseAllDocuments()) {
+                // 正常退出：未保存的内容已经逐一问过了，快照不该留到下次启动再问一遍
+                ::KillTimer(hwnd_, kTimerAutosave);
+                snapshots_.RemoveAllAutosave();
                 config_.Flush();   // 退出前把配置落盘
                 std::wstring error;
                 if (!core::SessionManager::Save(snapshot, &error)) {
@@ -687,6 +730,286 @@ void MainWindow::ApplyConfigToRuntime() {
     }
 }
 
+// ---------------------------------------------------------------- 未保存内容的快照
+//
+// 两条防线，各管一半：
+//   * 定时快照：对付"进程被强杀 / 断电 / 蓝屏"——这类情况下没有任何代码有机会跑。
+//   * 崩溃抢救：进程还活着但要走异常退出流程时，把所有未保存内容抢救到 crash 目录。
+// 只有两条都在，才不会出现"改了半小时，一次强杀全没了"。
+
+namespace {
+
+std::uint64_t HashOf(std::string_view bytes) {
+    std::uint64_t hash = 1469598103934665603ull;   // FNV-1a 64
+    for (const char ch : bytes) {
+        hash ^= static_cast<unsigned char>(ch);
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+// 定长缓冲的宽字符拷贝：超出就截断，绝不越界。
+// 不用 wcsncpy_s + _TRUNCATE，是因为各家 CRT 对它的支持不一致。
+void CopyWideInto(wchar_t* destination, std::size_t capacity, const std::wstring& source) {
+    if (destination == nullptr || capacity == 0) {
+        return;
+    }
+    const std::size_t count = std::min(source.size(), capacity - 1);
+    std::memcpy(destination, source.c_str(), count * sizeof(wchar_t));
+    destination[count] = L'\0';
+}
+
+// 窄字符版本（编码 / 行尾标识，纯 ASCII）
+void CopyInto(char* destination, std::size_t capacity, const char* source) {
+    if (destination == nullptr || capacity == 0) {
+        return;
+    }
+    std::size_t count = 0;
+    while (source != nullptr && source[count] != '\0' && count + 1 < capacity) {
+        destination[count] = source[count];
+        ++count;
+    }
+    destination[count] = '\0';
+}
+
+}  // namespace
+
+void MainWindow::ScheduleAutosave() {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+    ::KillTimer(hwnd_, kTimerAutosave);
+    if (!config_.Backup().enabled) {
+        // 关掉定时快照就顺手清干净：否则下次启动还会拿旧快照来问，
+        // 那与"我已经关掉了这个功能"的预期相反。
+        snapshots_.RemoveAllAutosave();
+        snapshotStates_.clear();
+        return;
+    }
+    const std::uint32_t seconds = std::max<std::uint32_t>(5, config_.Backup().intervalSeconds);
+    ::SetTimer(hwnd_, kTimerAutosave, seconds * 1000, nullptr);
+}
+
+void MainWindow::RemoveSnapshotFor(core::BufferId id) {
+    core::SnapshotInfo info;
+    info.file = core::SnapshotStore::AutosaveDir() / (L"doc_" + std::to_wstring(id) + L".snap");
+    snapshots_.Remove(info);
+    snapshotStates_.erase(
+        std::remove_if(snapshotStates_.begin(), snapshotStates_.end(),
+                       [id](const SnapshotState& state) { return state.id == id; }),
+        snapshotStates_.end());
+}
+
+void MainWindow::WriteSnapshots() {
+    if (documents_ == nullptr || recoveryPending_) {
+        return;   // 恢复提示还没答复时不能写：会把上一轮的内容直接覆盖掉
+    }
+    const std::uint64_t sizeLimit = config_.LargeFile().tier1MaxBytes;
+    int written = 0;
+    for (edit::Document* document : documents_->All()) {
+        if (document == nullptr || document->view == nullptr || !document->buffer.isModified) {
+            continue;
+        }
+        const core::BufferId id = document->buffer.id;
+        auto state = std::find_if(snapshotStates_.begin(), snapshotStates_.end(),
+                                  [id](const SnapshotState& s) { return s.id == id; });
+        if (state == snapshotStates_.end()) {
+            snapshotStates_.push_back(SnapshotState{id, 0, false});
+            state = snapshotStates_.end() - 1;
+        }
+
+        const std::int32_t length = document->view->ByteLength();
+        if (static_cast<std::uint64_t>(length) > sizeLimit) {
+            // 大文件每 30 秒重写几十兆，代价与收益不成比例。这类文档靠退出前的保存
+            // 询问与崩溃抢救兜底，这句话只说一次，免得日志被刷屏。
+            if (!state->tooLargeWarned) {
+                state->tooLargeWarned = true;
+                infra::LogWarn(L"snapshot",
+                               L"文档超过降级阈值，已跳过定时快照（仍会随崩溃抢救）: " +
+                                   document->buffer.displayName);
+            }
+            continue;
+        }
+
+        const std::string content = document->view->GetAllText();
+        const std::uint64_t hash = HashOf(content);
+        if (hash == state->hash) {
+            continue;   // 自上次快照以来内容没变，不必再写一次盘
+        }
+
+        core::SnapshotInfo info;
+        info.file = core::SnapshotStore::AutosaveDir() /
+                    (L"doc_" + std::to_wstring(id) + L".snap");
+        info.originalPath = document->buffer.filePath;
+        info.displayName = document->buffer.displayName;
+        info.encoding = document->buffer.encoding;
+        info.eol = document->buffer.eol;
+        info.untitled = !document->buffer.HasPath();
+        info.savedAt = core::SnapshotStore::DisplayTime();
+        std::wstring error;
+        if (snapshots_.Write(info, content, &error)) {
+            state->hash = hash;
+            ++written;
+        } else {
+            infra::LogWarn(L"snapshot", L"写入快照失败: " + document->buffer.displayName +
+                                             L" / " + error);
+        }
+    }
+    if (written > 0) {
+        infra::LogInfo(L"snapshot", L"已为 " + std::to_wstring(written) + L" 个文档写下快照");
+    }
+}
+
+void MainWindow::RefreshRescueSlots() {
+    if (rescueDocs_ == nullptr || documents_ == nullptr) {
+        return;
+    }
+    const std::vector<edit::Document*> all = documents_->All();
+    for (int i = 0; i < infra::crashguard::kMaxRescueDocuments; ++i) {
+        infra::crashguard::RescueDocument& slot = rescueDocs_[i];
+        if (i >= static_cast<int>(all.size()) || all[i] == nullptr) {
+            slot.view = nullptr;
+            slot.index = -1;
+            slot.name[0] = L'\0';
+            slot.path[0] = L'\0';
+            slot.modified = false;
+            continue;
+        }
+        const edit::Document& document = *all[i];
+        slot.view = document.view.get();   // 只有提供者会解引用它
+        slot.index = i;
+        slot.modified = document.buffer.isModified;
+        slot.codePage = document.buffer.encoding.codePage;
+        CopyInto(slot.uniMode, sizeof(slot.uniMode), edit::UniModeToken(document.buffer.encoding.uniMode));
+        CopyInto(slot.eol, sizeof(slot.eol), edit::EolToken(document.buffer.eol));
+        slot.hasBom = document.buffer.encoding.hasBom;
+        CopyWideInto(slot.name, sizeof(slot.name) / sizeof(slot.name[0]),
+                     document.buffer.displayName);
+        CopyWideInto(slot.path, sizeof(slot.path) / sizeof(slot.path[0]),
+                     document.buffer.filePath);
+    }
+}
+
+int MainWindow::RescueLengthOf(void* context, int index) {
+    auto* self = static_cast<MainWindow*>(context);
+    if (self == nullptr || self->rescueDocs_ == nullptr || index < 0 ||
+        index >= infra::crashguard::kMaxRescueDocuments) {
+        return -1;
+    }
+    auto* view = static_cast<edit::EditView*>(self->rescueDocs_[index].view);
+    if (view == nullptr || !view->Valid()) {
+        return -1;
+    }
+    return static_cast<int>(view->ByteLength());
+}
+
+int MainWindow::RescueCopyInto(void* context, int index, char* buffer, int capacity) {
+    auto* self = static_cast<MainWindow*>(context);
+    if (self == nullptr || self->rescueDocs_ == nullptr || buffer == nullptr || index < 0 ||
+        index >= infra::crashguard::kMaxRescueDocuments) {
+        return -1;
+    }
+    auto* view = static_cast<edit::EditView*>(self->rescueDocs_[index].view);
+    if (view == nullptr || !view->Valid()) {
+        return -1;
+    }
+    return static_cast<int>(view->CopyTextTo(buffer, capacity));
+}
+
+void MainWindow::CheckStartupRecovery() {
+    const std::vector<core::SnapshotInfo> found = snapshots_.List();
+    if (found.empty()) {
+        recoveryPending_ = false;
+        snapshots_.PruneCrashDirs(config_.Backup().keepSnapshots);
+        return;
+    }
+
+    std::wstring question = L"上次运行没有正常结束，发现有 " + std::to_wstring(found.size()) +
+                            L" 份未保存的内容：\n\n";
+    const std::size_t shown = std::min<std::size_t>(found.size(), 10);
+    for (std::size_t i = 0; i < shown; ++i) {
+        const core::SnapshotInfo& info = found[i];
+        question += L"· " + (info.originalPath.empty() ? info.displayName : info.originalPath) +
+                    L"（" + info.savedAt + L"）\n";
+    }
+    if (found.size() > shown) {
+        question += L"…另有 " + std::to_wstring(found.size() - shown) + L" 份\n";
+    }
+    question += L"\n选择「是」把它们恢复成文档（内容是未保存状态，需要自己确认后保存）；"
+                L"选择「否」丢弃。";
+
+    const int answer = ::MessageBoxW(hwnd_, question.c_str(), L"恢复未保存的内容",
+                                     MB_ICONWARNING | MB_YESNO);
+    if (answer == IDYES) {
+        for (const core::SnapshotInfo& info : found) {
+            RestoreSnapshot(info);
+        }
+        infra::LogInfo(L"snapshot",
+                       L"已恢复 " + std::to_wstring(found.size()) + L" 份未保存内容");
+    } else {
+        for (const core::SnapshotInfo& info : found) {
+            snapshots_.Remove(info);
+        }
+        infra::LogInfo(L"snapshot",
+                       L"用户放弃了 " + std::to_wstring(found.size()) + L" 份未保存内容");
+    }
+    snapshots_.PruneCrashDirs(config_.Backup().keepSnapshots);
+    recoveryPending_ = false;
+
+    SyncTabBar();
+    if (documents_->Active() != nullptr) {
+        ActivateDocument(documents_->Active()->buffer.id);
+    }
+    UpdateStatus();
+}
+
+void MainWindow::RestoreSnapshot(const core::SnapshotInfo& info) {
+    std::string content;
+    std::wstring error;
+    if (!snapshots_.Read(info, content, &error)) {
+        infra::LogWarn(L"snapshot", L"恢复失败: " + error);
+        snapshots_.Remove(info);
+        return;
+    }
+
+    // 原文件还在就正常打开、再把快照内容盖上去（这样路径、语言着色、书签边距
+    // 全都与平时一致，只是内容是未保存的那一版）；文件没了就退回未命名文档。
+    edit::Document* document = nullptr;
+    const bool pathUsable =
+        !info.originalPath.empty() &&
+        ::GetFileAttributesW(info.originalPath.c_str()) != INVALID_FILE_ATTRIBUTES;
+    if (pathUsable) {
+        const core::OpenOutcome outcome = documents_->Open(info.originalPath);
+        if (outcome.status == core::OpenStatus::Ok ||
+            outcome.status == core::OpenStatus::AlreadyOpen) {
+            document = outcome.document;
+        }
+    }
+    if (document == nullptr) {
+        document = documents_->CreateUntitled();
+    }
+    if (document == nullptr || document->view == nullptr) {
+        snapshots_.Remove(info);
+        return;
+    }
+
+    document->buffer.encoding = info.encoding;
+    document->buffer.eol = info.eol;
+    document->view->SetCodePage(info.encoding.uniMode == edit::UniMode::Ansi
+                                    ? info.encoding.codePage
+                                    : edit::kCodePageUtf8);
+    document->view->SetEolMode(info.eol);
+    document->view->SetText(content);
+    if (!pathUsable && !info.displayName.empty()) {
+        document->buffer.displayName = info.displayName;
+    }
+    // 恢复出来的内容本来就没存过盘：不要 MarkSavePoint，让"已修改"标记留着，
+    // 否则用户可能以为已经保存好了，直接关窗口就把内容丢了。
+    document->buffer.isModified = true;
+    snapshots_.Remove(info);   // 摘掉这份快照本身（文件名不一定与当前文档 id 对应）
+    infra::LogInfo(L"snapshot", L"已恢复: " + document->buffer.displayName);
+}
+
 void MainWindow::ApplyEditConfigToAllViews() const {
     if (!documents_) {
         return;
@@ -759,6 +1082,8 @@ void MainWindow::SyncTabBar() {
     tabBar_.SetItems(std::move(items), active);
     // 标签集合变了，被监视的文件集合也跟着变
     SyncFileWatcher();
+    // 崩溃抢救的槽位也要跟着变，否则崩了会抢救错文档
+    RefreshRescueSlots();
 }
 
 void MainWindow::SyncFileWatcher() {
@@ -929,6 +1254,7 @@ bool MainWindow::SaveDocument(edit::Document& document) {
     }
     lastDirectory_ = core::DocumentManager::DirectoryOf(document.buffer.filePath);
     infra::LogInfo(L"file", L"已保存: " + document.buffer.filePath);
+    RemoveSnapshotFor(document.buffer.id);   // 内容已经落盘，快照没用了
     SyncTabBar();
     UpdateTitle();
     UpdateStatus();
@@ -992,6 +1318,7 @@ bool MainWindow::CloseDocument(core::BufferId id, bool force) {
     if (!force && !ConfirmSaveIfModified(*document)) {
         return false;
     }
+    RemoveSnapshotFor(id);   // 文档关掉了（无论存没存），它的快照都不该再被拿出来问
     return documents_->Close(document);
 }
 
@@ -1099,9 +1426,13 @@ void MainWindow::HandleEditorNotify(const NMHDR& header) {
     switch (note.event) {
         case edit::EditorEvent::SavePointLeft:
             document->buffer.isModified = true;
+            // 崩溃抢救只看"有没有未保存的改动"，所以这一刻必须同步刷新槽位：
+            // 否则刚打完字就崩，抢救会以为这个文档是干净的，直接跳过。
+            RefreshRescueSlots();
             break;
         case edit::EditorEvent::SavePointReached:
             document->buffer.isModified = false;
+            RefreshRescueSlots();
             break;
         case edit::EditorEvent::UpdateUI:
             if (document == documents_->Active()) {
@@ -1893,6 +2224,7 @@ void MainWindow::CommandPreferences() {
     LayoutChildren();
     UpdateStatus();
     ::InvalidateRect(hwnd_, nullptr, TRUE);
+    ScheduleAutosave();   // 快照开关与间隔都可能刚被改过
 }
 
 void MainWindow::CommandManageShortcuts() {

@@ -14,6 +14,7 @@
 #include "core/DocumentManager.h"
 #include "core/SessionManager.h"
 #include "core/ShortcutStore.h"
+#include "core/SnapshotStore.h"
 #include "edit/DocBuffer.h"
 #include "edit/ColumnEdit.h"
 #include "edit/ColumnText.h"
@@ -2179,6 +2180,161 @@ int main() {
             Check(!error.empty(), "失败时给出可读原因");
         }
         std::filesystem::remove(path, ec);
+    }
+
+    Section("崩溃快照（标识映射 / 文件格式 / 落盘与清理）");
+    {
+        using npcc::core::SnapshotInfo;
+        using npcc::core::SnapshotStore;
+
+        // ---- 编码与行尾标识：只有这一份映射，两个方向都必须对得上 ----
+        // 崩溃抢救曾经在这里踩过：处理器里按"数字"重新抄了一份映射，抄反了
+        // Utf8 与 Utf8Bom，恢复出来的文件会莫名多一个 BOM。所以先钉住这一层。
+        {
+            const npcc::edit::UniMode modes[] = {
+                npcc::edit::UniMode::Ansi,    npcc::edit::UniMode::Utf8,
+                npcc::edit::UniMode::Utf8Bom, npcc::edit::UniMode::Utf16LE,
+                npcc::edit::UniMode::Utf16BE};
+            bool allModes = true;
+            for (const npcc::edit::UniMode mode : modes) {
+                npcc::edit::UniMode back = npcc::edit::UniMode::Ansi;
+                if (!npcc::edit::ParseUniModeToken(npcc::edit::UniModeToken(mode), back) ||
+                    back != mode) {
+                    allModes = false;
+                }
+            }
+            Check(allModes, "UniMode 标识往返一致");
+            Check(std::string(npcc::edit::UniModeToken(npcc::edit::UniMode::Utf8)) !=
+                      std::string(npcc::edit::UniModeToken(npcc::edit::UniMode::Utf8Bom)),
+                  "Utf8 与 Utf8Bom 的标识必须不同");
+
+            const npcc::edit::EolMode eols[] = {
+                npcc::edit::EolMode::Crlf, npcc::edit::EolMode::Lf,
+                npcc::edit::EolMode::Cr,   npcc::edit::EolMode::Mixed};
+            bool allEols = true;
+            for (const npcc::edit::EolMode eol : eols) {
+                npcc::edit::EolMode back = npcc::edit::EolMode::Crlf;
+                if (!npcc::edit::ParseEolToken(npcc::edit::EolToken(eol), back) || back != eol) {
+                    allEols = false;
+                }
+            }
+            Check(allEols, "EolMode 标识往返一致");
+
+            npcc::edit::UniMode mode = npcc::edit::UniMode::Utf8;
+            Check(!npcc::edit::ParseUniModeToken("Utf7", mode), "认不出的编码标识返回 false");
+            npcc::edit::EolMode eol = npcc::edit::EolMode::Crlf;
+            Check(!npcc::edit::ParseEolToken("crlf", eol), "标识区分大小写（crlf 不是合法标识）");
+        }
+
+        // ---- 快照文件格式 ----
+        {
+            SnapshotInfo info;
+            info.originalPath = L"D:\\work\\a.cpp";
+            info.displayName = L"a.cpp";
+            info.encoding.uniMode = npcc::edit::UniMode::Utf8Bom;
+            info.encoding.codePage = 65001;
+            info.encoding.hasBom = true;
+            info.eol = npcc::edit::EolMode::Lf;
+            info.untitled = false;
+            info.savedAt = L"2026-10-15 12:00:00";
+            const std::string content("line1\r\nline2\n\0tail", 19);
+
+            const std::string raw = SnapshotStore::Build(info, content);
+            SnapshotInfo parsed;
+            std::string bytes;
+            Check(SnapshotStore::Parse(raw, parsed, bytes), "快照能解析回来");
+            CheckEqual(bytes, content, "内容逐字节一致（含 CRLF 与 NUL）");
+            CheckWide(parsed.originalPath, info.originalPath, "路径一致");
+            CheckWide(parsed.displayName, info.displayName, "展示名一致");
+            Check(parsed.encoding.uniMode == npcc::edit::UniMode::Utf8Bom, "编码一致");
+            Check(parsed.encoding.hasBom, "BOM 标记一致");
+            Check(parsed.eol == npcc::edit::EolMode::Lf, "行尾一致");
+            Check(!parsed.untitled, "未命名标记一致");
+            Check(parsed.length == content.size(), "长度一致");
+            CheckWide(parsed.savedAt, L"2026-10-15 12:00:00", "时间一致");
+
+            Check(!SnapshotStore::Parse(raw.substr(0, raw.size() - 3), parsed, bytes),
+                  "内容被截断要拒绝");
+            Check(!SnapshotStore::Parse(std::string("not-a-snapshot\r\n\r\nxx"), parsed, bytes),
+                  "头部标识不对要拒绝");
+            Check(!SnapshotStore::Parse(std::string("notepadcc-snapshot 1\r\nname=a\r\n"),
+                                        parsed, bytes),
+                  "头部没有以空行收尾要拒绝");
+
+            std::string unknownKey = raw;
+            unknownKey.replace(unknownKey.find("uniMode="), 8, "uniModf=");
+            Check(SnapshotStore::Parse(unknownKey, parsed, bytes),
+                  "不认识的键忽略即可（以后加字段要向前兼容）");
+
+            std::string badMode = raw;
+            badMode.replace(badMode.find("Utf8Bom"), 7, "Utf7Bom");
+            Check(!SnapshotStore::Parse(badMode, parsed, bytes), "认不出的编码标识要拒绝");
+        }
+
+        // ---- 落盘、扫描、清理 ----
+        {
+            npcc::infra::InitializePaths(true);
+            const SnapshotStore store;
+            std::error_code ec;
+            std::filesystem::remove_all(SnapshotStore::BackupRoot(), ec);
+
+            SnapshotInfo info;
+            info.file = SnapshotStore::AutosaveDir() / L"doc_1.snap";
+            info.displayName = L"未命名 1";
+            info.untitled = true;
+            info.savedAt = L"2026-10-15 10:00:00";
+            std::wstring error;
+            Check(store.Write(info, "hello", &error), "写快照成功");
+            Check(std::filesystem::exists(info.file), "快照文件已落盘");
+            Check(std::filesystem::exists(SnapshotStore::AutosaveDir()), "自动快照目录已建立");
+
+            const std::vector<SnapshotInfo> listed = store.List();
+            Check(listed.size() == 1, "扫描到 1 份快照");
+            Check(!listed.empty() && listed[0].displayName == L"未命名 1", "扫描出的展示名正确");
+            Check(!listed.empty() && listed[0].untitled, "扫描出的未命名标记正确");
+            Check(!listed.empty() && listed[0].length == 5, "扫描出的长度正确");
+
+            std::string bytes;
+            Check(store.Read(listed.front(), bytes, &error) && bytes == "hello",
+                  "按扫描结果读回内容一致");
+
+            // 崩溃目录里的快照也要被扫到，且新的排在前面
+            const std::filesystem::path crashDir = SnapshotStore::CrashDirFor(L"20261015-120000");
+            std::filesystem::create_directories(crashDir, ec);
+            SnapshotInfo crashInfo = info;
+            crashInfo.file = crashDir / L"0.snap";
+            crashInfo.savedAt = L"2026-10-15 12:00:00";
+            Check(store.Write(crashInfo, "from-crash", &error), "写崩溃抢救内容成功");
+            const std::vector<SnapshotInfo> both = store.List();
+            Check(both.size() == 2, "崩溃目录里的快照同样会被扫到");
+            Check(both.size() == 2 && both[0].savedAt > both[1].savedAt, "新的排在前面");
+
+            // 坏文件只跳过，不影响其余快照
+            WriteFileDirect(SnapshotStore::AutosaveDir() / L"doc_9.snap", "garbage");
+            Check(store.List().size() == 2, "解析不了的快照被跳过而不是让整次扫描失败");
+
+            Check(store.Remove(crashInfo), "删除指定快照");
+            Check(store.List().size() == 1, "删除后只剩 1 份");
+
+            for (int i = 0; i < 5; ++i) {
+                std::filesystem::create_directories(
+                    SnapshotStore::CrashDirFor(std::to_wstring(20261010 + i)), ec);
+            }
+            store.PruneCrashDirs(3);
+            int dirCount = 0;
+            for (const auto& entry :
+                 std::filesystem::directory_iterator(SnapshotStore::BackupRoot(), ec)) {
+                const std::wstring name = entry.path().filename().wstring();
+                if (name.rfind(L"crash_", 0) == 0) {
+                    ++dirCount;
+                }
+            }
+            Check(dirCount == 3, "崩溃目录只保留最近 3 个");
+
+            store.RemoveAllAutosave();
+            Check(!std::filesystem::exists(SnapshotStore::AutosaveDir()), "清空自动快照目录");
+            std::filesystem::remove_all(SnapshotStore::BackupRoot(), ec);
+        }
     }
 
     std::printf("\n结果: %d 项检查, %d 项失败\n", g_checks, g_failures);

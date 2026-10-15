@@ -72,46 +72,60 @@ std::wstring ReadString(const infra::XmlElement* node, const wchar_t* name,
     return raw != nullptr && !raw->empty() ? *raw : fallback;
 }
 
-edit::UniMode ParseUniMode(const std::wstring& text, edit::UniMode fallback,
-                           std::vector<std::wstring>& warnings) {
-    if (text == L"Utf8") return edit::UniMode::Utf8;
-    if (text == L"Utf8Bom") return edit::UniMode::Utf8Bom;
-    if (text == L"Ansi") return edit::UniMode::Ansi;
-    if (text == L"Utf16LE") return edit::UniMode::Utf16LE;
-    if (text == L"Utf16BE") return edit::UniMode::Utf16BE;
-    warnings.push_back(L"newFile.defaultUniMode=\"" + text + L"\" 不是已知编码，已回退默认值");
-    return fallback;
-}
-
-const wchar_t* UniModeText(edit::UniMode mode) {
-    switch (mode) {
-        case edit::UniMode::Utf8Bom:  return L"Utf8Bom";
-        case edit::UniMode::Ansi:     return L"Ansi";
-        case edit::UniMode::Utf16LE:  return L"Utf16LE";
-        case edit::UniMode::Utf16BE:  return L"Utf16BE";
-        case edit::UniMode::Utf8:
-        default:                      return L"Utf8";
+// 编码与行尾的标识统一取自 edit/Encoding：config、快照、崩溃抢救都写同一套词。
+// 这里只做宽窄字符的搬运——标识本身是纯 ASCII。
+std::string NarrowAscii(std::wstring_view text) {
+    std::string out;
+    out.reserve(text.size());
+    for (const wchar_t ch : text) {
+        out.push_back(ch < 0x80 ? static_cast<char>(ch) : '?');
     }
+    return out;
 }
 
-edit::EolMode ParseEolMode(const std::wstring& text, edit::EolMode fallback,
-                           std::vector<std::wstring>& warnings) {
-    if (text == L"Crlf") return edit::EolMode::Crlf;
-    if (text == L"Lf") return edit::EolMode::Lf;
-    if (text == L"Cr") return edit::EolMode::Cr;
-    if (text == L"Mixed") return edit::EolMode::Mixed;
-    warnings.push_back(L"newFile.defaultEol=\"" + text + L"\" 不是已知行尾，已回退默认值");
-    return fallback;
-}
-
-const wchar_t* EolModeText(edit::EolMode mode) {
-    switch (mode) {
-        case edit::EolMode::Lf:    return L"Lf";
-        case edit::EolMode::Cr:    return L"Cr";
-        case edit::EolMode::Mixed: return L"Mixed";
-        case edit::EolMode::Crlf:
-        default:                   return L"Crlf";
+std::wstring WidenAscii(const char* text) {
+    std::wstring out;
+    for (const char* cursor = text; cursor != nullptr && *cursor != '\0'; ++cursor) {
+        out.push_back(static_cast<wchar_t>(static_cast<unsigned char>(*cursor)));
     }
+    return out;
+}
+
+edit::UniMode ReadUniMode(const infra::XmlElement* node, const wchar_t* name,
+                          edit::UniMode fallback, std::vector<std::wstring>& warnings) {
+    if (node == nullptr) {
+        return fallback;
+    }
+    const std::wstring text = WidenAscii(edit::UniModeToken(fallback));
+    const std::wstring* raw = node->Attribute(name);
+    if (raw == nullptr) {
+        return fallback;
+    }
+    edit::UniMode mode = fallback;
+    if (!edit::ParseUniModeToken(NarrowAscii(*raw), mode)) {
+        warnings.push_back(L"newFile." + std::wstring(name) + L"=\"" + *raw +
+                           L"\" 不是已知编码，已回退默认值（" + text + L"）");
+        return fallback;
+    }
+    return mode;
+}
+
+edit::EolMode ReadEolMode(const infra::XmlElement* node, const wchar_t* name,
+                          edit::EolMode fallback, std::vector<std::wstring>& warnings) {
+    if (node == nullptr) {
+        return fallback;
+    }
+    const std::wstring* raw = node->Attribute(name);
+    if (raw == nullptr) {
+        return fallback;
+    }
+    edit::EolMode eol = fallback;
+    if (!edit::ParseEolToken(NarrowAscii(*raw), eol)) {
+        warnings.push_back(L"newFile." + std::wstring(name) + L"=\"" + *raw +
+                           L"\" 不是已知行尾，已回退默认值");
+        return fallback;
+    }
+    return eol;
 }
 
 }  // namespace
@@ -189,15 +203,13 @@ bool ConfigCenter::Load(std::wstring* error) {
 
     const infra::XmlElement* newFile = Section(root, L"newFile");
     if (newFile != nullptr) {
-        newFile_.defaultUniMode = ParseUniMode(
-            ReadString(newFile, L"defaultUniMode", UniModeText(newFile_.defaultUniMode)),
-            newFile_.defaultUniMode, warnings_);
+        newFile_.defaultUniMode =
+            ReadUniMode(newFile, L"defaultUniMode", newFile_.defaultUniMode, warnings_);
         newFile_.defaultCodePage = static_cast<std::uint32_t>(ReadIntInRange(
             newFile, L"defaultCodePage", static_cast<int>(newFile_.defaultCodePage), 1, 65535,
             warnings_, L"newFile"));
-        newFile_.defaultEol = ParseEolMode(
-            ReadString(newFile, L"defaultEol", EolModeText(newFile_.defaultEol)),
-            newFile_.defaultEol, warnings_);
+        newFile_.defaultEol =
+            ReadEolMode(newFile, L"defaultEol", newFile_.defaultEol, warnings_);
     }
 
     const infra::XmlElement* backup = Section(root, L"backup");
@@ -288,9 +300,9 @@ bool ConfigCenter::Save(bool force, std::wstring* error) {
     editor->SetAttributeInt(L"zoomLevel", static_cast<int>(edit_.zoomLevel));
 
     infra::XmlElementPtr newFile = root->AddChild(L"newFile");
-    newFile->SetAttribute(L"defaultUniMode", UniModeText(newFile_.defaultUniMode));
+    newFile->SetAttribute(L"defaultUniMode", WidenAscii(edit::UniModeToken(newFile_.defaultUniMode)));
     newFile->SetAttributeInt(L"defaultCodePage", static_cast<int>(newFile_.defaultCodePage));
-    newFile->SetAttribute(L"defaultEol", EolModeText(newFile_.defaultEol));
+    newFile->SetAttribute(L"defaultEol", WidenAscii(edit::EolToken(newFile_.defaultEol)));
 
     infra::XmlElementPtr backup = root->AddChild(L"backup");
     backup->SetAttributeBool(L"enabled", backup_.enabled);

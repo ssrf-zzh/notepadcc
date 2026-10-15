@@ -127,12 +127,14 @@ set(NPCC_CORE_SOURCES
     src/core/DocumentManager.cpp
     src/core/SessionManager.cpp
     src/core/ShortcutStore.cpp
+    src/core/SnapshotStore.cpp
     src/edit/ColumnEdit.cpp
     src/edit/ColumnText.cpp
     src/edit/EditView.cpp
     src/edit/Encoding.cpp
     src/infra/Log.cpp
     src/infra/Paths.cpp
+    src/infra/CrashGuard.cpp
     src/infra/ThreadPool.cpp
     src/infra/Xml.cpp
     src/io/AtomicFile.cpp

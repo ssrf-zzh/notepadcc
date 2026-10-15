@@ -393,6 +393,21 @@ void EditView::SetUndoCollection(bool enabled) const {
     Send(SCI_SETUNDOCOLLECTION, enabled ? 1u : 0u);
 }
 
+int32_t EditView::ByteLength() const {
+    const intptr_t length = Send(SCI_GETLENGTH);
+    return length > 0 ? static_cast<int32_t>(length) : 0;
+}
+
+int32_t EditView::CopyTextTo(char* buffer, int32_t capacity) const {
+    if (buffer == nullptr || capacity <= 0) {
+        return 0;
+    }
+    buffer[0] = '\0';
+    const intptr_t copied = Send(SCI_GETTEXT, static_cast<uintptr_t>(capacity),
+                                 reinterpret_cast<intptr_t>(buffer));
+    return copied > 0 ? static_cast<int32_t>(copied) : 0;
+}
+
 bool EditView::HasBookmark(int32_t line) const {
     const intptr_t mask = Send(SCI_MARKERGET, static_cast<uintptr_t>(line));
     return (mask & (1 << kMarkerBookmark)) != 0;

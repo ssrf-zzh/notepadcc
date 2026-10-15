@@ -182,6 +182,12 @@ public:
     void SetOverwriteMode(bool enabled) const;
     void SetUndoCollection(bool enabled) const;
 
+    // ---- 崩溃抢救专用（设计文档 8.3）----
+    // 这两个接口不分配内存，可以在崩溃处理器里安全调用。
+    // 常规代码请用 GetAllText：它返回 std::string，在堆可能已经坏掉的时候不能用。
+    int32_t ByteLength() const;
+    int32_t CopyTextTo(char* buffer, int32_t capacity) const;
+
 private:
     HWND hwnd_ = nullptr;
     mutable const wchar_t* languageName_ = L"普通文本";
