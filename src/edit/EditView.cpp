@@ -37,6 +37,9 @@ struct BuiltinLanguage {
     const char*    lexer;
     const char*    keywords;
     const wchar_t* displayName;
+    // 该 lexer 是否支持折叠。不支持的语言把折叠边距藏起来，
+    // 否则会留一条永远空着的窄边距，看起来像坏了。
+    bool           foldable;
 };
 
 const BuiltinLanguage kBuiltinLanguages[] = {
@@ -45,36 +48,37 @@ const BuiltinLanguage kBuiltinLanguages[] = {
                    "if inline int long namespace new nullptr operator private protected public "
                    "return short signed sizeof static struct switch template this throw true try "
                    "typedef typename union unsigned using virtual void volatile while",
-     L"C/C++"},
-    {L"c",   "cpp", nullptr, L"C/C++"},
-    {L"h",   "cpp", nullptr, L"C/C++"},
-    {L"hpp", "cpp", nullptr, L"C/C++"},
+     L"C/C++", true},
+    {L"c",   "cpp", nullptr, L"C/C++", true},
+    {L"h",   "cpp", nullptr, L"C/C++", true},
+    {L"hpp", "cpp", nullptr, L"C/C++", true},
     {L"py",  "python",
      "and as assert async await break class continue def del elif else except False finally for "
      "from global if import in is lambda None nonlocal not or pass raise return True try while "
      "with yield",
-     L"Python"},
+     L"Python", true},
     {L"js",  "javascript",
      "async await break case catch class const continue debugger default delete do else export "
      "extends false finally for function if import in instanceof let new null return super switch "
      "this throw true try typeof undefined var void while with yield",
-     L"JavaScript"},
-    {L"ts",  "cpp", nullptr, L"TypeScript"},
-    {L"json","json", nullptr, L"JSON"},
-    {L"xml", "xml", nullptr, L"XML"},
-    {L"html","hypertext", nullptr, L"HTML"},
-    {L"htm", "hypertext", nullptr, L"HTML"},
-    {L"css", "css", nullptr, L"CSS"},
-    {L"md",  "markdown", nullptr, L"Markdown"},
+     L"JavaScript", true},
+    {L"ts",  "cpp", nullptr, L"TypeScript", true},
+    {L"json","json", nullptr, L"JSON", true},
+    {L"xml", "xml", nullptr, L"XML", true},
+    {L"html","hypertext", nullptr, L"HTML", true},
+    {L"htm", "hypertext", nullptr, L"HTML", true},
+    {L"css", "css", nullptr, L"CSS", true},
+    {L"md",  "markdown", nullptr, L"Markdown", true},
     {L"sql", "sql",
      "select from where insert into values update set delete create table database index view "
      "drop alter join left right inner outer on group by order having union all distinct as",
-     L"SQL"},
-    {L"bat", "batch", nullptr, L"Batch"},
-    {L"cmd", "batch", nullptr, L"Batch"},
-    {L"ps1", "powershell", nullptr, L"PowerShell"},
-    {L"ini", "props", nullptr, L"配置文件"},
-    {L"log", "null", nullptr, L"日志"},
+     L"SQL", true},
+    // batch / props 这两个 lexer 不算折叠层级，边距藏起来
+    {L"bat", "batch", nullptr, L"Batch", false},
+    {L"cmd", "batch", nullptr, L"Batch", false},
+    {L"ps1", "powershell", nullptr, L"PowerShell", true},
+    {L"ini", "props", nullptr, L"配置文件", false},
+    {L"log", "null", nullptr, L"日志", false},
 };
 
 const BuiltinLanguage* FindLanguage(const std::wstring& extension, const BuiltinLanguage* fallback) {
@@ -242,6 +246,9 @@ bool EditView::LoadFromChunkedData(const char* data, std::uint64_t size,
 }
 
 void EditView::ApplyLargeFileDisplayMode() const {
+    // 大文件档连折叠一起关掉：算折叠层级是 lexer 扫全文的活，正是这一档要省的东西
+    largeFileMode_ = true;
+    SetFoldingEnabled(false);
     SetWrapMode(false);
     SetShowWhitespace(false);
     SetShowEol(false);
@@ -293,6 +300,7 @@ void EditView::ApplyLightTheme() const {
     Send(SCI_SETMARGINTYPEN, 0, SC_MARGIN_NUMBER);
     Send(SCI_SETMARGINWIDTHN, 0, 48);
     ConfigureBookmarkMargin();
+    ConfigureFoldMargin();
 
     Send(SCI_SETCARETFORE, RGB(0x00, 0x00, 0x00));
     Send(SCI_SETCARETLINEVISIBLE, 1);
@@ -314,6 +322,129 @@ void EditView::ConfigureBookmarkMargin() const {
     Send(SCI_SETMARGINMASKN, static_cast<uintptr_t>(kMarginBookmark), 1u << kMarkerBookmark);
     Send(SCI_SETMARGINWIDTHN, static_cast<uintptr_t>(kMarginBookmark), 16);
     Send(SCI_SETMARGINSENSITIVEN, static_cast<uintptr_t>(kMarginBookmark), 1);
+}
+
+void EditView::ConfigureFoldMargin() const {
+    // 折叠符号用 Scintilla 预留的 marker 号（SC_MARKNUM_FOLDER*，25~31）。
+    // 这七个 marker 各有分工：折叠头 / 展开头 / 竖线 / 收尾，只画其中两个，
+    // 其余定义成 EMPTY，免得默认样式在缩进层级上留下一串莫名其妙的方框。
+    Send(SCI_MARKERDEFINE, SC_MARKNUM_FOLDER, SC_MARK_PLUS);
+    Send(SCI_MARKERDEFINE, SC_MARKNUM_FOLDEROPEN, SC_MARK_MINUS);
+    Send(SCI_MARKERDEFINE, SC_MARKNUM_FOLDERSUB, SC_MARK_EMPTY);
+    Send(SCI_MARKERDEFINE, SC_MARKNUM_FOLDERTAIL, SC_MARK_EMPTY);
+    Send(SCI_MARKERDEFINE, SC_MARKNUM_FOLDEREND, SC_MARK_EMPTY);
+    Send(SCI_MARKERDEFINE, SC_MARKNUM_FOLDEROPENMID, SC_MARK_EMPTY);
+    Send(SCI_MARKERDEFINE, SC_MARKNUM_FOLDERMIDTAIL, SC_MARK_EMPTY);
+    Send(SCI_MARKERSETFORE, SC_MARKNUM_FOLDER, RGB(0x60, 0x60, 0x60));
+    Send(SCI_MARKERSETBACK, SC_MARKNUM_FOLDER, RGB(0xFF, 0xFF, 0xFF));
+    Send(SCI_MARKERSETFORE, SC_MARKNUM_FOLDEROPEN, RGB(0x60, 0x60, 0x60));
+    Send(SCI_MARKERSETBACK, SC_MARKNUM_FOLDEROPEN, RGB(0xFF, 0xFF, 0xFF));
+
+    Send(SCI_SETMARGINTYPEN, static_cast<uintptr_t>(kMarginFold), SC_MARGIN_SYMBOL);
+    Send(SCI_SETMARGINMASKN, static_cast<uintptr_t>(kMarginFold), SC_MASK_FOLDERS);
+    Send(SCI_SETMARGINSENSITIVEN, static_cast<uintptr_t>(kMarginFold), 1);
+    // 折叠后在头行下面画一条横线，视觉上能看出"这里被折起来了"
+    Send(SCI_SETFOLDFLAGS, SC_FOLDFLAG_LINEAFTER_CONTRACTED);
+    // 交给 Scintilla 自己管：边距点击切换、编辑时重算、算完就显示符号。
+    // 这三件事都由它做，比我们自己在 WM_NOTIFY 里拼要可靠（也不会漏掉重算时机）。
+    Send(SCI_SETAUTOMATICFOLD, SC_AUTOMATICFOLD_SHOW | SC_AUTOMATICFOLD_CLICK |
+                                   SC_AUTOMATICFOLD_CHANGE);
+    Send(SCI_SETMARGINWIDTHN, static_cast<uintptr_t>(kMarginFold), 0);   // 由语言决定是否显示
+    foldingEnabled_ = false;
+}
+
+void EditView::SetFoldingEnabled(bool enabled) const {
+    // 大文件档一律不给折叠：那一档要省的正是"lexer 扫全文"
+    foldingEnabled_ = enabled && !largeFileMode_;
+    Send(SCI_SETMARGINWIDTHN, static_cast<uintptr_t>(kMarginFold), foldingEnabled_ ? 14 : 0);
+    if (!foldingEnabled_) {
+        UnfoldAll();   // 关掉折叠时把已折的行展开，免得内容"消失"又没有边距可以点开
+    }
+}
+
+bool EditView::FoldingEnabled() const {
+    return foldingEnabled_;
+}
+
+int32_t EditView::FoldLevelOf(int32_t line) const {
+    if (line < 0) {
+        return 0;
+    }
+    return static_cast<int32_t>(Send(SCI_GETFOLDLEVEL, static_cast<uintptr_t>(line)));
+}
+
+bool EditView::LineIsFoldHeader(int32_t line) const {
+    return line >= 0 && (FoldLevelOf(line) & SC_FOLDLEVELHEADERFLAG) != 0;
+}
+
+bool EditView::IsLineFolded(int32_t line) const {
+    return line >= 0 && Send(SCI_GETFOLDEXPANDED, static_cast<uintptr_t>(line)) == 0;
+}
+
+void EditView::ToggleFoldAt(int32_t line) const {
+    if (LineIsFoldHeader(line)) {
+        Send(SCI_TOGGLEFOLD, static_cast<uintptr_t>(line));
+    }
+}
+
+void EditView::ToggleFoldAtCaret() const {
+    // 光标在块内部时，往上找最近的一个折叠头——那正是包住光标这一层。
+    // 不这样做的话，用户在函数体里按折叠键会毫无反应，而他期待的明显是
+    // "把这一层折起来"。
+    int32_t target = CurrentLine();
+    const int32_t lowest = 0;
+    while (target > lowest && !LineIsFoldHeader(target)) {
+        --target;
+    }
+    ToggleFoldAt(target);
+}
+
+void EditView::FoldAll() const {
+    Send(SCI_FOLDALL, SC_FOLDACTION_CONTRACT);
+}
+
+void EditView::UnfoldAll() const {
+    Send(SCI_FOLDALL, SC_FOLDACTION_EXPAND);
+}
+
+int32_t EditView::VisibleLineCount() const {
+    const int32_t lines = LineCount();
+    if (lines <= 0) {
+        return 0;
+    }
+    return static_cast<int32_t>(
+               Send(SCI_VISIBLEFROMDOCLINE, static_cast<uintptr_t>(lines - 1))) + 1;
+}
+
+std::vector<int32_t> EditView::FoldedLines() const {
+    std::vector<int32_t> folded;
+    if (!foldingEnabled_) {
+        return folded;
+    }
+    // 上限是防手滑：一个文件真被折成几万处，会话文件会大得没意义
+    constexpr std::size_t kMaxFoldedLines = 4096;
+    const int32_t lines = LineCount();
+    for (int32_t line = 0; line < lines && folded.size() < kMaxFoldedLines; ++line) {
+        if (LineIsFoldHeader(line) && IsLineFolded(line)) {
+            folded.push_back(line);
+        }
+    }
+    return folded;
+}
+
+void EditView::RestoreFoldedLines(const std::vector<int32_t>& lines) const {
+    if (!foldingEnabled_) {
+        return;
+    }
+    const int32_t count = LineCount();
+    for (const int32_t line : lines) {
+        if (line >= 0 && line < count && LineIsFoldHeader(line)) {
+            // 注意第二个参数是"折叠动作"（CONTRACT/EXPAND/TOGGLE），不是 fold flags。
+            // 老版本的文档写的是 flags，照抄会传进一个非法值然后静默什么都不做——
+            // 单元测试就是在这里抓到它的（恢复折叠一直没生效，也没有任何报错）。
+            Send(SCI_FOLDLINE, static_cast<uintptr_t>(line), SC_FOLDACTION_CONTRACT);
+        }
+    }
 }
 
 void EditView::ConfigureColumnEditing() const {
@@ -522,6 +653,7 @@ void EditView::ApplyLanguageForPath(const std::wstring& filePath) const {
         languageName_ = L"普通文本";
         Scintilla::ILexer5* plain = CreateLexer("null");
         Send(SCI_SETILEXER, 0, reinterpret_cast<intptr_t>(plain));
+        SetFoldingEnabled(false);
         return;
     }
     languageName_ = language->displayName;
@@ -530,6 +662,24 @@ void EditView::ApplyLanguageForPath(const std::wstring& filePath) const {
     if (language->keywords != nullptr) {
         Send(SCI_SETKEYWORDS, 0, reinterpret_cast<intptr_t>(language->keywords));
     }
+    if (language->foldable) {
+        // 折叠层级是 lexer 自己算的，但要不要算得先告诉它。
+        // fold.compact=0 是关键：默认值会把 "}" 后面没有正文的块折起来，
+        // 折出来的看起来像丢了一行。
+        Send(SCI_SETPROPERTY, reinterpret_cast<uintptr_t>("fold"),
+             reinterpret_cast<intptr_t>("1"));
+        Send(SCI_SETPROPERTY, reinterpret_cast<uintptr_t>("fold.compact"),
+             reinterpret_cast<intptr_t>("0"));
+        Send(SCI_SETPROPERTY, reinterpret_cast<uintptr_t>("fold.comment"),
+             reinterpret_cast<intptr_t>("1"));
+        const std::string_view lexerName(language->lexer);
+        if (lexerName == "cpp" || lexerName == "xml" || lexerName == "hypertext") {
+            // 预处理块（#if / #region）也能折
+            Send(SCI_SETPROPERTY, reinterpret_cast<uintptr_t>("fold.preprocessor"),
+                 reinterpret_cast<intptr_t>("1"));
+        }
+    }
+    SetFoldingEnabled(language->foldable);
     // 语言切换后需要整体重新着色
     Send(SCI_COLOURISE, 0, -1);
 }

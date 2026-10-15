@@ -80,6 +80,9 @@ CMD_REPLACE_IN_FILES = (3 << 12) | 10
 CMD_COLUMN_EDIT = (2 << 12) | 7
 CMD_PREFERENCES = (7 << 12) | 1     # CmdCategory::Settings, index 1
 CMD_SHORTCUTS = (7 << 12) | 2       # 管理快捷键
+CMD_FOLD_TOGGLE = (4 << 12) | 8     # 折叠/展开当前层级
+CMD_FOLD_ALL = (4 << 12) | 9
+CMD_UNFOLD_ALL = (4 << 12) | 10
 
 COLUMN_TEMPLATE_EDIT = 751
 COLUMN_INSERT_BUTTON = 758
@@ -103,6 +106,11 @@ VK_F2 = 0x71
 VK_F9 = 0x78
 
 SCI_GETMARGINWIDTHN = 2243           # 边距 0 就是行号栏
+SCI_GETLINECOUNT = 2154
+SCI_VISIBLEFROMDOCLINE = 2220
+SCI_GETFOLDLEVEL = 2223
+SCI_GETFOLDEXPANDED = 2230
+SC_FOLDLEVELHEADERFLAG = 0x2000
 TCM_GETITEMCOUNT = 0x1304            # TCM_FIRST + 4
 BM_SETCHECK = 0x00F1
 BST_UNCHECKED = 0
@@ -634,6 +642,144 @@ def test_external_change(root):
             time.sleep(2)
         if proc.poll() is None:
             proc.kill()
+
+
+def test_folding(root):
+    """代码折叠：折叠边距、层级、命令、以及折叠状态随会话恢复。
+
+    最后一步是这一段真正的价值所在：折起来 → 正常关窗口 → 不带文件参数重启，
+    会话把文件与折叠状态一起恢复回来。只测"命令能折起来"是不够的，
+    用户第二天打开程序时看到的是恢复出来的状态。
+    """
+    work = os.path.join(root, "build", "fold_test")
+    os.makedirs(work, exist_ok=True)
+    path = os.path.join(work, "folds.cpp")
+    body = "".join(f"int f{i}() {{\n    return {i};\n}}\n" for i in range(3))
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write(body)
+
+    cfg = os.path.join(root, "build", "bin", "config")
+    for name in ("config.xml", "session.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+
+    def visible_lines(scinti):
+        lines = user32.SendMessageW(scinti, SCI_GETLINECOUNT, 0, 0)
+        if lines <= 0:
+            return 0
+        return user32.SendMessageW(scinti, SCI_VISIBLEFROMDOCLINE, lines - 1, 0) + 1
+
+    def is_header(scinti, line):
+        level = user32.SendMessageW(scinti, SCI_GETFOLDLEVEL, line, 0)
+        return bool(level & SC_FOLDLEVELHEADERFLAG)
+
+    def is_folded(scinti, line):
+        return user32.SendMessageW(scinti, SCI_GETFOLDEXPANDED, line, 0) == 0
+
+    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - folds.cpp")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到可见的编辑控件")
+            return False
+
+        if user32.SendMessageW(scinti, SCI_GETMARGINWIDTHN, 2, 0) <= 0:
+            print("  FAIL: C++ 文件应显示折叠边距（2 号边距宽度为 0）")
+            return False
+        for line in (0, 3, 6):
+            if not is_header(scinti, line):
+                print(f"  FAIL: 第 {line} 行应当是折叠头（lexer 没算折叠层级）")
+                return False
+
+        all_visible = visible_lines(scinti)
+        if all_visible < 9:
+            print(f"  FAIL: 未折叠时可见行数不对：{all_visible}")
+            return False
+
+        user32.PostMessageW(window, WM_COMMAND, CMD_FOLD_ALL, 0)
+        time.sleep(0.8)
+        if not is_folded(scinti, 0) or not is_folded(scinti, 6):
+            print("  FAIL: 折叠全部之后仍有未折的块")
+            return False
+        folded_visible = visible_lines(scinti)
+        if folded_visible >= all_visible:
+            print(f"  FAIL: 折叠之后可见行没减少（{all_visible} → {folded_visible}）")
+            return False
+
+        user32.PostMessageW(window, WM_COMMAND, CMD_UNFOLD_ALL, 0)
+        time.sleep(0.8)
+        if visible_lines(scinti) != all_visible:
+            print("  FAIL: 展开全部之后可见行没有回到原样")
+            return False
+
+        # 光标放进块内部，快捷键应当折起包住它的那一层
+        user32.SendMessageW(scinti, SCI_GOTOLINE, 1, 0)
+        time.sleep(0.3)
+        user32.PostMessageW(window, WM_COMMAND, CMD_FOLD_TOGGLE, 0)
+        time.sleep(0.8)
+        if not is_folded(scinti, 0):
+            print("  FAIL: 在块内部按折叠键，应当折起包住它的那一层")
+            return False
+        if is_folded(scinti, 3):
+            print("  FAIL: 不该连带折起别的块")
+            return False
+
+        # 就带着这一处折叠退出，交给下面验证会话恢复
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            time.sleep(2)
+        if proc.poll() is None:
+            proc.kill()
+
+    session = os.path.join(cfg, "session.xml")
+    if not os.path.exists(session):
+        print("  FAIL: 正常退出没有写出 session.xml")
+        return False
+    with open(session, "r", encoding="utf-8", errors="replace") as handle:
+        session_text = handle.read()
+    if "<Folds>" not in session_text:
+        print(f"  FAIL: 会话里没有折叠记录\n{session_text[:400]}")
+        return False
+
+    # 不带文件参数重启：会话应当把文件与折叠状态一起恢复回来
+    proc = subprocess.Popen([exe, "-portable"], cwd=root)
+    window = wait_for_main_window("notepadcc - folds.cpp")
+    try:
+        if not window:
+            print("  FAIL: 重启后没有恢复出上次的文件")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 恢复后找不到编辑控件")
+            return False
+        if not is_folded(scinti, 0):
+            print("  FAIL: 折叠状态没有被会话恢复（第 0 行应当是折起来的）")
+            return False
+        if visible_lines(scinti) != all_visible - 2:
+            print(f"  FAIL: 恢复后的可见行数不对：{visible_lines(scinti)}，"
+                  f"期望 {all_visible - 2}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        for name in ("session.xml", "config.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    print("  代码折叠：边距与层级正确、折叠/展开命令生效、折叠状态随会话恢复")
+    return True
 
 
 def test_snapshots(root):
@@ -1354,12 +1500,14 @@ def run():
         failed = True
     if not test_snapshots(root):
         failed = True
+    if not test_folding(root):
+        failed = True
 
     if failed:
         print("FAIL: 界面回归未通过")
         return 1
     print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + "
-          "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照）")
+          "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠）")
     return 0
 
 

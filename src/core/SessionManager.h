@@ -13,6 +13,9 @@ struct SessionDocument {
     std::int32_t zoomLevel = 0;
     bool         isActive = false;
     std::vector<std::int32_t> bookmarks;   // 行号为 0 基，与 Scintilla 一致
+    // 折叠起来的折叠头行号（同样是 0 基）。只记行号，不记"折了几层"：
+    // 层级是 lexer 现算的，行号才是跟着内容走的东西。
+    std::vector<std::int32_t> folds;
 };
 
 struct SessionSnapshot {
@@ -25,8 +28,8 @@ struct SessionSnapshot {
 // 只记录**有路径**的文档：未命名文档在退出时已经被逐一询问过"保存还是丢弃"，
 // 重启再把它恢复出来会与用户当时的选择相矛盾。
 //
-// M1 记录：路径、光标位置、首个可见行、缩放级别、哪个是活动标签。
-// 设计文档 7.4 中列出的书签、折叠状态、标签颜色、只读标记、分屏状态留待 M2。
+// M1 记录：路径、光标位置、首个可见行、缩放级别、哪个是活动标签、书签行号、折叠的头部行号。
+// 设计文档 7.4 中列出的标签颜色、只读标记、分屏状态留待 M2。
 class SessionManager {
 public:
     static std::wstring SessionPath();

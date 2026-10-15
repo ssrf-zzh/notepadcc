@@ -126,6 +126,7 @@ public:
     // 标记编号必须落在 0~24：25~31 被 Scintilla 的折叠标记占用了。
     static constexpr int kMarginBookmark = 1;
     static constexpr int kMarkerBookmark = 0;
+    static constexpr int kMarginFold = 2;   // 折叠边距（Scintilla 约定：2 号边距放折叠符号）
 
     void        SetSearchFlags(int32_t flags) const;
     void        SetTarget(int64_t start, int64_t end) const;
@@ -188,9 +189,29 @@ public:
     int32_t ByteLength() const;
     int32_t CopyTextTo(char* buffer, int32_t capacity) const;
 
+    // ---- 代码折叠（设计文档 2.6）----
+    // 折叠层级由 Lexilla 算出来，这里只负责呈现与开关。纯文本（含超大文件模式）
+    // 没有折叠可言，所以开关是按语言给的。
+    void    ConfigureFoldMargin() const;
+    void    SetFoldingEnabled(bool enabled) const;
+    bool    FoldingEnabled() const;
+    int32_t FoldLevelOf(int32_t line) const;          // 含 SC_FOLDLEVELHEADERFLAG
+    bool    LineIsFoldHeader(int32_t line) const;
+    bool    IsLineFolded(int32_t line) const;
+    void    ToggleFoldAt(int32_t line) const;
+    void    ToggleFoldAtCaret() const;                // 在块内按快捷键时折叠包住它的那一层
+    void    FoldAll() const;
+    void    UnfoldAll() const;
+    int32_t VisibleLineCount() const;                 // 折叠之后屏幕上实际有多少行
+    // 折叠状态随会话保存：收集折叠头所在行；恢复时逐行折叠回去
+    std::vector<int32_t> FoldedLines() const;
+    void RestoreFoldedLines(const std::vector<int32_t>& lines) const;
+
 private:
     HWND hwnd_ = nullptr;
     mutable const wchar_t* languageName_ = L"普通文本";
+    mutable bool           foldingEnabled_ = false;
+    mutable bool           largeFileMode_ = false;   // 大文件档：折叠一律关掉
 };
 
 }  // namespace npcc::edit

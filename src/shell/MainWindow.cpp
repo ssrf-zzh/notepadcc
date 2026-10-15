@@ -68,6 +68,9 @@ enum : npcc::core::CmdId {
     kCmdViewToggleSpaces  = npcc::core::MakeCmdId(4, 5),
     kCmdViewToggleEol     = npcc::core::MakeCmdId(4, 6),
     kCmdViewToggleNumbers = npcc::core::MakeCmdId(4, 7),
+    kCmdViewFoldToggle    = npcc::core::MakeCmdId(4, 8),
+    kCmdViewFoldAll       = npcc::core::MakeCmdId(4, 9),
+    kCmdViewUnfoldAll     = npcc::core::MakeCmdId(4, 10),
 
     kCmdWindowNext = npcc::core::MakeCmdId(11, 1),
     kCmdWindowPrev = npcc::core::MakeCmdId(11, 2),
@@ -556,6 +559,27 @@ void MainWindow::RegisterCommands() {
                 document->view->ShowLineNumbers(showLineNumbers_);
             }
         });
+    add(kCmdViewFoldToggle, CmdCategory::View, L"cmd.view.foldToggle",
+        L"折叠/展开当前层级(&F)", needsBuffer, [this](const CmdContext&) {
+            if (edit::Document* document = documents_->Active();
+                document != nullptr && document->view) {
+                document->view->ToggleFoldAtCaret();
+            }
+        });
+    add(kCmdViewFoldAll, CmdCategory::View, L"cmd.view.foldAll", L"折叠全部(&L)", needsBuffer,
+        [this](const CmdContext&) {
+            if (edit::Document* document = documents_->Active();
+                document != nullptr && document->view) {
+                document->view->FoldAll();
+            }
+        });
+    add(kCmdViewUnfoldAll, CmdCategory::View, L"cmd.view.unfoldAll", L"展开全部(&E)",
+        needsBuffer, [this](const CmdContext&) {
+            if (edit::Document* document = documents_->Active();
+                document != nullptr && document->view) {
+                document->view->UnfoldAll();
+            }
+        });
 
     // ---- 窗口 ----
     add(kCmdWindowNext, CmdCategory::Window, L"cmd.window.next", L"下一个标签(&N)",
@@ -620,6 +644,9 @@ void MainWindow::RegisterCommands() {
     registry_.BindShortcut(kCmdViewToggleWrap, core::kModAlt, 'Z', true);
     registry_.BindShortcut(kCmdViewToggleSpaces, ctrlAlt, 'W', true);
     registry_.BindShortcut(kCmdViewToggleEol, ctrlAlt, 'E', true);
+    registry_.BindShortcut(kCmdViewFoldToggle, ctrlAlt, 'F', true);
+    registry_.BindShortcut(kCmdViewFoldAll, core::kModAlt, '0', true);
+    registry_.BindShortcut(kCmdViewUnfoldAll, core::kModAlt | core::kModShift, '0', true);
     registry_.BindShortcut(kCmdWindowNext, ctrl, VK_TAB, true);
     registry_.BindShortcut(kCmdWindowPrev, ctrlShift, VK_TAB, true);
     registry_.BindShortcut(kCmdWindowNext, ctrl, VK_NEXT, false);
@@ -1185,6 +1212,7 @@ core::SessionSnapshot MainWindow::BuildSessionSnapshot() const {
         entry.zoomLevel = document->view->ZoomLevel();
         entry.isActive = (document == documents_->Active());
         entry.bookmarks = document->view->AllBookmarkLines();
+        entry.folds = document->view->FoldedLines();
         snapshot.documents.push_back(std::move(entry));
     }
     return snapshot;
@@ -1224,6 +1252,8 @@ bool MainWindow::RestoreSession() {
         for (const std::int32_t line : entry.bookmarks) {
             document->view->AddBookmark(line);
         }
+        // 折叠放在最后：折叠会改变可见行数，先把滚动位置安顿好再折起来
+        document->view->RestoreFoldedLines(entry.folds);
         if (entry.isActive) {
             active = document;
         }

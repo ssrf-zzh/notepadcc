@@ -38,6 +38,12 @@ bool SessionManager::Save(const SessionSnapshot& snapshot, std::wstring* error) 
                 marks->AddChild(L"Line")->SetAttributeInt(L"n", line);
             }
         }
+        if (!entry.folds.empty()) {
+            infra::XmlElementPtr folds = node->AddChild(L"Folds");
+            for (const std::int32_t line : entry.folds) {
+                folds->AddChild(L"Line")->SetAttributeInt(L"n", line);
+            }
+        }
     }
 
     return io::SaveXmlFile(SessionPath(), document, error);
@@ -95,6 +101,14 @@ bool SessionManager::Load(SessionSnapshot& snapshot, std::wstring* error) {
                 const int value = line->AttributeInt(L"n", -1);
                 if (value >= 0) {
                     entry.bookmarks.push_back(value);
+                }
+            }
+        }
+        if (const infra::XmlElement* folds = node->Child(L"Folds"); folds != nullptr) {
+            for (const infra::XmlElement* line : folds->Children(L"Line")) {
+                const int value = line->AttributeInt(L"n", -1);
+                if (value >= 0) {
+                    entry.folds.push_back(value);
                 }
             }
         }

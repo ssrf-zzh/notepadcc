@@ -951,9 +951,9 @@ int main() {
 
         npcc::core::SessionSnapshot snapshot;
         snapshot.documents.push_back(npcc::core::SessionDocument{
-            L"D:\\工程\\main.cpp", 128, 30, 2, false, {}});
+            L"D:\\工程\\main.cpp", 128, 30, 2, false, {3, 9}, {14, 40}});
         snapshot.documents.push_back(npcc::core::SessionDocument{
-            L"D:\\工程\\含中文 与空格.txt", 7, 0, 0, true, {}});
+            L"D:\\工程\\含中文 与空格.txt", 7, 0, 0, true, {}, {}});
         Check(npcc::core::SessionManager::Save(snapshot, &error), "保存会话成功");
         Check(std::filesystem::exists(path), "会话文件已落盘");
 
@@ -969,6 +969,13 @@ int main() {
             Check(reloaded.documents[1].isActive, "活动标记往返一致");
             Check(reloaded.documents[1].filePath == L"D:\\工程\\含中文 与空格.txt",
                   "中文与空格路径往返一致");
+            Check(reloaded.documents[0].bookmarks.size() == 2 &&
+                      reloaded.documents[0].bookmarks[1] == 9,
+                  "书签行号往返一致");
+            Check(reloaded.documents[0].folds.size() == 2 && reloaded.documents[0].folds[0] == 14 &&
+                      reloaded.documents[0].folds[1] == 40,
+                  "折叠行号往返一致");
+            Check(reloaded.documents[1].folds.empty(), "没有折叠的文档不会多出折叠记录");
         }
 
         // 来自更新版本的会话文件应当被拒绝，而不是按错误结构猜测
@@ -2334,6 +2341,79 @@ int main() {
             store.RemoveAllAutosave();
             Check(!std::filesystem::exists(SnapshotStore::AutosaveDir()), "清空自动快照目录");
             std::filesystem::remove_all(SnapshotStore::BackupRoot(), ec);
+        }
+    }
+
+    // ---------------------------------------------------------------- 代码折叠
+    // 折叠层级是 Lexilla 算的、折叠状态是 Scintilla 存的，我们能验的是
+    // "开关给对了没有、层级读得对不对、折起来之后可见行是不是真的少了"。
+    Section("代码折叠（层级 / 开关 / 存取）");
+    {
+        const HWND host = CreateHiddenHost();
+        if (host == nullptr) {
+            Check(false, "创建隐藏宿主窗口失败");
+        } else {
+            npcc::edit::EditView view;
+            if (!view.Create(host, 900)) {
+                Check(false, "创建编辑控件失败");
+            } else {
+                view.ApplyLightTheme();
+                view.SetCodePage(npcc::edit::kCodePageUtf8);
+                view.SetText("int a() {\n  x;\n}\nint b() {\n  y;\n}\n");
+                view.ApplyLanguageForPath(L"D:\\t\\sample.cpp");
+                view.ClearUndoBuffer();
+                view.MarkSavePoint();
+
+                Check(view.FoldingEnabled(), "C++ 文件启用折叠");
+                Check(view.LineIsFoldHeader(0), "第 0 行被算成折叠头");
+                Check(view.LineIsFoldHeader(3), "第 3 行被算成折叠头");
+                Check(!view.LineIsFoldHeader(1), "块内部的行不是折叠头");
+
+                const int32_t allVisible = view.VisibleLineCount();
+                Check(allVisible == view.LineCount(), "未折叠时可见行数等于总行数");
+
+                view.FoldAll();
+                Check(view.VisibleLineCount() < allVisible, "折叠全部之后可见行变少");
+                Check(view.IsLineFolded(0), "第 0 行被折起来了");
+                Check(view.IsLineFolded(3), "第 3 行被折起来了");
+
+                const std::vector<int32_t> folded = view.FoldedLines();
+                Check(folded.size() == 2, "收集到 2 处折叠");
+                Check(folded.empty() || folded[0] == 0, "收集到的第一处是第 0 行");
+
+                view.UnfoldAll();
+                Check(view.VisibleLineCount() == allVisible, "展开全部回到原来的可见行数");
+                Check(view.FoldedLines().empty(), "展开之后收集不到折叠");
+
+                view.RestoreFoldedLines(folded);
+                Check(view.VisibleLineCount() < allVisible, "按收集到的行号能恢复折叠");
+                Check(view.IsLineFolded(3), "恢复后第 3 行仍是折起来的");
+                view.UnfoldAll();
+
+                // 光标在块内部时，快捷键应当折起包住它的那一层
+                view.SetCaretPosition(static_cast<int32_t>(view.PositionFromLine(1)));
+                view.ToggleFoldAtCaret();
+                Check(view.IsLineFolded(0), "在块内部折叠的是包住它的那一层");
+                view.ToggleFoldAtCaret();
+                Check(!view.IsLineFolded(0), "再按一次展开回来");
+
+                // 顶行往上找不到折叠头时不能越界
+                view.SetCaretPosition(0);
+                view.ToggleFoldAtCaret();
+                Check(view.LineIsFoldHeader(0), "顶行仍可折叠（没有越界）");
+                view.UnfoldAll();
+
+                // 普通文本没有折叠可言，边距要收起来
+                view.ApplyLanguageForPath(L"D:\\t\\notes.txt");
+                Check(!view.FoldingEnabled(), "普通文本不启用折叠");
+                view.ApplyLanguageForPath(L"D:\\t\\sample.cpp");
+                Check(view.FoldingEnabled(), "切回 C++ 又启用折叠");
+                view.FoldAll();
+                view.ApplyLargeFileDisplayMode();
+                Check(!view.FoldingEnabled(), "大文件档关闭折叠");
+                Check(view.VisibleLineCount() == allVisible, "关掉折叠时会把已折的行展开");
+            }
+            ::DestroyWindow(host);
         }
     }
 
