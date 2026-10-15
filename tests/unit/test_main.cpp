@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <memory>
 #include <string>
 
 #include "core/Command.h"
@@ -14,6 +15,9 @@
 #include "io/AtomicFile.h"
 #include "io/FileReader.h"
 #include "io/XmlFile.h"
+#include "search/EscapeSequence.h"
+#include "search/InDocSearch.h"
+#include "search/RegexEngine.h"
 #include "infra/Paths.h"
 #include "infra/Xml.h"
 
@@ -531,6 +535,334 @@ int main() {
         }
 
         std::filesystem::remove(path, ec);
+    }
+
+    // ---------------------------------------------------------------- 扩展模式转义
+    Section("UnescapeExtended");
+    {
+        npcc::search::SearchOutcome outcome;
+        std::string out;
+
+        Check(npcc::search::UnescapeExtended("a\\nb", out, outcome) && out == "a\nb",
+              "\\n 转成换行");
+        Check(npcc::search::UnescapeExtended("\\t\\r", out, outcome) && out == "\t\r",
+              "\\t \\r");
+        Check(npcc::search::UnescapeExtended("\\x41\\x42", out, outcome) && out == "AB",
+              "\\xNN 两位十六进制");
+        Check(npcc::search::UnescapeExtended("\\x{4e2d}", out, outcome) && out == "中",
+              "\\x{NNNN} 转成 UTF-8");
+        Check(npcc::search::UnescapeExtended("c:\\\\work", out, outcome) && out == "c:\\work",
+              "\\\\ 表示一个反斜杠");
+        Check(npcc::search::UnescapeExtended("\\q", out, outcome) && out == "\\q",
+              "不认识的转义原样保留");
+        Check(npcc::search::UnescapeExtended("tail\\", out, outcome) && out == "tail\\",
+              "结尾孤立反斜杠原样保留");
+        Check(npcc::search::UnescapeExtended("中文\\n", out, outcome) && out == "中文\n",
+              "多字节字符不受影响");
+
+        outcome = npcc::search::SearchOutcome{};
+        Check(!npcc::search::UnescapeExtended("\\x{ZZ}", out, outcome),
+              "\\x{} 内的非法十六进制应当失败");
+        Check(outcome.error == npcc::search::SearchError::BadPattern, "错误类型正确");
+        outcome = npcc::search::SearchOutcome{};
+        Check(!npcc::search::UnescapeExtended("\\x{110000}", out, outcome),
+              "码点超出 Unicode 范围应当失败");
+    }
+
+    // ---------------------------------------------------------------- 正则引擎
+    Section("RegexEngine（PCRE2）");
+    {
+        npcc::search::RegexOptions options;
+        options.utfMode = true;
+        npcc::search::SearchOutcome outcome;
+
+        // 基本匹配
+        {
+            npcc::search::RegexEngine engine;
+            Check(engine.Compile(L"\\d+", options, outcome), "编译 \\d+ 成功");
+            Check(engine.JitEnabled(), "JIT 已启用");
+            const std::string subject = "abc12345def";
+            npcc::search::MatchRange match;
+            Check(engine.Find(subject, 0, match, outcome), "找到数字串");
+            Check(match.start == 3 && match.end == 8, "匹配区间正确");
+            Check(!engine.Find(subject, match.end, match, outcome), "从匹配之后继续搜不到");
+            Check(outcome.Ok(), "无匹配不是错误");
+        }
+
+        // 大小写
+        {
+            npcc::search::RegexEngine engine;
+            npcc::search::MatchRange match;
+            npcc::search::RegexOptions insensitive;
+            insensitive.utfMode = true;
+            Check(engine.Compile(L"hello", insensitive, outcome), "编译 hello 成功");
+            const std::string subject = "say HELLO there";
+            Check(engine.Find(subject, 0, match, outcome), "默认不区分大小写");
+
+            npcc::search::RegexOptions sensitive;
+            sensitive.utfMode = true;
+            sensitive.matchCase = true;
+            Check(engine.Compile(L"hello", sensitive, outcome), "编译区分大小写的 hello");
+            Check(!engine.Find(subject, 0, match, outcome), "区分大小写时不应命中");
+            Check(engine.Find("say hello there", 0, match, outcome), "小写仍能命中");
+        }
+
+        // 点号是否跨行
+        {
+            const std::string subject = "a\nb";
+            npcc::search::RegexEngine engine;
+            npcc::search::MatchRange match;
+            npcc::search::RegexOptions plain;
+            plain.utfMode = true;
+            Check(engine.Compile(L"a.b", plain, outcome), "编译 a.b");
+            Check(!engine.Find(subject, 0, match, outcome), "默认 . 不匹配换行");
+
+            npcc::search::RegexOptions dotall;
+            dotall.utfMode = true;
+            dotall.dotMatchesNewline = true;
+            Check(engine.Compile(L"a.b", dotall, outcome), "编译带 DOTALL 的 a.b");
+            Check(engine.Find(subject, 0, match, outcome), "开启后 . 匹配换行");
+            Check(match.start == 0 && match.end == 3, "跨行匹配区间正确");
+        }
+
+        // Unicode 语义
+        {
+            npcc::search::RegexEngine engine;
+            npcc::search::MatchRange match;
+            Check(engine.Compile(L"\\p{Han}+", options, outcome), "编译 \\p{Han}+");
+            const std::string subject = "abc 中文内容 def";
+            Check(engine.Find(subject, 0, match, outcome), "UTF 模式下命中汉字");
+            Check(match.end - match.start == 12, "四个汉字占 12 字节");
+
+            npcc::search::RegexOptions byteMode;   // utfMode = false，按字节处理
+            byteMode.codePage = 936;
+            npcc::search::RegexEngine byteEngine;
+            Check(byteEngine.Compile(L"\\p{Han}+", byteMode, outcome),
+                  "非 UTF 模式下也能编译（只是语义退化为字节）");
+            Check(!byteEngine.Find(subject, 0, match, outcome), "字节模式下 \\p{Han} 不命中");
+        }
+
+        // 全字匹配
+        {
+            npcc::search::RegexOptions word;
+            word.utfMode = true;
+            word.wholeWordOnly = true;
+            npcc::search::RegexEngine engine;
+            npcc::search::MatchRange match;
+            Check(engine.Compile(L"cat", word, outcome), "编译全字模式 cat");
+            Check(!engine.Find("concat", 0, match, outcome), "不应命中 concat 内部");
+            Check(engine.Find("a cat here", 0, match, outcome), "应命中独立的 cat");
+        }
+
+        // 捕获组替换
+        {
+            npcc::search::RegexEngine engine;
+            Check(engine.Compile(L"(\\w+)@(\\w+)", options, outcome), "编译邮箱模式");
+            const std::string subject = "user@host";
+            npcc::search::MatchRange match;
+            Check(engine.Find(subject, 0, match, outcome), "命中 user@host");
+            std::string replaced;
+            Check(engine.ExpandReplacement(subject, L"$2@$1", replaced, outcome),
+                  "展开替换串成功");
+            CheckEqual(replaced, "host@user", "捕获组引用正确");
+        }
+
+        // 灾难性回溯保护
+        {
+            npcc::search::RegexEngine engine;
+            Check(engine.Compile(L"(a+)+$", options, outcome), "编译易回溯的模式");
+            const std::string subject(40, 'a');
+            npcc::search::MatchRange match;
+            const bool found = engine.Find(subject + "b", 0, match, outcome);
+            Check(!found, "极端回溯不产生匹配");
+            Check(outcome.error == npcc::search::SearchError::MatchLimitExceeded,
+                  "回溯超限被识别并中止，而不是一直跑下去");
+            Check(!outcome.message.empty(), "给出可读的提示");
+        }
+
+        // 编译期错误
+        {
+            npcc::search::RegexEngine engine;
+            npcc::search::SearchOutcome bad;
+            Check(!engine.Compile(L"(unclosed", options, bad), "括号不闭合应当编译失败");
+            Check(bad.error == npcc::search::SearchError::BadPattern, "错误类型为模式错误");
+            Check(!bad.message.empty(), "给出可读的错误说明");
+            Check(!engine.Ready(), "失败后引擎不可用");
+
+            npcc::search::SearchOutcome empty;
+            npcc::search::RegexEngine engine2;
+            Check(!engine2.Compile(L"", options, empty), "空模式应当被拒绝");
+            Check(empty.error == npcc::search::SearchError::EmptyPattern, "错误类型为空模式");
+        }
+
+        // 空匹配不应让调用方陷入死循环（引擎本身如实返回 0 长度匹配）
+        {
+            npcc::search::RegexEngine engine;
+            Check(engine.Compile(L"x*", options, outcome), "编译可空匹配的模式");
+            npcc::search::MatchRange match;
+            Check(engine.Find("abc", 0, match, outcome), "在 abc 上产生空匹配");
+            Check(match.start == 0 && match.end == 0, "空匹配区间为 0 长度");
+        }
+    }
+
+    // ---------------------------------------------------------------- 单文档查找替换
+    Section("InDocSearch（单文档查找与替换）");
+    {
+        HWND host = CreateHiddenHost();
+        Check(host != nullptr, "创建隐藏宿主窗口");
+        if (host != nullptr) {
+            auto view = std::make_unique<npcc::edit::EditView>();
+            Check(view->Create(host, 501), "创建编辑视图");
+
+            // 字节偏移对照：one two one\ntwo one two
+            const std::string text = "one two one\ntwo one two";
+            auto reset = [&]() {
+                view->SetText(text);
+                view->ClearUndoBuffer();
+                view->MarkSavePoint();
+                view->SetSelectionRange(0, 0);
+            };
+            reset();
+
+            npcc::search::InDocSearch search(*view);
+            npcc::search::SearchConfig config;
+            npcc::search::SearchOutcome outcome;
+            config.utfMode = true;
+
+            // 计数
+            int count = 0;
+            config.pattern = L"one";
+            Check(search.Count(config, count, outcome), "统计 one");
+            Check(count == 3, "one 出现 3 次");
+
+            config.pattern = L"two";
+            Check(search.Count(config, count, outcome) && count == 3, "two 出现 3 次");
+
+            config.pattern = L"missing";
+            Check(search.Count(config, count, outcome) && count == 0, "不存在的词计数为 0");
+
+            // 大小写
+            config.pattern = L"ONE";
+            Check(search.Count(config, count, outcome) && count == 3, "默认不区分大小写");
+            config.matchCase = true;
+            Check(search.Count(config, count, outcome) && count == 0, "区分大小写时 ONE 无匹配");
+            config.matchCase = false;
+
+            // 全字匹配
+            config.pattern = L"on";
+            Check(search.Count(config, count, outcome) && count == 3, "on 作为子串出现 3 次");
+            config.wholeWordOnly = true;
+            Check(search.Count(config, count, outcome) && count == 0, "全字匹配下 on 无匹配");
+            config.wholeWordOnly = false;
+
+            // 前向查找与选中
+            config.pattern = L"one";
+            bool wrapped = false;
+            view->SetSelectionRange(0, 0);
+            Check(search.FindNext(config, true, wrapped, outcome), "从文档头找到第一个 one");
+            Check(view->SelectionStart() == 0 && view->SelectionEnd() == 3,
+                  "第一个匹配的区间正确");
+            Check(!wrapped, "未发生回绕");
+
+            Check(search.FindNext(config, true, wrapped, outcome), "找到第二个 one");
+            Check(view->SelectionStart() == 8 && view->SelectionEnd() == 11,
+                  "第二个匹配的区间正确");
+
+            Check(search.FindNext(config, true, wrapped, outcome), "找到第三个 one");
+            Check(view->SelectionStart() == 16 && view->SelectionEnd() == 19,
+                  "第三个匹配的区间正确");
+
+            Check(search.FindNext(config, true, wrapped, outcome), "回绕到第一个 one");
+            Check(view->SelectionStart() == 0, "回绕后位置正确");
+            Check(wrapped, "回绕标志置位");
+
+            // 不循环时应当搜不到
+            view->SetSelectionRange(16, 19);
+            config.wrapAround = false;
+            Check(!search.FindNext(config, true, wrapped, outcome), "关闭循环后不再回绕");
+            Check(outcome.Ok(), "搜不到不是错误");
+            config.wrapAround = true;
+
+            // 后向查找
+            view->SetSelectionRange(19, 19);
+            Check(search.FindNext(config, false, wrapped, outcome), "向前查找成功");
+            Check(view->SelectionStart() == 16, "向前查找到前一个匹配");
+            Check(search.FindNext(config, false, wrapped, outcome), "继续向前");
+            Check(view->SelectionStart() == 8, "再前一个匹配");
+
+            // 扩展模式：\n 应当参与匹配
+            npcc::search::SearchConfig escaped;
+            escaped.utfMode = true;
+            escaped.mode = npcc::search::SearchMode::Escaped;
+            escaped.pattern = L"one\\ntwo";
+            Check(search.Count(escaped, count, outcome), "扩展模式下统计跨行模式");
+            Check(count == 1, "one\\ntwo 跨行匹配 1 次");
+
+            // 正则模式
+            npcc::search::SearchConfig regex;
+            regex.utfMode = true;
+            regex.mode = npcc::search::SearchMode::Regex;
+            regex.pattern = L"o.e";
+            Check(search.Count(regex, count, outcome), "正则统计 o.e");
+            Check(count == 3, "o.e 匹配 3 次");
+
+            regex.pattern = L"(unclosed";
+            npcc::search::SearchOutcome bad = npcc::search::SearchOutcome{};
+            Check(!search.Count(regex, count, bad), "非法正则让统计失败");
+            Check(bad.error == npcc::search::SearchError::BadPattern, "错误类型正确");
+
+            // 标记全部（只验证不崩溃并返回数量；indicator 是渲染层的事）
+            regex.pattern = L"o.e";
+            Check(search.MarkAll(regex, count, outcome) && count == 3, "标记全部匹配");
+            search.ClearMarks();
+
+            // 替换当前：选区不是匹配项时绝对不许改内容
+            npcc::search::SearchConfig replaceConfig;
+            replaceConfig.utfMode = true;
+            replaceConfig.pattern = L"one";
+            replaceConfig.replaceTo = L"1";
+            reset();
+            view->SetSelectionRange(4, 7);   // 选中的是 "two"
+            bool replaced = true;
+            Check(search.ReplaceCurrent(replaceConfig, replaced, outcome),
+                  "选区不是匹配项时调用替换");
+            Check(!replaced, "选区不是匹配项时不得替换");
+            CheckEqual(view->GetAllText(), text, "内容必须保持不变");
+
+            // 替换当前：选区正好是匹配项时替换，并自动选中下一个
+            reset();
+            view->SetSelectionRange(0, 3);
+            Check(search.ReplaceCurrent(replaceConfig, replaced, outcome), "替换当前匹配");
+            Check(replaced, "确实发生了替换");
+            Check(view->GetAllText() == "1 two one\ntwo one two", "第一条被替换");
+            Check(view->SelectionStart() == 6 && view->SelectionEnd() == 9,
+                  "替换后自动选中下一个匹配");
+
+            // 全部替换（含正则捕获组）
+            reset();
+            npcc::search::SearchConfig swapConfig;
+            swapConfig.utfMode = true;
+            swapConfig.mode = npcc::search::SearchMode::Regex;
+            swapConfig.pattern = L"(o)(n)(e)";
+            swapConfig.replaceTo = L"$3$2$1";
+            int replacedCount = 0;
+            Check(search.ReplaceAll(swapConfig, replacedCount, outcome), "正则全部替换成功");
+            Check(replacedCount == 3, "替换了 3 处");
+            CheckEqual(view->GetAllText(), "eno two eno\ntwo eno two", "捕获组重排结果正确");
+
+            // 全部替换必须是一个撤销单元：一次撤销就应回到替换前
+            view->Send(2176);   // SCI_UNDO
+            CheckEqual(view->GetAllText(), text, "一次撤销即可回到替换前的内容");
+
+            // 字面量全部替换
+            reset();
+            Check(search.ReplaceAll(replaceConfig, replacedCount, outcome), "字面量全部替换");
+            Check(replacedCount == 3, "字面量替换 3 处");
+            CheckEqual(view->GetAllText(), "1 two 1\ntwo 1 two", "字面量替换结果正确");
+
+            view->Destroy();
+            ::DestroyWindow(host);
+        }
     }
 
     std::printf("\n结果: %d 项检查, %d 项失败\n", g_checks, g_failures);

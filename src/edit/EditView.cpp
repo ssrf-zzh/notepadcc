@@ -11,6 +11,13 @@
 #include <string>
 #include <vector>
 
+// 把 EditView 对外暴露的查找标志钉死在 Scintilla 的取值上：
+// 将来升级 Scintilla 若改了数值，编译期就会报错，而不是静默搜错。
+static_assert(npcc::edit::EditView::kSearchFlagWholeWord == SCFIND_WHOLEWORD,
+              "kSearchFlagWholeWord 必须与 SCFIND_WHOLEWORD 一致");
+static_assert(npcc::edit::EditView::kSearchFlagMatchCase == SCFIND_MATCHCASE,
+              "kSearchFlagMatchCase 必须与 SCFIND_MATCHCASE 一致");
+
 namespace npcc::edit {
 namespace {
 
@@ -316,6 +323,87 @@ int32_t EditView::CaretPosition() const {
 
 void EditView::ScrollToLine(int32_t line) const {
     Send(SCI_GOTOLINE, static_cast<uintptr_t>(line));
+}
+
+void EditView::SetSearchFlags(int32_t flags) const {
+    Send(SCI_SETSEARCHFLAGS, static_cast<uintptr_t>(flags));
+}
+
+void EditView::SetTarget(int64_t start, int64_t end) const {
+    Send(SCI_SETTARGETSTART, static_cast<uintptr_t>(start));
+    Send(SCI_SETTARGETEND, static_cast<uintptr_t>(end));
+}
+
+int64_t EditView::SearchInTarget(std::string_view bytes) const {
+    if (bytes.empty()) {
+        return -1;
+    }
+    const intptr_t position =
+        Send(SCI_SEARCHINTARGET, static_cast<uintptr_t>(bytes.size()),
+             reinterpret_cast<intptr_t>(bytes.data()));
+    return static_cast<int64_t>(position);
+}
+
+void EditView::ReplaceSelection(std::string_view bytes) const {
+    // SCI_REPLACESEL 要求 NUL 结尾
+    const std::string owned(bytes);
+    Send(SCI_REPLACESEL, 0, reinterpret_cast<intptr_t>(owned.c_str()));
+}
+
+void EditView::SetSelectionRange(int64_t start, int64_t end) const {
+    Send(SCI_SETSEL, static_cast<uintptr_t>(start), static_cast<intptr_t>(end));
+}
+
+int64_t EditView::TextLength() const {
+    return static_cast<int64_t>(Send(SCI_GETLENGTH));
+}
+
+std::string EditView::GetRange(int64_t start, int64_t end) const {
+    if (end <= start) {
+        return {};
+    }
+    std::string buffer(static_cast<size_t>(end - start), '\0');
+    Sci_TextRangeFull range{};
+    range.chrg.cpMin = static_cast<Sci_Position>(start);
+    range.chrg.cpMax = static_cast<Sci_Position>(end);
+    range.lpstrText = buffer.data();
+    Send(SCI_GETTEXTRANGEFULL, 0, reinterpret_cast<intptr_t>(&range));
+    return buffer;
+}
+
+void EditView::BeginUndoAction() const {
+    Send(SCI_BEGINUNDOACTION);
+}
+
+void EditView::EndUndoAction() const {
+    Send(SCI_ENDUNDOACTION);
+}
+
+void EditView::EnsureLineVisible(int32_t line) const {
+    Send(SCI_ENSUREVISIBLE, static_cast<uintptr_t>(line));
+}
+
+void EditView::ScrollCaretToVisible() const {
+    Send(SCI_SCROLLCARET);
+}
+
+void EditView::ConfigureSearchIndicators() const {
+    Send(SCI_INDICSETSTYLE, kIndicatorAllMatches, INDIC_ROUNDBOX);
+    Send(SCI_INDICSETFORE, kIndicatorAllMatches, RGB(0x2E, 0x86, 0xC1));
+    Send(SCI_INDICSETALPHA, kIndicatorAllMatches, 80);
+    Send(SCI_INDICSETOUTLINEALPHA, kIndicatorAllMatches, 200);
+}
+
+void EditView::MarkRange(int indicatorId, int64_t start, int64_t end) const {
+    Send(SCI_SETINDICATORCURRENT, static_cast<uintptr_t>(indicatorId));
+    Send(SCI_INDICATORFILLRANGE, static_cast<uintptr_t>(start),
+         static_cast<intptr_t>(end - start));
+}
+
+void EditView::ClearIndicator(int indicatorId) const {
+    const int64_t length = TextLength();
+    Send(SCI_SETINDICATORCURRENT, static_cast<uintptr_t>(indicatorId));
+    Send(SCI_INDICATORCLEARRANGE, 0, static_cast<intptr_t>(length));
 }
 
 }  // namespace npcc::edit

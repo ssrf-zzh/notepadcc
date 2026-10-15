@@ -99,6 +99,30 @@ public:
     int32_t CaretPosition() const;
     void    ScrollToLine(int32_t line) const;
 
+    // ---- 查找与替换支持（供 search 模块使用） ----
+    // indicator 槽位分配见设计文档 4.1：0 当前匹配、1 全部匹配
+    static constexpr int kIndicatorAllMatches = 1;
+
+    // 与 Scintilla 的 SCFIND_* 对应；EditView.cpp 里有 static_assert 钉住取值，
+    // 这样 search 模块不必包含 Scintilla 头文件。
+    static constexpr int32_t kSearchFlagWholeWord = 0x00000002;
+    static constexpr int32_t kSearchFlagMatchCase = 0x00000004;
+
+    void        SetSearchFlags(int32_t flags) const;
+    void        SetTarget(int64_t start, int64_t end) const;
+    int64_t     SearchInTarget(std::string_view bytes) const;
+    void        ReplaceSelection(std::string_view bytes) const;
+    void        SetSelectionRange(int64_t start, int64_t end) const;
+    int64_t     TextLength() const;
+    std::string GetRange(int64_t start, int64_t end) const;
+    void        BeginUndoAction() const;
+    void        EndUndoAction() const;
+    void        EnsureLineVisible(int32_t line) const;
+    void        ScrollCaretToVisible() const;
+    void        ConfigureSearchIndicators() const;
+    void        MarkRange(int indicatorId, int64_t start, int64_t end) const;
+    void        ClearIndicator(int indicatorId) const;
+
 private:
     HWND hwnd_ = nullptr;
     mutable const wchar_t* languageName_ = L"普通文本";

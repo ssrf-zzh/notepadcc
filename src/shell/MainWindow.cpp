@@ -36,6 +36,11 @@ enum : npcc::core::CmdId {
     kCmdEditPaste     = npcc::core::MakeCmdId(2, 5),
     kCmdEditSelectAll = npcc::core::MakeCmdId(2, 6),
 
+    kCmdSearchFind     = npcc::core::MakeCmdId(3, 1),
+    kCmdSearchReplace  = npcc::core::MakeCmdId(3, 2),
+    kCmdSearchFindNext = npcc::core::MakeCmdId(3, 3),
+    kCmdSearchFindPrev = npcc::core::MakeCmdId(3, 4),
+
     kCmdViewZoomIn        = npcc::core::MakeCmdId(4, 1),
     kCmdViewZoomOut       = npcc::core::MakeCmdId(4, 2),
     kCmdViewZoomReset     = npcc::core::MakeCmdId(4, 3),
@@ -149,6 +154,7 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
         case WM_CREATE: {
             tabBar_.Create(hwnd_, 1);
             statusBar_.Create(hwnd_, 2);
+            findBar_.Create(hwnd_);
             documents_ = std::make_unique<core::DocumentManager>(hwnd_);
 
             RegisterCommands();
@@ -175,7 +181,13 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         case WM_COMMAND: {
-            const auto id = static_cast<core::CmdId>(LOWORD(wParam));
+            const int controlId = LOWORD(wParam);
+            // 查找栏的控件事件（按钮点击的通知码为 0，输入框内容变化时非 0）
+            if (FindBar::IsFindBarControl(controlId) && HIWORD(wParam) == 0) {
+                HandleFindBarCommand(controlId);
+                return 0;
+            }
+            const auto id = static_cast<core::CmdId>(controlId);
             const core::CmdContext context = Context();
             if (registry_.Execute(id, context) == core::ExecResult::NotFound) {
                 return ::DefWindowProcW(hwnd_, message, wParam, lParam);
@@ -318,6 +330,16 @@ void MainWindow::RegisterCommands() {
     add(kCmdEditSelectAll, CmdCategory::Edit, L"cmd.edit.selectAll", L"全选(&L)",
         needsBuffer, [this](const CmdContext& c) { c.view->Send(kSciSelectAll); });
 
+    // ---- 搜索 ----
+    add(kCmdSearchFind, CmdCategory::Search, L"cmd.search.find", L"查找(&F)...",
+        needsBuffer, [this](const CmdContext&) { CommandFind(false); });
+    add(kCmdSearchReplace, CmdCategory::Search, L"cmd.search.replace", L"替换(&H)...",
+        needsBuffer, [this](const CmdContext&) { CommandFind(true); });
+    add(kCmdSearchFindNext, CmdCategory::Search, L"cmd.search.findNext", L"查找下一个(&N)",
+        needsBuffer, [this](const CmdContext&) { CommandFindNext(true); });
+    add(kCmdSearchFindPrev, CmdCategory::Search, L"cmd.search.findPrev", L"查找上一个(&P)",
+        needsBuffer, [this](const CmdContext&) { CommandFindNext(false); });
+
     // ---- 视图 ----
     add(kCmdViewZoomIn, CmdCategory::View, L"cmd.view.zoomIn", L"放大(&I)",
         needsBuffer, [this](const CmdContext& c) { c.view->SetZoom(c.view->ZoomLevel() + 1); });
@@ -392,6 +414,10 @@ void MainWindow::RegisterCommands() {
     registry_.BindShortcut(kCmdEditCopy, ctrl, 'C', true);
     registry_.BindShortcut(kCmdEditPaste, ctrl, 'V', true);
     registry_.BindShortcut(kCmdEditSelectAll, ctrl, 'A', true);
+    registry_.BindShortcut(kCmdSearchFind, ctrl, 'F', true);
+    registry_.BindShortcut(kCmdSearchReplace, ctrl, 'H', true);
+    registry_.BindShortcut(kCmdSearchFindNext, core::kModNone, VK_F3, true);
+    registry_.BindShortcut(kCmdSearchFindPrev, core::kModShift, VK_F3, true);
     registry_.BindShortcut(kCmdViewZoomIn, ctrl, VK_OEM_PLUS, true);
     registry_.BindShortcut(kCmdViewZoomOut, ctrl, VK_OEM_MINUS, true);
     registry_.BindShortcut(kCmdViewZoomReset, ctrl, '0', true);
@@ -447,11 +473,19 @@ void MainWindow::LayoutChildren() const {
         ::MoveWindow(tabBar_.Handle(), 0, 0, client.right, tabHeight, TRUE);
     }
 
+    int bottomInset = statusBar_.Height();
+    if (findBar_.Visible() && findBar_.Handle() != nullptr) {
+        const int findHeight = findBar_.Height();
+        ::MoveWindow(findBar_.Handle(), 0, client.bottom - bottomInset - findHeight,
+                     client.right, findHeight, TRUE);
+        bottomInset += findHeight;
+    }
+
     RECT viewRect{};
     viewRect.left = 0;
     viewRect.top = tabHeight;
     viewRect.right = client.right;
-    viewRect.bottom = client.bottom - statusBar_.Height();
+    viewRect.bottom = client.bottom - bottomInset;
     if (viewRect.bottom < viewRect.top) {
         viewRect.bottom = viewRect.top;
     }
@@ -938,6 +972,157 @@ void MainWindow::CommandPrevTab() {
         previous = (index == 0) ? order.size() - 1 : index - 1;
     }
     ActivateDocument(order[previous]);
+}
+
+edit::Document* MainWindow::ActiveDocument() const {
+    return documents_ ? documents_->Active() : nullptr;
+}
+
+search::SearchConfig MainWindow::CurrentSearchConfig() const {
+    bool utfMode = true;
+    std::uint32_t codePage = 936;
+    if (edit::Document* document = ActiveDocument(); document != nullptr) {
+        // 缓冲区是文件原始字节：UTF-8 系列走 UTF 模式，ANSI 走代码页
+        utfMode = document->buffer.encoding.uniMode != edit::UniMode::Ansi;
+        codePage = document->buffer.encoding.codePage;
+    }
+    return findBar_.Config(utfMode, codePage);
+}
+
+void MainWindow::CommandFind(bool replaceMode) {
+    if (ActiveDocument() == nullptr) {
+        return;
+    }
+    findBar_.Show(replaceMode);
+    LayoutChildren();
+}
+
+void MainWindow::CommandFindNext(bool forward) {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || !document->view) {
+        return;
+    }
+    if (!findBar_.Visible()) {
+        findBar_.Show(false);
+        LayoutChildren();
+        return;
+    }
+
+    const search::SearchConfig config = CurrentSearchConfig();
+    if (config.pattern.empty()) {
+        findBar_.SetStatus(L"请输入查找内容");
+        return;
+    }
+
+    search::InDocSearch search(*document->view);
+    search::SearchOutcome outcome;
+    bool wrapped = false;
+    const bool found = search.FindNext(config, forward, wrapped, outcome);
+    if (!outcome.Ok()) {
+        findBar_.SetStatus(outcome.message);
+        return;
+    }
+    if (!found) {
+        search.ClearMarks();
+        findBar_.SetStatus(L"未找到匹配项");
+        return;
+    }
+
+    int count = 0;
+    search::SearchOutcome markOutcome;
+    search.MarkAll(config, count, markOutcome);
+    std::wstring status = L"共 " + std::to_wstring(count) + L" 处匹配";
+    if (wrapped) {
+        status = L"已回绕， " + status;
+    }
+    findBar_.SetStatus(status);
+}
+
+bool MainWindow::HandleFindBarCommand(int controlId) {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || !document->view) {
+        return true;
+    }
+
+    switch (controlId) {
+        case kFindNextButton:
+            CommandFindNext(true);
+            return true;
+        case kFindPrevButton:
+            CommandFindNext(false);
+            return true;
+        case kCloseButton:
+            findBar_.Hide();
+            if (document->view) {
+                ::SetFocus(document->view->Handle());
+            }
+            LayoutChildren();
+            return true;
+        default:
+            break;
+    }
+
+    const search::SearchConfig config = CurrentSearchConfig();
+    if (config.pattern.empty()) {
+        findBar_.SetStatus(L"请输入查找内容");
+        return true;
+    }
+
+    search::InDocSearch search(*document->view);
+    search::SearchOutcome outcome;
+
+    switch (controlId) {
+        case kCountButton:
+        case kMarkButton: {
+            int count = 0;
+            const bool mark = (controlId == kMarkButton);
+            const bool ok = mark ? search.MarkAll(config, count, outcome)
+                                 : search.Count(config, count, outcome);
+            if (!ok) {
+                findBar_.SetStatus(outcome.message);
+            } else if (mark) {
+                findBar_.SetStatus(L"已标记 " + std::to_wstring(count) + L" 处匹配");
+            } else {
+                findBar_.SetStatus(L"共 " + std::to_wstring(count) + L" 处匹配");
+            }
+            return true;
+        }
+        case kReplaceButton: {
+            bool replaced = false;
+            if (!search.ReplaceCurrent(config, replaced, outcome)) {
+                findBar_.SetStatus(outcome.message);
+                return true;
+            }
+            findBar_.SetStatus(replaced ? L"已替换 1 处" : L"没有可替换的匹配");
+            SyncTabBar();
+            UpdateStatus();
+            return true;
+        }
+        case kReplaceAllButton: {
+            // 全部替换属于不可逆的大范围修改，先问一次
+            const std::wstring question =
+                L"将把文档中所有匹配「" + config.pattern + L"」的内容替换为「" +
+                config.replaceTo + L"」。\n\n此操作可以用一次「撤销」回退。是否继续？";
+            if (::MessageBoxW(hwnd_, question.c_str(), L"全部替换",
+                              MB_ICONQUESTION | MB_YESNO) != IDYES) {
+                return true;
+            }
+            int count = 0;
+            if (!search.ReplaceAll(config, count, outcome)) {
+                findBar_.SetStatus(outcome.message);
+                return true;
+            }
+            findBar_.SetStatus(L"已替换 " + std::to_wstring(count) + L" 处");
+            search.ClearMarks();
+            SyncTabBar();
+            UpdateTitle();
+            UpdateStatus();
+            return true;
+        }
+        default:
+            break;
+    }
+    return true;   // 输入框的其它通知先不管
 }
 
 void MainWindow::CommandAbout() {

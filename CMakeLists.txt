@@ -5,6 +5,9 @@ project(notepadcc
     DESCRIPTION "notepadcc - lightweight native Windows text/source editor"
     LANGUAGES CXX)
 
+# PCRE2 是 C 库
+enable_language(C)
+
 # 资源编译器：MinGW 用 windres，MSVC 用 rc.exe。缺失时跳过图标与清单，不影响编译。
 enable_language(RC OPTIONAL)
 
@@ -36,12 +39,15 @@ endif()
 set(NPCC_THIRD_PARTY "${CMAKE_CURRENT_SOURCE_DIR}/third_party" CACHE PATH "vendored dependencies")
 set(NPCC_SCINTILLA  "${NPCC_THIRD_PARTY}/scintilla")
 set(NPCC_LEXILLA    "${NPCC_THIRD_PARTY}/lexilla")
+set(NPCC_PCRE2      "${NPCC_THIRD_PARTY}/pcre2")
 
-if (NOT EXISTS "${NPCC_SCINTILLA}/include/Scintilla.h" OR NOT EXISTS "${NPCC_LEXILLA}/include/Lexilla.h")
+if (NOT EXISTS "${NPCC_SCINTILLA}/include/Scintilla.h"
+    OR NOT EXISTS "${NPCC_LEXILLA}/include/Lexilla.h"
+    OR NOT EXISTS "${NPCC_PCRE2}/CMakeLists.txt")
     message(FATAL_ERROR
-        "找不到第三方源码。请先运行：\n"
+        "找不到第三方源码（Scintilla / Lexilla / PCRE2）。请先运行：\n"
         "    powershell -ExecutionPolicy Bypass -File scripts/fetch_deps.ps1\n"
-        "或手动把 Scintilla / Lexilla 解压到 third_party/ 下（目录名必须是 scintilla 与 lexilla）。")
+        "或手动解压到 third_party/ 下（目录名必须是 scintilla、lexilla、pcre2）。")
 endif()
 
 # ---------------------------------------------------------------- 公共编译选项
@@ -99,6 +105,20 @@ target_include_directories(lexilla PUBLIC
 target_compile_options(lexilla PRIVATE ${NPCC_VENDOR_FLAGS})
 target_compile_definitions(lexilla PRIVATE NDEBUG)
 
+# ---------------------------------------------------------------- PCRE2（统一正则引擎，ADR-04）
+# 只编 8-bit 静态库；开 JIT；关掉测试与 pcre2grep，避免构建时间白白翻倍。
+set(BUILD_SHARED_LIBS       OFF CACHE BOOL "" FORCE)
+set(BUILD_STATIC_LIBS       ON  CACHE BOOL "" FORCE)
+set(PCRE2_BUILD_PCRE2_8     ON  CACHE BOOL "" FORCE)
+set(PCRE2_BUILD_PCRE2_16    OFF CACHE BOOL "" FORCE)
+set(PCRE2_BUILD_PCRE2_32    OFF CACHE BOOL "" FORCE)
+set(PCRE2_BUILD_TESTS       OFF CACHE BOOL "" FORCE)
+set(PCRE2_BUILD_PCRE2GREP   OFF CACHE BOOL "" FORCE)
+set(PCRE2_SUPPORT_JIT       ON  CACHE BOOL "" FORCE)
+set(PCRE2_SHOW_REPORT       OFF CACHE BOOL "" FORCE)
+add_subdirectory("${NPCC_PCRE2}" "${CMAKE_BINARY_DIR}/pcre2" EXCLUDE_FROM_ALL)
+
+# ---------------------------------------------------------------- 核心静态库（主程序与测试共用）
 # ---------------------------------------------------------------- 核心静态库（主程序与测试共用）
 set(NPCC_CORE_SOURCES
     src/core/CommandRegistry.cpp
@@ -112,15 +132,20 @@ set(NPCC_CORE_SOURCES
     src/io/AtomicFile.cpp
     src/io/FileReader.cpp
     src/io/XmlFile.cpp
+    src/search/EscapeSequence.cpp
+    src/search/InDocSearch.cpp
+    src/search/RegexEngine.cpp
+    src/search/TextBytes.cpp
     src/shell/MainWindow.cpp
     src/shell/MenuBuilder.cpp
+    src/shell/FindBar.cpp
     src/shell/StatusBar.cpp
     src/shell/TabBar.cpp)
 
 add_library(notepadcc_core STATIC ${NPCC_CORE_SOURCES})
 target_include_directories(notepadcc_core PUBLIC src)
 target_link_libraries(notepadcc_core PUBLIC
-    scintilla lexilla npcc_flags comctl32 comdlg32 shell32)
+    scintilla lexilla pcre2-8-static npcc_flags comctl32 comdlg32 shell32)
 
 # 链接与代码生成选项：主程序与测试共用
 add_library(npcc_app_options INTERFACE)

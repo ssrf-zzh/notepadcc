@@ -12,6 +12,7 @@
 #include "edit/EditView.h"
 #include "shell/StatusBar.h"
 #include "shell/TabBar.h"
+#include "shell/FindBar.h"
 
 namespace npcc::shell {
 
@@ -52,6 +53,9 @@ private:
     bool CommandCloseAll();
     void CommandNextTab();
     void CommandPrevTab();
+    void CommandFind(bool replaceMode);
+    void CommandFindNext(bool forward);
+    bool HandleFindBarCommand(int controlId);
     void CommandAbout();
 
     // ---- 文档操作 ----
@@ -69,6 +73,8 @@ private:
     edit::Document* DocumentOfView(HWND view) const;
     void HandleTabBarNotify(const TabBarNotify& notification);
     void HandleEditorNotify(const NMHDR& header);
+    search::SearchConfig CurrentSearchConfig() const;
+    edit::Document* ActiveDocument() const;
 
     HINSTANCE                  instance_ = nullptr;
     HWND                       hwnd_ = nullptr;
@@ -78,6 +84,7 @@ private:
     std::unique_ptr<core::DocumentManager> documents_;
     TabBar                     tabBar_;
     StatusBar                  statusBar_;
+    FindBar                    findBar_;
 
     std::wstring lastDirectory_;
     bool showWhitespace_ = false;
