@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "edit/Encoding.h"
+#include "edit/LanguageRegistry.h"
 
 namespace npcc::edit {
 
@@ -99,7 +100,12 @@ public:
     void SetTabWidth(int32_t width, bool useTabs) const;
 
     // ---- 词法着色：按扩展名套用内置语言表（M1 会替换为 lang/ 模块的语言定义加载器） ----
-    void ApplyLanguageForPath(const std::wstring& filePath) const;
+    // 按扩展名套用语言。registry 为空时用内置语言表（单元测试与老调用点走这条路）。
+    void ApplyLanguageForPath(const std::wstring& filePath,
+                              const LanguageRegistry* registry = nullptr) const;
+    // 直接按语言定义套用（应用侧走这条：定义来自用户可编辑的 langs.xml）
+    void ApplyLanguage(const LanguageDef& language) const;
+    const std::wstring& LanguageName() const noexcept { return languageKey_; }
     const wchar_t* CurrentLanguageName() const noexcept { return languageName_; }
 
     // ---- 查询 ----
@@ -248,6 +254,7 @@ public:
 private:
     HWND hwnd_ = nullptr;
     mutable const wchar_t* languageName_ = L"普通文本";
+    mutable std::wstring   languageKey_ = L"null";   // 语言定义里的稳定标识，供注释等按语言的功能使用
     mutable bool           foldingEnabled_ = false;
     mutable bool           largeFileMode_ = false;   // 大文件档：折叠一律关掉
 };

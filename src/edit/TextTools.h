@@ -45,6 +45,14 @@ std::string AddLineNumbers(std::string_view text, long long start, long long ste
 // 免得把正文开头的数字也一起砍掉
 std::string StripLineNumbers(std::string_view text);
 
+// ---- 注释（需要语言的行注释/块注释符，见 LanguageRegistry）----
+// 行注释开关：所有非空行都已经带着前缀就取消，否则加上。前缀插在缩进之后；
+// 取消时连同前缀后面的一个空格一起摘掉（这样"加注释→取消注释"是往返的）。
+std::string ToggleLineComment(std::string_view text, std::string_view prefix);
+// 块注释开关：整段已经被 start/end 包住就脱掉，否则包上
+std::string ToggleBlockComment(std::string_view text, std::string_view start,
+                               std::string_view end);
+
 // ---- 大小写（按代码页解释字节，非 ASCII 字符交给系统的大小写映射）----
 std::string ToUpperCase(std::string_view text, std::uint32_t codePage);
 std::string ToLowerCase(std::string_view text, std::uint32_t codePage);

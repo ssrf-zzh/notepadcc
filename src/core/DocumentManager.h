@@ -10,6 +10,7 @@
 #include "core/ConfigCenter.h"
 #include "edit/Document.h"
 #include "edit/FileTier.h"
+#include "edit/LanguageRegistry.h"
 
 namespace npcc::core {
 
@@ -46,6 +47,10 @@ public:
 
     // 新建文档时使用的编码与行尾（来自配置中心的"新建"分页）
     void SetNewFileDefaults(edit::UniMode mode, edit::EolMode eol, std::uint32_t codePage);
+
+    // 语言定义（可被用户的 langs.xml 覆盖）。为空时用内置表。
+    // 只持有指针：语言表的生命周期由外壳负责。
+    void SetLanguages(const edit::LanguageRegistry* languages) noexcept { languages_ = languages; }
 
     DocumentManager(const DocumentManager&) = delete;
     DocumentManager& operator=(const DocumentManager&) = delete;
@@ -126,6 +131,7 @@ private:
     edit::UniMode                            newFileUniMode_ = edit::UniMode::Utf8;
     edit::EolMode                            newFileEol_ = edit::EolMode::Crlf;
     std::uint32_t                            newFileCodePage_ = 936;
+    const edit::LanguageRegistry*            languages_ = nullptr;
 };
 
 }  // namespace npcc::core

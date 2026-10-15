@@ -123,6 +123,9 @@ CMD_TOOL_REMOVE_DUP_FIRST = (14 << 12) | 12
 CMD_TOOL_UPPERCASE = (14 << 12) | 19
 CMD_TOOL_BASE64_ENCODE = (14 << 12) | 23
 CMD_TOOL_BASE64_DECODE = (14 << 12) | 24
+CMD_TOOL_TOGGLE_COMMENT = (14 << 12) | 27
+CMD_TOOL_BLOCK_COMMENT = (14 << 12) | 28
+CMD_TOOL_EXPORT_LANGS = (14 << 12) | 29
 
 COLUMN_TEMPLATE_EDIT = 751
 COLUMN_INSERT_BUTTON = 758
@@ -924,6 +927,125 @@ def appdata_snapshot():
         for name in names:
             found.append(os.path.relpath(os.path.join(base, name), target))
     return sorted(found)
+
+
+def test_language_defs(root):
+    """语言定义与注释：注释命令按语言取注释符，导出的 langs.xml 改完重启真的生效。
+
+    最后一步是这一段的关键：它证明"语言定义是数据，不是代码"——把 cpp 的行注释符
+    改成 ;; 之后重启，注释命令就该用 ;; 而不是 //。只测"命令能加注释"是测不出这层的。
+    """
+    work = os.path.join(root, "build", "langs_test")
+    os.makedirs(work, exist_ok=True)
+    path = os.path.join(work, "sample.cpp")
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write("int a = 1;\nint b = 2;\n")
+
+    cfg = os.path.join(root, "build", "bin", "config")
+    langs = os.path.join(cfg, "langs.xml")
+    for name in ("config.xml", "session.xml", "langs.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - sample.cpp")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到可见的编辑控件")
+            return False
+
+        # 行注释：加 → 取消
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_TOGGLE_COMMENT, 0)
+        time.sleep(0.6)
+        if scinti_text(scinti) != "// int a = 1;\n// int b = 2;\n":
+            print(f"  FAIL: 行注释结果不对 {scinti_text(scinti)!r}")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_TOGGLE_COMMENT, 0)
+        time.sleep(0.6)
+        if scinti_text(scinti) != "int a = 1;\nint b = 2;\n":
+            print(f"  FAIL: 取消行注释应该回到原文，实际 {scinti_text(scinti)!r}")
+            return False
+
+        # 块注释：包住 → 脱掉
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_BLOCK_COMMENT, 0)
+        time.sleep(0.6)
+        # 整段原字节被包住（含结尾换行），所以多行时 */ 会落在独立一行——这是刻意的：
+        # 不擅自动用户的行结构
+        if scinti_text(scinti) != "/*int a = 1;\nint b = 2;\n*/":
+            print(f"  FAIL: 块注释结果不对 {scinti_text(scinti)!r}")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_BLOCK_COMMENT, 0)
+        time.sleep(0.6)
+        if scinti_text(scinti) != "int a = 1;\nint b = 2;\n":
+            print(f"  FAIL: 取消块注释应该回到原文，实际 {scinti_text(scinti)!r}")
+            return False
+
+        # 导出语言定义
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_EXPORT_LANGS, 0)
+        if not dismiss_dialog("导出语言定义", IDOK, timeout=8.0):
+            print("  FAIL: 导出语言定义之后应当给出说明")
+            return False
+        time.sleep(0.5)
+        if not os.path.exists(langs):
+            print(f"  FAIL: 没有导出 {langs}")
+            return False
+        with open(langs, "r", encoding="utf-8", errors="replace") as handle:
+            exported = handle.read()
+        if 'name="cpp"' not in exported or "<LineComment" not in exported:
+            print(f"  FAIL: 导出的 langs.xml 内容不对\n{exported[:300]}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    # 改语言定义 → 重启 → 注释命令应当改用新注释符
+    replaced = exported.replace('<LineComment prefix="//"/>', '<LineComment prefix=";;"/>')
+    if replaced == exported:
+        print("  FAIL: 没能改写导出的语言定义（找不到 cpp 的行注释）")
+        return False
+    with open(langs, "w", encoding="utf-8", newline="") as handle:
+        handle.write(replaced)
+
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - sample.cpp")
+    try:
+        if not window:
+            print("  FAIL: 改完语言定义之后重启找不到窗口")
+            return False
+        scinti = visible_scintilla(window)
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_TOGGLE_COMMENT, 0)
+        time.sleep(0.6)
+        if scinti_text(scinti) != ";; int a = 1;\n;; int b = 2;\n":
+            print(f"  FAIL: 改了 langs.xml 之后注释符应当变成 ;;，实际 "
+                  f"{scinti_text(scinti)!r}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        if os.path.exists(langs):
+            os.remove(langs)
+        for name in ("config.xml", "session.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    print("  语言定义：按语言注释/取消注释（行与块）、导出 langs.xml、"
+          "改完重启立即生效")
+    return True
 
 
 def test_tools_menu(root):
@@ -2369,6 +2491,8 @@ def run():
         failed = True
     if not test_tools_menu(root):
         failed = True
+    if not test_language_defs(root):
+        failed = True
     if not test_associated_commands(root):
         failed = True
     if not test_portable_package(root):
@@ -2379,7 +2503,7 @@ def run():
         return 1
     print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + "
           "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + "
-          "编码转换 + 单实例 + 工具菜单 + 文件关联 + 绿色打包）")
+          "编码转换 + 单实例 + 工具菜单 + 语言定义 + 文件关联 + 绿色打包）")
     return 0
 
 

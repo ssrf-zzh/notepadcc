@@ -13,6 +13,7 @@
 #include "core/SnapshotStore.h"
 #include "edit/Document.h"
 #include "edit/EditView.h"
+#include "edit/LanguageRegistry.h"
 #include "infra/CrashGuard.h"
 #include "shell/StatusBar.h"
 #include "shell/TabBar.h"
@@ -108,6 +109,9 @@ private:
         const std::function<std::string(std::string_view, std::uint32_t)>& tool,
         const wchar_t* description);
     void CommandDecodeText(bool base64);
+    void CommandToggleComment(bool block);
+    void CommandExportLanguageDefs();
+    const edit::LanguageDef* ActiveLanguage() const;
     void WriteConvertBackup(const std::wstring& path) const;
     void CommandRegisterAssociations(bool registerThem);
     void CommandAbout();
@@ -144,6 +148,7 @@ private:
     core::CommandRegistry      registry_;
     core::ConfigCenter         config_;
     core::SnapshotStore        snapshots_;
+    edit::LanguageRegistry     languages_;
     // 启动时记录的默认快捷键表，"恢复默认"要用（见 ShortcutDialog）
     std::vector<core::ShortcutBinding> defaultShortcuts_;
     // 崩溃抢救的文档槽位。数组必须活到进程结束：崩溃处理器只持有指针。

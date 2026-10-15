@@ -30,82 +30,22 @@ static_assert(npcc::edit::EditView::kRectModifierAlt == SCMOD_ALT,
 namespace npcc::edit {
 namespace {
 
-// M0 的最小语言表：扩展名 -> (Lexilla lexer 名, 关键词组 0)。
-// M1 起由 lang/LexerRegistry 从 langs.xml 载入，这里只是让 M0 有可见的语法着色。
-struct BuiltinLanguage {
-    const wchar_t* extension;
-    const char*    lexer;
-    const char*    keywords;
-    const wchar_t* displayName;
-    // 该 lexer 是否支持折叠。不支持的语言把折叠边距藏起来，
-    // 否则会留一条永远空着的窄边距，看起来像坏了。
-    bool           foldable;
-};
+// 内置语言表的单例：单元测试与没传 registry 的调用点用它兜底。
+// 应用侧走 LanguageRegistry（可能已被用户的 langs.xml 覆盖）。
+const LanguageRegistry& FallbackRegistry() {
+    static const LanguageRegistry registry;   // 构造即内置默认表
+    return registry;
+}
 
-constexpr const char* kCppKeywords =
-    "alignas alignof auto bool break case catch char class const constexpr continue default "
-    "delete do double else enum explicit extern false float for friend goto if inline int long "
-    "mutable namespace new noexcept nullptr operator private protected public register return "
-    "short signed sizeof static struct switch template this thread_local throw true try typedef "
-    "typename union unsigned using virtual void volatile while wchar_t";
-
-constexpr const char* kJsKeywords =
-    "async await break case catch class const continue debugger default delete do else export "
-    "extends false finally for function if import in instanceof let new null return super switch "
-    "this throw true try typeof undefined var void while with yield";
-
-constexpr const char* kTypeScriptKeywords =
-    "abstract any as async await boolean break case catch class const constructor continue "
-    "declare default delete do else enum export extends false finally for from function if "
-    "implements import in instanceof interface let module namespace new null number object "
-    "private protected public readonly return static string super switch this throw true try "
-    "type typeof undefined var void while with yield";
-
-const BuiltinLanguage kBuiltinLanguages[] = {
-    // 同一族语言共用一份关键字表：写成 nullptr 的话关键字根本不会被着色
-    // （词法器只认 SCI_SETKEYWORDS 给的那几组词），.h 与 .ts 就是这么被漏掉的。
-    {L"cpp", "cpp", kCppKeywords, L"C/C++", true},
-    {L"c",   "cpp", kCppKeywords, L"C/C++", true},
-    {L"h",   "cpp", kCppKeywords, L"C/C++", true},
-    {L"hpp", "cpp", kCppKeywords, L"C/C++", true},
-    {L"py",  "python",
-     "and as assert async await break class continue def del elif else except False finally for "
-     "from global if import in is lambda None nonlocal not or pass raise return True try while "
-     "with yield",
-     L"Python", true},
-    // 注意：Lexilla 里**没有** "javascript" 这个词法器（本版实测 CreateLexer 返回空，
-    // 结果是 JS 文件连注释都不着色、也没法折叠）。业界通行做法是用 cpp 词法器
-    // 配一套 JavaScript 关键字，注释/字符串/数字/花括号折叠都能正常工作。
-    {L"js",  "cpp", kJsKeywords, L"JavaScript", true},
-    {L"mjs", "cpp", kJsKeywords, L"JavaScript", true},
-    {L"jsx", "cpp", kJsKeywords, L"JavaScript (JSX)", true},
-    {L"ts",  "cpp", kTypeScriptKeywords, L"TypeScript", true},
-    {L"json","json", nullptr, L"JSON", true},
-    {L"xml", "xml", nullptr, L"XML", true},
-    {L"html","hypertext", nullptr, L"HTML", true},
-    {L"htm", "hypertext", nullptr, L"HTML", true},
-    {L"css", "css", nullptr, L"CSS", true},
-    {L"md",  "markdown", nullptr, L"Markdown", true},
-    {L"sql", "sql",
-     "select from where insert into values update set delete create table database index view "
-     "drop alter join left right inner outer on group by order having union all distinct as",
-     L"SQL", true},
-    // batch / props 这两个 lexer 不算折叠层级，边距藏起来
-    {L"bat", "batch", nullptr, L"Batch", false},
-    {L"cmd", "batch", nullptr, L"Batch", false},
-    {L"ps1", "powershell", nullptr, L"PowerShell", true},
-    {L"ini", "props", nullptr, L"配置文件", false},
-    {L"log", "null", nullptr, L"日志", false},
-};
 
 // ---------------------------------------------------------------- 语法着色的默认配色
 //
 // 光接上词法器不等于"用户看得见颜色"：词法器只负责把每个 token 标上样式号，
-// 颜色得我们按样式号设进去。这些样式号取自 Lexilla 的 SCE_* 定义（third_party/
+// 颜色得我们按样式号设进去。样式号取自 Lexilla 的 SCE_* 定义（third_party/
 // lexilla/include/SciLexer.h），**不靠记忆写数字**——写错的表现是"某个语言没颜色"，
 // 而且不报任何错。单元测试会按真实 token 位置核对颜色确实生效。
 //
-// M2 的样式配置器会在这张表之上做用户可调，所以这里只管"开箱可用"。
+// 这里的默认值是"开箱可用"，用户可以改（stylers.xml 覆盖这一层，见 StyleScheme）。
 struct SyntaxStyleMap {
     const char* lexer;
     int commentLine;    // -1 表示该语言没有这一类
@@ -159,27 +99,6 @@ const SyntaxStyleMap* FindSyntaxMap(const char* lexerName) {
         }
     }
     return nullptr;
-}
-
-const BuiltinLanguage* FindLanguage(const std::wstring& extension, const BuiltinLanguage* fallback) {
-    for (const auto& entry : kBuiltinLanguages) {
-        if (extension == entry.extension) {
-            return &entry;
-        }
-    }
-    return fallback;
-}
-
-std::wstring ExtensionOf(const std::wstring& path) {
-    const size_t dot = path.find_last_of(L'.');
-    if (dot == std::wstring::npos || dot + 1 >= path.size()) {
-        return {};
-    }
-    std::wstring extension = path.substr(dot + 1);
-    for (wchar_t& ch : extension) {
-        ch = static_cast<wchar_t>(::towlower(ch));
-    }
-    return extension;
 }
 
 }  // namespace
@@ -862,22 +781,18 @@ void EditView::ApplySyntaxColours(const char* lexerName) const {
     }
 }
 
-void EditView::ApplyLanguageForPath(const std::wstring& filePath) const {
-    const BuiltinLanguage* language = FindLanguage(ExtensionOf(filePath), nullptr);
-    if (language == nullptr) {
-        languageName_ = L"普通文本";
-        Scintilla::ILexer5* plain = CreateLexer("null");
-        Send(SCI_SETILEXER, 0, reinterpret_cast<intptr_t>(plain));
-        SetFoldingEnabled(false);
-        return;
-    }
-    languageName_ = language->displayName;
-    Scintilla::ILexer5* lexer = CreateLexer(language->lexer);
+void EditView::ApplyLanguage(const LanguageDef& language) const {
+    languageName_ = language.displayName.c_str();
+    languageKey_ = language.languageName;
+    Scintilla::ILexer5* lexer = CreateLexer(language.lexer.c_str());
     Send(SCI_SETILEXER, 0, reinterpret_cast<intptr_t>(lexer));
-    if (language->keywords != nullptr) {
-        Send(SCI_SETKEYWORDS, 0, reinterpret_cast<intptr_t>(language->keywords));
+    for (std::size_t group = 0; group < language.keywords.size(); ++group) {
+        if (language.keywords[group].empty()) {
+            continue;
+        }
+        Send(SCI_SETKEYWORDS, group, reinterpret_cast<intptr_t>(language.keywords[group].c_str()));
     }
-    if (language->foldable) {
+    if (language.foldable) {
         // 折叠层级是 lexer 自己算的，但要不要算得先告诉它。
         // fold.compact=0 是关键：默认值会把 "}" 后面没有正文的块折起来，
         // 折出来的看起来像丢了一行。
@@ -887,17 +802,33 @@ void EditView::ApplyLanguageForPath(const std::wstring& filePath) const {
              reinterpret_cast<intptr_t>("0"));
         Send(SCI_SETPROPERTY, reinterpret_cast<uintptr_t>("fold.comment"),
              reinterpret_cast<intptr_t>("1"));
-        const std::string_view lexerName(language->lexer);
+        const std::string_view lexerName(language.lexer);
         if (lexerName == "cpp" || lexerName == "xml" || lexerName == "hypertext") {
             // 预处理块（#if / #region）也能折
             Send(SCI_SETPROPERTY, reinterpret_cast<uintptr_t>("fold.preprocessor"),
                  reinterpret_cast<intptr_t>("1"));
         }
     }
-    SetFoldingEnabled(language->foldable);
-    ApplySyntaxColours(language->lexer);
+    SetFoldingEnabled(language.foldable);
+    ApplySyntaxColours(language.lexer.c_str());
     // 语言切换后需要整体重新着色
     Send(SCI_COLOURISE, 0, -1);
+}
+
+void EditView::ApplyLanguageForPath(const std::wstring& filePath,
+                                    const LanguageRegistry* registry) const {
+    const std::string extension = LanguageRegistry::ExtensionOfFile(filePath);
+    const LanguageRegistry* source = registry != nullptr ? registry : &FallbackRegistry();
+    if (const LanguageDef* language = source->FindByExtension(extension); language != nullptr) {
+        ApplyLanguage(*language);
+        return;
+    }
+    // 没有匹配的语言：退回纯文本
+    languageName_ = L"纯文本";
+    languageKey_ = L"null";
+    Scintilla::ILexer5* plain = CreateLexer("null");
+    Send(SCI_SETILEXER, 0, reinterpret_cast<intptr_t>(plain));
+    SetFoldingEnabled(false);
 }
 
 int32_t EditView::SelectionStart() const {

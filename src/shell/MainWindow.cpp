@@ -120,6 +120,9 @@ enum : npcc::core::CmdId {
     kCmdToolBase64Decode    = npcc::core::MakeCmdId(14, 24),
     kCmdToolHtmlEscape      = npcc::core::MakeCmdId(14, 25),
     kCmdToolHtmlUnescape    = npcc::core::MakeCmdId(14, 26),
+    kCmdToolToggleComment   = npcc::core::MakeCmdId(14, 27),
+    kCmdToolBlockComment    = npcc::core::MakeCmdId(14, 28),
+    kCmdToolExportLanguages = npcc::core::MakeCmdId(14, 29),
 
     kCmdWindowNext = npcc::core::MakeCmdId(11, 1),
     kCmdWindowPrev = npcc::core::MakeCmdId(11, 2),
@@ -242,6 +245,12 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             findBar_.Create(hwnd_);
             searchPanel_.Create(hwnd_);
             documents_ = std::make_unique<core::DocumentManager>(hwnd_);
+            // 语言定义要在打开文件之前加载好，否则第一个文件会按内置表着色
+            std::wstring languageError;
+            if (!languages_.Load(&languageError)) {
+                infra::LogWarn(L"langs", L"语言定义加载失败，改用内置表: " + languageError);
+            }
+            documents_->SetLanguages(&languages_);
             ApplyConfigToRuntime();
             crossSearch_ = std::make_unique<search::CrossFileSearch>();
             crossReplace_ = std::make_unique<search::CrossFileReplace>();
@@ -891,6 +900,17 @@ void MainWindow::RegisterCommands() {
     addTool(kCmdToolHtmlUnescape, L"cmd.tool.htmlUnescape", L"HTML 实体还原",
             [](std::string_view text, std::uint32_t) { return edit::UnescapeHtml(text); });
 
+    addSeparator(L"cmd.tool.sepComment");
+    add(kCmdToolToggleComment, CmdCategory::Tools, L"cmd.tool.toggleComment",
+        L"注释/取消注释(&Q)", needsWritable,
+        [this](const CmdContext&) { CommandToggleComment(false); });
+    add(kCmdToolBlockComment, CmdCategory::Tools, L"cmd.tool.blockComment",
+        L"区块注释/取消(&B)", needsWritable,
+        [this](const CmdContext&) { CommandToggleComment(true); });
+    add(kCmdToolExportLanguages, CmdCategory::Tools, L"cmd.tool.exportLanguages",
+        L"导出语言定义到配置目录", core::kCmdNone,
+        [this](const CmdContext&) { CommandExportLanguageDefs(); });
+
     // ---- 窗口 ----
     add(kCmdWindowNext, CmdCategory::Window, L"cmd.window.next", L"下一个标签(&N)",
         core::kCmdNone, [this](const CmdContext&) { CommandNextTab(); });
@@ -980,6 +1000,8 @@ void MainWindow::RegisterCommands() {
     registry_.BindShortcut(kCmdToolMoveLineDown, ctrlShift, VK_DOWN, true);
     registry_.BindShortcut(kCmdToolUpperCase, ctrlShift, 'U', true);
     registry_.BindShortcut(kCmdToolLowerCase, ctrl, 'U', true);
+    registry_.BindShortcut(kCmdToolToggleComment, ctrl, 'Q', true);
+    registry_.BindShortcut(kCmdToolBlockComment, ctrlShift, 'Q', true);
 }
 
 void MainWindow::RebuildMenu() {
@@ -2684,6 +2706,87 @@ void MainWindow::ApplyTextTool(
     UpdateStatus();
 }
 
+const edit::LanguageDef* MainWindow::ActiveLanguage() const {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr) {
+        return nullptr;
+    }
+    const std::string extension =
+        edit::LanguageRegistry::ExtensionOfFile(document->buffer.filePath);
+    return languages_.FindByExtension(extension);
+}
+
+void MainWindow::CommandToggleComment(bool block) {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr) {
+        return;
+    }
+    const edit::LanguageDef* language = ActiveLanguage();
+    if (language == nullptr) {
+        ::MessageBoxW(hwnd_, L"认不出这份文档的语言，无法判断该用什么注释符。", L"注释",
+                      MB_ICONINFORMATION);
+        return;
+    }
+    if (block) {
+        if (language->blockCommentStart.empty() || language->blockCommentEnd.empty()) {
+            ::MessageBoxW(hwnd_, (L"语言「" + language->displayName +
+                                  L"」没有定义块注释符（可在导出后的 langs.xml 里补上）。")
+                                     .c_str(),
+                          L"块注释", MB_ICONINFORMATION);
+            return;
+        }
+        const std::string start = language->blockCommentStart;
+        const std::string end = language->blockCommentEnd;
+        ApplyTextTool(
+            [start, end](std::string_view text, std::uint32_t) {
+                return edit::ToggleBlockComment(text, start, end);
+            },
+            L"区块注释");
+        return;
+    }
+    if (language->lineComment.empty()) {
+        ::MessageBoxW(hwnd_, (L"语言「" + language->displayName +
+                              L"」没有定义行注释符（可在导出后的 langs.xml 里补上）。")
+                                 .c_str(),
+                      L"注释", MB_ICONINFORMATION);
+        return;
+    }
+    const std::string prefix = language->lineComment;
+    ApplyTextTool(
+        [prefix](std::string_view text, std::uint32_t) {
+            return edit::ToggleLineComment(text, prefix);
+        },
+        L"注释/取消注释");
+}
+
+void MainWindow::CommandExportLanguageDefs() {
+    const std::filesystem::path path = edit::LanguageRegistry::Path();
+    const bool exists = ::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+    if (exists) {
+        const int answer = ::MessageBoxW(
+            hwnd_,
+            (L"配置目录里已经有 langs.xml：\n" + path.wstring() +
+             L"\n\n覆盖它会丢掉你改过的内容。要用当前生效的定义覆盖吗？")
+                .c_str(),
+            L"导出语言定义", MB_ICONWARNING | MB_YESNO);
+        if (answer != IDYES) {
+            return;
+        }
+    }
+    std::wstring error;
+    if (!languages_.Save(&error)) {
+        ::MessageBoxW(hwnd_, (L"导出失败：\n" + error).c_str(), L"导出语言定义", MB_ICONWARNING);
+        return;
+    }
+    // 导出之后用户可以改这份文件，下次启动生效；这里把"怎么用"说清楚
+    ::MessageBoxW(hwnd_,
+                  (L"语言定义已写到：\n" + path.wstring() +
+                   L"\n\n可以编辑它来改扩展名归属、关键字、注释符；文件里出现的语言覆盖内置同名"
+                   L"语言，没出现的仍用内置值。改完重启生效。")
+                      .c_str(),
+                  L"导出语言定义", MB_ICONINFORMATION);
+}
+
 void MainWindow::CommandDecodeText(bool base64) {
     edit::Document* document = ActiveDocument();
     if (document == nullptr || document->view == nullptr) {
@@ -2869,7 +2972,7 @@ void MainWindow::SyncSplitView() {
     // 克隆视图是独立的 Scintilla 控件：显示开关、字号缩放、语法着色都得再来一遍，
     // 否则它会用一份默认样式显示同一份文档，看起来像另一个程序。
     ApplyEditConfigToView(*clone);
-    clone->ApplyLanguageForPath(document->buffer.filePath);
+    clone->ApplyLanguageForPath(document->buffer.filePath, &languages_);
     clone->SetFirstVisibleLine(document->view->FirstVisibleLine());
 }
 

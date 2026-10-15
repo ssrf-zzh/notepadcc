@@ -2685,6 +2685,146 @@ int main() {
             Check(UnescapeHtml("a & b") == "a & b", "孤立的 & 不当实体处理");
             Check(EscapeHtml("") == "" && UnescapeHtml("") == "", "空串两头都不出错");
         }
+
+        // 注释：加与取消要往返，缩进要保留，空行不要被动
+        {
+            Check(ToggleLineComment("a\nb\n", "//") == "// a\n// b\n", "加行注释");
+            Check(ToggleLineComment(ToggleLineComment("a\nb\n", "//"), "//") == "a\nb\n",
+                  "加注释再取消可往返");
+            Check(ToggleLineComment("  a\n", "//") == "  // a\n", "注释符插在缩进之后");
+            Check(ToggleLineComment("a\n\nb\n", "//") == "// a\n\n// b\n", "空行不被动");
+            Check(ToggleLineComment("// a\n// b\n", "//") == "a\nb\n", "全部注释了才取消");
+            Check(ToggleLineComment("//a\nb\n", "//") == "// //a\n// b\n",
+                  "只有部分行有注释时统一加上（而不是取消）");
+            Check(ToggleLineComment("rem a\n", "REM ") == "a\n", "批处理注释前缀忽略大小写");
+            Check(ToggleLineComment("a\n", "") == "a\n", "没有行注释符时原样返回");
+
+            Check(ToggleBlockComment("x", "/*", "*/") == "/*x*/", "加块注释");
+            Check(ToggleBlockComment("/* x */", "/*", "*/") == "x",
+                  "取消块注释（连两头的空白一起去掉）");
+            Check(ToggleBlockComment("/*x*/", "/*", "*/") == "x", "取消块注释（没有多余空白）");
+            Check(ToggleBlockComment("a\nb", "<!--", "-->") == "<!--a\nb-->", "多行整段包住");
+            Check(ToggleBlockComment("x", "", "") == "x", "没有块注释符时原样返回");
+        }
+    }
+
+    // ---------------------------------------------------------------- 语言定义
+    // 语言定义是"用什么词法器、关键字是什么、注释符是什么"的权威来源。它现在可以
+    // 被用户的 langs.xml 覆盖，所以这一段要同时钉住"内置表可用的默认值"与
+    // "文件里的覆盖确实生效、没提到的语言仍用内置值"。
+    Section("语言定义（langs.xml）");
+    {
+        using npcc::edit::LanguageRegistry;
+
+        npcc::infra::InitializePaths(true);
+        const std::string extensionCases[][2] = {
+            {"a.cpp", "cpp"}, {"B.CPP", "cpp"}, {"x.py", "py"}, {"y.JS", "js"},
+            {"z.md", "md"}, {"w.sql", "sql"}, {"v.ps1", "ps1"},
+            {"noext", ""}, {"dir.with.dots/plain", ""}};
+        for (const auto& testCase : extensionCases) {
+            const std::wstring wide(testCase[0].begin(), testCase[0].end());
+            CheckEqual(LanguageRegistry::ExtensionOfFile(wide), testCase[1],
+                       "从路径取扩展名（小写、不带点）");
+        }
+
+        {
+            LanguageRegistry registry;
+            std::wstring error;
+            Check(registry.Load(&error), "没有 langs.xml 时加载成功（用内置表）");
+
+            const npcc::edit::LanguageDef* cpp = registry.FindByExtension("cpp");
+            Check(cpp != nullptr, "内置表认得出 cpp");
+            Check(cpp != nullptr && cpp->lexer == "cpp", "cpp 用的是 cpp 词法器");
+            Check(cpp != nullptr && cpp->lineComment == "//" &&
+                      cpp->blockCommentStart == "/*" && cpp->blockCommentEnd == "*/",
+                  "cpp 的注释符正确");
+            Check(cpp != nullptr && !cpp->keywords.empty() && !cpp->keywords[0].empty(),
+                  "cpp 带关键字表（没有关键字表等于没有关键字着色）");
+
+            const npcc::edit::LanguageDef* js = registry.FindByExtension("js");
+            Check(js != nullptr && js->lexer == "cpp",
+                  "javascript 用 cpp 词法器（Lexilla 里没有 javascript 词法器）");
+            const npcc::edit::LanguageDef* xml = registry.FindByExtension("xml");
+            Check(xml != nullptr && xml->lineComment.empty() && xml->blockCommentStart == "<!--",
+                  "xml 只有块注释符");
+            Check(registry.FindByExtension("nope") == nullptr, "认不出的扩展名返回空");
+            Check(registry.Find(L"sql") != nullptr, "按语言标识查得到");
+        }
+
+        // 导出 → 重新加载：往返之后应当与内置表等价
+        {
+            const std::filesystem::path path = LanguageRegistry::Path();
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+            LanguageRegistry exported;
+            std::wstring error;
+            Check(exported.Save(&error), "导出语言定义成功");
+            Check(std::filesystem::exists(path), "导出的 langs.xml 落盘了");
+
+            LanguageRegistry reloaded;
+            Check(reloaded.Load(&error), "重新加载导出的语言定义成功");
+            Check(reloaded.All().size() == exported.All().size(), "语言条数往返一致");
+            const npcc::edit::LanguageDef* cpp = reloaded.FindByExtension("cpp");
+            Check(cpp != nullptr && cpp->lineComment == "//" && !cpp->keywords.empty(),
+                  "往返后 cpp 的定义完整（含注释符与关键字）");
+            const npcc::edit::LanguageDef* md = reloaded.FindByExtension("md");
+            Check(md != nullptr && md->blockCommentStart == "<!--", "往返后 markdown 的定义完整");
+        }
+
+        // 文件里的语言覆盖内置同名语言；没提到的仍用内置值；新增的语言追加
+        {
+            const std::filesystem::path path = LanguageRegistry::Path();
+            const std::string custom =
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<Languages schemaVersion=\"1\">\n"
+                "  <Language name=\"cpp\" display=\"C++ 自定义\" lexer=\"cpp\" ext=\"cpp ccx\""
+                " foldable=\"yes\">\n"
+                "    <LineComment prefix=\";;\"/>\n"
+                "    <Keywords group=\"0\">int long</Keywords>\n"
+                "  </Language>\n"
+                "  <Language name=\"mylang\" display=\"我的语言\" lexer=\"props\" ext=\"mylang\""
+                " foldable=\"no\">\n"
+                "    <LineComment prefix=\"##\"/>\n"
+                "  </Language>\n"
+                "</Languages>\n";
+            Check(WriteFileDirect(path, custom), "写入自定义 langs.xml");
+            LanguageRegistry registry;
+            std::wstring error;
+            Check(registry.Load(&error), "加载自定义 langs.xml 成功");
+            const npcc::edit::LanguageDef* cpp = registry.FindByExtension("cpp");
+            Check(cpp != nullptr && cpp->lineComment == ";;", "文件里的行注释符覆盖了内置值");
+            Check(cpp != nullptr && cpp->displayName == L"C++ 自定义", "显示名也被覆盖");
+            Check(cpp != nullptr && cpp->keywords.size() == 1 && cpp->keywords[0] == "int long",
+                  "关键字表被整体替换");
+            Check(registry.FindByExtension("ccx") == cpp, "新增的扩展名指向同一个语言");
+            Check(registry.FindByExtension("py") != nullptr,
+                  "文件里没提到的语言仍用内置值");
+            const npcc::edit::LanguageDef* mine = registry.Find(L"mylang");
+            Check(mine != nullptr && mine->extensions.size() == 1 && !mine->foldable,
+                  "文件里新增的语言被追加进来");
+        }
+
+        // 坏文件与高版本：报错并退回内置表，而不是让程序起不来
+        {
+            const std::filesystem::path path = LanguageRegistry::Path();
+            Check(WriteFileDirect(path, "not xml at all"), "写入损坏的 langs.xml");
+            LanguageRegistry registry;
+            std::wstring error;
+            Check(!registry.Load(&error), "损坏的 langs.xml 加载失败");
+            Check(!error.empty(), "失败时给出原因");
+            Check(registry.FindByExtension("cpp") != nullptr,
+                  "失败之后仍然有内置表可用（不能因为配置坏了就没法编辑）");
+
+            const std::string future =
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<Languages schemaVersion=\"99\"><Language name=\"x\" lexer=\"null\"/></Languages>\n";
+            Check(WriteFileDirect(path, future), "写入高版本 langs.xml");
+            LanguageRegistry futureRegistry;
+            Check(!futureRegistry.Load(&error), "高版本 langs.xml 被拒绝");
+
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+        }
     }
 
     Section("文件关联（只进打开方式列表，不抢默认关联）");

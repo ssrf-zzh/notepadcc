@@ -320,6 +320,122 @@ std::string StripLineNumbers(std::string_view text) {
     return JoinLines(lines, parts.eol, parts.trailingEol);
 }
 
+namespace {
+
+// 比较前缀时忽略大小写：`REM` / `rem` 都算批处理注释，
+// 而 `//`、`#`、`;` 这类符号本来就无所谓大小写
+bool StartsWithPrefix(std::string_view line, std::size_t offset, std::string_view prefix) {
+    if (line.size() < offset + prefix.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < prefix.size(); ++i) {
+        const char a = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(line[offset + i])));
+        const char b = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(prefix[i])));
+        if (a != b) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::size_t IndentOf(std::string_view line) {
+    std::size_t index = 0;
+    while (index < line.size() && (line[index] == ' ' || line[index] == '\t')) {
+        ++index;
+    }
+    return index;
+}
+
+}  // namespace
+
+std::string ToggleLineComment(std::string_view text, std::string_view prefix) {
+    if (prefix.empty() || text.empty()) {
+        return std::string(text);   // 该语言没有行注释符：原样返回，由调用方提示
+    }
+    const LineSplit parts = SplitLines(text);
+
+    // 全部非空行都已经注释了才做"取消"，否则统一加上——
+    // 混着来的情况（一半有注释一半没有）加上注释更符合直觉
+    bool allCommented = true;
+    bool anyContent = false;
+    for (const std::string& line : parts.lines) {
+        const std::size_t indent = IndentOf(line);
+        if (indent >= line.size()) {
+            continue;   // 空行不参与判断，也不会被动到
+        }
+        anyContent = true;
+        if (!StartsWithPrefix(line, indent, prefix)) {
+            allCommented = false;
+            break;
+        }
+    }
+    if (!anyContent) {
+        return std::string(text);
+    }
+
+    std::vector<std::string> lines;
+    lines.reserve(parts.lines.size());
+    const bool addSpace = !prefix.empty() && prefix.back() != ' ';
+    for (const std::string& line : parts.lines) {
+        const std::size_t indent = IndentOf(line);
+        if (indent >= line.size()) {
+            lines.push_back(line);   // 空行原样保留
+            continue;
+        }
+        if (allCommented) {
+            std::size_t body = indent + prefix.size();
+            if (body < line.size() && line[body] == ' ') {
+                ++body;   // 连同插入时补的那个空格一起去掉
+            }
+            lines.push_back(line.substr(0, indent) + line.substr(body));
+        } else {
+            std::string marked = line.substr(0, indent);
+            marked += prefix;
+            if (addSpace && indent < line.size() && line[indent] != ' ') {
+                marked += ' ';
+            }
+            marked += line.substr(indent);
+            lines.push_back(std::move(marked));
+        }
+    }
+    return JoinLines(lines, parts.eol, parts.trailingEol);
+}
+
+std::string ToggleBlockComment(std::string_view text, std::string_view start,
+                               std::string_view end) {
+    if (start.empty() || end.empty() || text.empty()) {
+        return std::string(text);
+    }
+    // 两头都去掉空白再判断，免得"包住了但外面有空格"被认成没包
+    std::size_t begin = 0;
+    std::size_t finish = text.size();
+    while (begin < finish && IsAsciiSpace(text[begin])) {
+        ++begin;
+    }
+    while (finish > begin && IsAsciiSpace(text[finish - 1])) {
+        --finish;
+    }
+    const std::string_view core = text.substr(begin, finish - begin);
+    if (core.size() >= start.size() + end.size() && core.compare(0, start.size(), start) == 0 &&
+        core.compare(core.size() - end.size(), end.size(), end) == 0) {
+        // 脱掉之后再清一次两头的空白，避免"脱了但两边留下一行空格"
+        std::string_view inner = core.substr(start.size(), core.size() - start.size() - end.size());
+        std::size_t innerBegin = 0;
+        std::size_t innerEnd = inner.size();
+        while (innerBegin < innerEnd && (inner[innerBegin] == ' ' || inner[innerBegin] == '\t')) {
+            ++innerBegin;
+        }
+        while (innerEnd > innerBegin &&
+               (inner[innerEnd - 1] == ' ' || inner[innerEnd - 1] == '\t')) {
+            --innerEnd;
+        }
+        return std::string(inner.substr(innerBegin, innerEnd - innerBegin));
+    }
+    return std::string(start) + std::string(text) + std::string(end);
+}
+
 std::string ToUpperCase(std::string_view text, std::uint32_t codePage) {
     return MapCase(text, codePage, true);
 }
