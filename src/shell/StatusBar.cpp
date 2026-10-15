@@ -46,11 +46,13 @@ void StatusBar::SetText(int part, const std::wstring& text) const {
     }
 }
 
-void StatusBar::SetPosition(int32_t line, int32_t column, int32_t selectedBytes) const {
+void StatusBar::SetPosition(int32_t line, int32_t column, int32_t selectedBytes,
+                            bool overwrite) const {
     std::wstring text = L"行 " + std::to_wstring(line + 1) + L", 列 " + std::to_wstring(column + 1);
     if (selectedBytes > 0) {
         text += L"  |  选中 " + std::to_wstring(selectedBytes) + L" 字节";
     }
+    text += overwrite ? L"  |  改写" : L"  |  插入";
     SetText(0, text);
 }
 

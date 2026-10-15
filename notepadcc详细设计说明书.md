@@ -434,6 +434,18 @@ notepadcc/
    - 序列号与文本混排（如 `item_\i\`，`\i\` 为序号占位符），这是基线未覆盖但实际高频的用法，作为差异化增强。
 4. 列粘贴：当源与目标均为矩形选区时保持列对齐，行数不足时自动补行到所需数量（并记入撤销单元，一次撤销可回退整个粘贴）。
 
+**M1 已落地的部分与实测发现**
+
+已实现：`Alt+鼠标拖动`选矩形（需要显式打开 `SCI_SETMOUSESELECTIONRECTANGULARSWITCH`，Scintilla 默认是关的）、`Alt+Shift+方向键`扩展、虚拟空间（`SCVS_RECTANGULARSELECTION`，让选区能越过短行行尾）、`Alt+C` 列块编辑对话框（模板里的 `\i\` 占位符 + 起始值 / 步长 / 补零位数 / 进制 / 每 N 行重置，带实时预览）、列块删除、`Insert` 切换插入/改写并在状态栏显示。
+
+三个从实测里得到的结论，写下来免得后人重踩：
+
+1. **`SCI_SETSEL` 不保留矩形模式**。先 `SCI_SETSELECTIONMODE(SC_SEL_RECTANGLE)` 再 `SCI_SETSEL`，选区会退回流式（`SCI_SELECTIONISRECTANGLE` 变回 0）。建立矩形选区必须用 `SCI_SETRECTANGULARSELECTIONANCHOR/CARET`，它们自己会置模式。
+2. **批量修改前必须先把所有行的位置取出来**。改一次文档就会清掉选区，之后再问"第 N 行的选区从哪开始"只能得到 -1。第一版就是这么错的：只有最后一行被改了，前面几行悄无声息地没动。
+3. **矩形选区在 Scintilla 内部会被展开成"每行一条"的多个选区**（`SCI_GETSELECTIONS` 可以量到），Scintilla 的字符输入路径（`InsertCharacter`）正是靠这个实现"逐行插入"。
+
+一处**没有完成端到端验证**的行为，如实记在这里：在矩形选区上直接打字会逐行插入，这条依赖 Scintilla 的输入路径，而界面回归脚本用跨进程合成的 `WM_CHAR` 复现不出真实键盘输入（实测只改到主选区那一行）。矩形选区本身是否正确建立（展开成 3 条）是有断言的，经由 `Alt+C` 对话框的列插入也是端到端验证过的（真填模板、真点插入、回读文本核对）。
+
 ### 2.7 M6 语言与语法
 
 **职责**：把"这段文字是什么语言、该怎么着色、怎么折叠、怎么补全"这件事做对。
@@ -2126,6 +2138,7 @@ M1 可替代
 | 宽字符 `printf` 的 `%s` | 按标准 C 语义 `%s` 表示**窄**字符串（MSVC 恰好相反），把 `wchar_t*` 传进去只会打印出首字符。日志曾经变成 `[2] [I] [a]` | 一律写 `%ls`，并给日志格式加一条自检 |
 | 同名重载同时接受字符串与 `bool` | `SetAttribute(L"path", L"")` 里 `const wchar_t*` 转 `bool` 是**标准转换**，优于转 `wstring_view` 的用户定义转换，于是空串被静默写成 `"no"`；同理 `SetAttribute(name, L"yes")` 会递归调用自己 | 不按类型重载同名函数，改用 `SetAttributeInt` / `SetAttributeBool` 这类以名字区分的写法 |
 | 成员名撞上 Windows 宏 | `windows.h` 里有一批 `#define FindText FindTextW`、`#define GetObject GetObjectW` 之类的宏。把成员函数命名为 `FindText` 后，调用点会被预处理悄悄改写成 `FindTextW`，编译器报的是"没有成员 FindTextW"，可代码怎么看都是对的 | 成员名避开 Win32 宽字符宏族（`FindText`、`GetObject`、`LoadImage`…），或显式写成 `::FindTextW` |
+| 跨进程 `SendMessage` 不封送指针 | Windows 只为 `WM_USER` 以下的**系统消息**做参数封送。`SCI_*` 全在 `WM_USER` 以上，从别的进程发过去时指针参数不会被翻译，目标进程按自己的地址空间解引用，读到的是垃圾——界面回归脚本因此一度把文档清空了 | 跨进程只发**只传值**的消息（如 `SCI_GETCHARAT` 逐字节读回），需要传指针时改用系统消息或让程序自己准备数据 |
 
 ## 附录 C：Windows 消息与自定义消息分配
 

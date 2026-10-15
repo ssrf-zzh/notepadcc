@@ -17,6 +17,14 @@ static_assert(npcc::edit::EditView::kSearchFlagWholeWord == SCFIND_WHOLEWORD,
               "kSearchFlagWholeWord 必须与 SCFIND_WHOLEWORD 一致");
 static_assert(npcc::edit::EditView::kSearchFlagMatchCase == SCFIND_MATCHCASE,
               "kSearchFlagMatchCase 必须与 SCFIND_MATCHCASE 一致");
+static_assert(npcc::edit::EditView::kSelectionStream == SC_SEL_STREAM,
+              "kSelectionStream 必须与 SC_SEL_STREAM 一致");
+static_assert(npcc::edit::EditView::kSelectionRectangle == SC_SEL_RECTANGLE,
+              "kSelectionRectangle 必须与 SC_SEL_RECTANGLE 一致");
+static_assert(npcc::edit::EditView::kVirtualSpaceRectangle == SCVS_RECTANGULARSELECTION,
+              "kVirtualSpaceRectangle 必须与 SCVS_RECTANGULARSELECTION 一致");
+static_assert(npcc::edit::EditView::kRectModifierAlt == SCMOD_ALT,
+              "kRectModifierAlt 必须与 SCMOD_ALT 一致");
 
 namespace npcc::edit {
 namespace {
@@ -247,6 +255,79 @@ void EditView::ConfigureBookmarkMargin() const {
     Send(SCI_SETMARGINMASKN, static_cast<uintptr_t>(kMarginBookmark), 1u << kMarkerBookmark);
     Send(SCI_SETMARGINWIDTHN, static_cast<uintptr_t>(kMarginBookmark), 16);
     Send(SCI_SETMARGINSENSITIVEN, static_cast<uintptr_t>(kMarginBookmark), 1);
+}
+
+void EditView::ConfigureColumnEditing() const {
+    // 默认情况下 Scintilla 不允许鼠标切到矩形选择，必须显式打开
+    Send(SCI_SETMOUSESELECTIONRECTANGULARSWITCH, 1);
+    Send(SCI_SETRECTANGULARSELECTIONMODIFIER,
+         static_cast<uintptr_t>(kRectModifierAlt));
+    // 允许光标在矩形模式下越过行尾，否则在参差不齐的行上没法选同一列
+    Send(SCI_SETVIRTUALSPACEOPTIONS,
+         static_cast<uintptr_t>(kVirtualSpaceRectangle));
+}
+
+bool EditView::IsRectangularSelection() const {
+    return Send(SCI_SELECTIONISRECTANGLE) != 0;
+}
+
+void EditView::SetSelectionMode(int32_t mode) const {
+    Send(SCI_SETSELECTIONMODE, static_cast<uintptr_t>(mode));
+}
+
+int32_t EditView::SelectionMode() const {
+    return static_cast<int32_t>(Send(SCI_GETSELECTIONMODE));
+}
+
+void EditView::SetRectangularSelection(int32_t anchorPos, int32_t caretPos) const {
+    Send(SCI_SETSELECTIONMODE, static_cast<uintptr_t>(kSelectionRectangle));
+    Send(SCI_SETRECTANGULARSELECTIONANCHOR, static_cast<uintptr_t>(anchorPos));
+    Send(SCI_SETRECTANGULARSELECTIONCARET, static_cast<uintptr_t>(caretPos));
+}
+
+void EditView::ColumnRange(int32_t& firstLine, int32_t& lastLine) const {
+    firstLine = static_cast<int32_t>(
+        Send(SCI_LINEFROMPOSITION, static_cast<uintptr_t>(SelectionStart())));
+    lastLine = static_cast<int32_t>(
+        Send(SCI_LINEFROMPOSITION, static_cast<uintptr_t>(SelectionEnd())));
+    if (lastLine < firstLine) {
+        std::swap(firstLine, lastLine);
+    }
+}
+
+int32_t EditView::LineSelectionStart(int32_t line) const {
+    return static_cast<int32_t>(Send(SCI_GETLINESELSTARTPOSITION,
+                                     static_cast<uintptr_t>(line)));
+}
+
+int32_t EditView::LineSelectionEnd(int32_t line) const {
+    return static_cast<int32_t>(Send(SCI_GETLINESELENDPOSITION,
+                                     static_cast<uintptr_t>(line)));
+}
+
+void EditView::InsertTextAt(int32_t position, std::string_view text) const {
+    if (text.empty() || position < 0) {
+        return;
+    }
+    const std::string owned(text);   // SCI_INSERTTEXT 要 NUL 结尾
+    Send(SCI_INSERTTEXT, static_cast<uintptr_t>(position),
+         reinterpret_cast<intptr_t>(owned.c_str()));
+}
+
+void EditView::DeleteRangeAt(int32_t start, int32_t end) const {
+    if (end <= start) {
+        return;
+    }
+    Send(SCI_DELETERANGE, static_cast<uintptr_t>(start),
+         static_cast<intptr_t>(end - start));
+}
+
+bool EditView::OverwriteMode() const {
+    return Send(SCI_GETOVERTYPE) != 0;
+}
+
+void EditView::SetOverwriteMode(bool enabled) const {
+    Send(SCI_SETOVERTYPE, enabled ? 1u : 0u);
 }
 
 bool EditView::HasBookmark(int32_t line) const {

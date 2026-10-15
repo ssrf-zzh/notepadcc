@@ -144,6 +144,34 @@ public:
     int32_t              PrevBookmarkLine(int32_t fromLine, bool wrap) const;
     std::vector<int32_t> AllBookmarkLines() const;
 
+    // ---- 列编辑（设计文档 2.6） ----
+    // 选项值对应 Scintilla 的 SC_SEL_* / SCVS_*，在 .cpp 里有 static_assert 钉住
+    static constexpr int32_t kSelectionStream = 0;
+    static constexpr int32_t kSelectionRectangle = 1;
+    static constexpr int32_t kVirtualSpaceRectangle = 1;
+    static constexpr int32_t kRectModifierAlt = 4;
+
+    // 开启 Alt+鼠标拖动矩形选择、Alt+Shift+方向键扩展，以及虚拟空间
+    void ConfigureColumnEditing() const;
+
+    bool    IsRectangularSelection() const;
+    void    SetSelectionMode(int32_t mode) const;
+    int32_t SelectionMode() const;
+    // 建立矩形选区。注意不能用 SCI_SETSEL——那条路径不保留矩形模式，
+    // 实测调用后 SCI_SELECTIONISRECTANGLE 会退回 0。
+    void    SetRectangularSelection(int32_t anchorPos, int32_t caretPos) const;
+
+    // 矩形选区覆盖的行范围（0 基，含两端）
+    void ColumnRange(int32_t& firstLine, int32_t& lastLine) const;
+    int32_t LineSelectionStart(int32_t line) const;   // 无选区返回 -1
+    int32_t LineSelectionEnd(int32_t line) const;
+
+    void InsertTextAt(int32_t position, std::string_view text) const;
+    void DeleteRangeAt(int32_t start, int32_t end) const;
+
+    bool OverwriteMode() const;
+    void SetOverwriteMode(bool enabled) const;
+
 private:
     HWND hwnd_ = nullptr;
     mutable const wchar_t* languageName_ = L"普通文本";

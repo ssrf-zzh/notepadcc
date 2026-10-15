@@ -72,6 +72,7 @@ edit::Document* DocumentManager::CreateUntitled() {
         return nullptr;
     }
     document->view->ApplyLightTheme();
+    document->view->ConfigureColumnEditing();
     document->view->SetCodePage(edit::kCodePageUtf8);
     document->view->SetEolMode(document->buffer.eol);
     document->view->SetText({});
@@ -139,6 +140,7 @@ OpenOutcome DocumentManager::Open(const std::wstring& path) {
         return outcome;
     }
     document->view->ApplyLightTheme();
+    document->view->ConfigureColumnEditing();
     document->view->SetCodePage(document->buffer.encoding.uniMode == edit::UniMode::Ansi
                                     ? document->buffer.encoding.codePage
                                     : edit::kCodePageUtf8);

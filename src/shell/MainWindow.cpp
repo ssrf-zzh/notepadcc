@@ -14,9 +14,12 @@
 #include "infra/Log.h"
 #include "core/Messages.h"
 #include "core/SessionManager.h"
+#include "edit/ColumnEdit.h"
+#include "edit/ColumnText.h"
 #include "search/ByteMatcher.h"
 #include "shell/MenuBuilder.h"
 #include "shell/TabBar.h"
+#include "shell/ColumnDialog.h"
 
 namespace npcc::shell {
 namespace {
@@ -37,6 +40,8 @@ enum : npcc::core::CmdId {
     kCmdEditCopy      = npcc::core::MakeCmdId(2, 4),
     kCmdEditPaste     = npcc::core::MakeCmdId(2, 5),
     kCmdEditSelectAll = npcc::core::MakeCmdId(2, 6),
+    kCmdEditColumnEdit = npcc::core::MakeCmdId(2, 7),
+    kCmdEditToggleOverwrite = npcc::core::MakeCmdId(2, 8),
 
     kCmdSearchFind     = npcc::core::MakeCmdId(3, 1),
     kCmdSearchReplace  = npcc::core::MakeCmdId(3, 2),
@@ -391,6 +396,12 @@ void MainWindow::RegisterCommands() {
         needsWritable, [this](const CmdContext& c) { c.view->Send(kSciPaste); });
     add(kCmdEditSelectAll, CmdCategory::Edit, L"cmd.edit.selectAll", L"全选(&L)",
         needsBuffer, [this](const CmdContext& c) { c.view->Send(kSciSelectAll); });
+    add(kCmdEditColumnEdit, CmdCategory::Edit, L"cmd.edit.columnEdit",
+        L"列块编辑(&C)...", needsBuffer,
+        [this](const CmdContext&) { CommandColumnEdit(); });
+    add(kCmdEditToggleOverwrite, CmdCategory::Edit, L"cmd.edit.toggleOverwrite",
+        L"插入/改写模式(&V)", needsBuffer,
+        [this](const CmdContext&) { CommandToggleOverwrite(); });
 
     // ---- 搜索 ----
     add(kCmdSearchFind, CmdCategory::Search, L"cmd.search.find", L"查找(&F)...",
@@ -494,6 +505,8 @@ void MainWindow::RegisterCommands() {
     registry_.BindShortcut(kCmdEditCopy, ctrl, 'C', true);
     registry_.BindShortcut(kCmdEditPaste, ctrl, 'V', true);
     registry_.BindShortcut(kCmdEditSelectAll, ctrl, 'A', true);
+    registry_.BindShortcut(kCmdEditColumnEdit, core::kModAlt, 'C', true);
+    registry_.BindShortcut(kCmdEditToggleOverwrite, core::kModNone, VK_INSERT, true);
     registry_.BindShortcut(kCmdSearchFind, ctrl, 'F', true);
     registry_.BindShortcut(kCmdSearchReplace, ctrl, 'H', true);
     registry_.BindShortcut(kCmdSearchFindNext, core::kModNone, VK_F3, true);
@@ -639,7 +652,8 @@ void MainWindow::UpdateStatus() const {
         return;
     }
     statusBar_.SetPosition(document->view->CurrentLine(), document->view->CurrentColumn(),
-                           document->view->SelectionByteCount());
+                           document->view->SelectionByteCount(),
+                           document->view->OverwriteMode());
     statusBar_.SetDocumentInfo(edit::EncodingName(document->buffer.encoding),
                                edit::EolName(document->buffer.eol),
                                document->view->CurrentLanguageName(),
@@ -1224,6 +1238,56 @@ bool MainWindow::HandleFindBarCommand(int controlId) {
             break;
     }
     return true;   // 输入框的其它通知先不管
+}
+
+void MainWindow::CommandColumnEdit() {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || !document->view) {
+        return;
+    }
+    if (!document->view->IsRectangularSelection()) {
+        statusBar_.SetMessage(L"请先用 Alt+鼠标拖动选出一个矩形区域");
+        return;
+    }
+
+    int32_t firstLine = 0;
+    int32_t lastLine = 0;
+    document->view->ColumnRange(firstLine, lastLine);
+    const int lineCount = lastLine - firstLine + 1;
+    if (lineCount <= 0) {
+        return;
+    }
+
+    ColumnDialogResult result;
+    if (!ShowColumnDialog(hwnd_, lineCount, result)) {
+        return;   // 用户取消
+    }
+
+    const bool utfMode = document->buffer.encoding.uniMode != edit::UniMode::Ansi;
+    if (result.deleteColumn) {
+        const int removed = edit::DeleteColumnSelection(*document->view);
+        statusBar_.SetMessage(L"已删除 " + std::to_wstring(removed) + L" 行的列块内容");
+        infra::LogInfo(L"edit", L"列块删除 " + std::to_wstring(removed) + L" 行");
+    } else if (result.apply) {
+        const std::vector<std::wstring> texts = edit::BuildColumnInsertTexts(result.options);
+        const int applied = edit::ApplyColumnInsert(*document->view, texts, utfMode,
+                                                    document->buffer.encoding.codePage);
+        statusBar_.SetMessage(L"已插入 " + std::to_wstring(applied) + L" 行");
+        infra::LogInfo(L"edit", L"列块插入 " + std::to_wstring(applied) + L" 行");
+    }
+    // 修改标记由 Scintilla 的保存点通知驱动，这里不手工改
+    SyncTabBar();
+    UpdateTitle();
+    UpdateStatus();
+}
+
+void MainWindow::CommandToggleOverwrite() {
+    if (edit::Document* document = ActiveDocument();
+        document != nullptr && document->view) {
+        document->view->SetOverwriteMode(!document->view->OverwriteMode());
+        statusBar_.SetMessage(document->view->OverwriteMode() ? L"改写模式" : L"插入模式");
+        UpdateStatus();
+    }
 }
 
 void MainWindow::CommandToggleBookmark() {

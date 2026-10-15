@@ -15,6 +15,14 @@ user32 = ctypes.WinDLL("user32", use_last_error=True)
 user32.FindWindowW.restype = wintypes.HWND
 user32.GetDlgItem.restype = wintypes.HWND
 user32.SendMessageW.restype = ctypes.c_ssize_t
+# 必须显式声明参数类型：不声明时 ctypes 会把指针参数按 32 位传，
+# 在 x64 上地址会被截断，Scintilla 读到的是野地址。
+user32.SendMessageW.argtypes = [wintypes.HWND, ctypes.c_uint, ctypes.c_size_t,
+                                ctypes.c_ssize_t]
+
+
+def address_of(buffer):
+    return ctypes.cast(buffer, ctypes.c_void_p).value
 
 WM_COMMAND = 0x0111
 WM_SETTEXT = 0x000C
@@ -28,6 +36,16 @@ SCI_GETCURRENTPOS = 2008
 SCI_LINEFROMPOSITION = 2166
 SCI_GOTOLINE = 2024
 SCI_MARKERGET = 2046
+SCI_SETTEXT = 2181
+SCI_GETTEXT = 2182
+SCI_GETLENGTH = 2006
+SCI_GETCHARAT = 2007
+SCI_GETSELECTIONS = 2570
+SCI_SELECTIONISRECTANGLE = 2372
+SCI_SETSELECTIONMODE = 2422
+SCI_SETRECTANGULARSELECTIONANCHOR = 2590
+SCI_SETRECTANGULARSELECTIONCARET = 2588
+SC_SEL_RECTANGLE = 1
 LVM_GETITEMCOUNT = 0x1004
 
 CMD_FIND = (3 << 12) | 1            # CmdCategory::Search, index 1
@@ -49,6 +67,10 @@ PANEL_REPLACE_PREVIEW = 713
 PANEL_APPLY = 714
 
 CMD_REPLACE_IN_FILES = (3 << 12) | 10
+CMD_COLUMN_EDIT = (2 << 12) | 7
+
+COLUMN_TEMPLATE_EDIT = 751
+COLUMN_INSERT_BUTTON = 758
 
 IDYES = 6
 IDOK = 1
@@ -79,7 +101,7 @@ def window_text(hwnd):
     if length <= 0:
         return ""
     buffer = ctypes.create_unicode_buffer(length + 1)
-    user32.SendMessageW(hwnd, WM_GETTEXT, length + 1, ctypes.cast(buffer, ctypes.c_void_p))
+    user32.SendMessageW(hwnd, WM_GETTEXT, length + 1, address_of(buffer))
     return buffer.value
 
 
@@ -94,7 +116,8 @@ def set_text(hwnd, control_id, text):
     control = user32.GetDlgItem(hwnd, control_id)
     if not control:
         return False
-    user32.SendMessageW(control, WM_SETTEXT, 0, text)
+    buffer = ctypes.create_unicode_buffer(text)
+    user32.SendMessageW(control, WM_SETTEXT, 0, address_of(buffer))
     return True
 
 
@@ -264,6 +287,102 @@ def test_replace_in_files(main_window, root):
     return True
 
 
+def scinti_text(scinti):
+    """逐字节读回文本。
+
+    不能用 SCI_GETTEXT：跨进程 SendMessage 只为 WM_USER 以下的系统消息做
+    参数封送，SCI_* 都在 WM_USER 以上，指针参数不会被封送——对面进程会按
+    自己的地址空间去解引用，读到的是垃圾。SCI_GETCHARAT 只传值，安全。
+    """
+    length = user32.SendMessageW(scinti, SCI_GETLENGTH, 0, 0)
+    data = bytearray()
+    for index in range(length):
+        data.append(user32.SendMessageW(scinti, SCI_GETCHARAT, index, 0) & 0xFF)
+    return data.decode("utf-8", errors="replace")
+
+
+def test_column_editing(root):
+    """列编辑：验证真实应用里矩形选区被正确建立。
+
+    这里另起一个实例，用"命令行打开已知内容的文件"准备文档——
+    跨进程无法用 SCI_SETTEXT 设置文本（见 scinti_text 的说明）。
+
+    只验证到"矩形选区建立正确"这一层：在矩形选区上打字会逐行插入是
+    Scintilla 的行为，但跨进程合成的 WM_CHAR 复现不了真实键盘输入路径
+    （实测只改到主选区那一行），所以不做断言，避免给出虚假的把握。
+    """
+    work = os.path.join(root, "build", "column_test")
+    os.makedirs(work, exist_ok=True)
+    path = os.path.join(work, "cols.txt")
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write("aaa\nbbb\nccc")
+
+    session = os.path.join(root, "build", "bin", "config", "session.xml")
+    if os.path.exists(session):
+        os.remove(session)
+
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    time.sleep(4)
+    window = user32.FindWindowW("notepadccMainWindow", "notepadcc - cols.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到打开了 cols.txt 的窗口")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到可见的编辑控件")
+            return False
+        if scinti_text(scinti) != "aaa\nbbb\nccc":
+            print(f"  FAIL: 初始内容不对 {scinti_text(scinti)!r}")
+            return False
+
+        # 第 0 行第 1 列 → 第 2 行第 3 列，即覆盖三行的同一段两列
+        user32.SendMessageW(scinti, SCI_SETSELECTIONMODE, SC_SEL_RECTANGLE, 0)
+        user32.SendMessageW(scinti, SCI_SETRECTANGULARSELECTIONANCHOR, 1, 0)
+        user32.SendMessageW(scinti, SCI_SETRECTANGULARSELECTIONCARET, 11, 0)
+        time.sleep(0.3)
+
+        if not user32.SendMessageW(scinti, SCI_SELECTIONISRECTANGLE, 0, 0):
+            print("  FAIL: 选区没有进入矩形模式（ConfigureColumnEditing 可能没生效）")
+            return False
+        selections = user32.SendMessageW(scinti, SCI_GETSELECTIONS, 0, 0)
+        if selections != 3:
+            print(f"  FAIL: 矩形选区应展开成 3 条，实际 {selections}")
+            return False
+
+        # Alt+C 打开列块编辑对话框（它会跑一个局部模态循环，所以用 PostMessage）
+        user32.PostMessageW(window, WM_COMMAND, CMD_COLUMN_EDIT, 0)
+        time.sleep(1.0)
+        dialog = user32.FindWindowW("notepadccColumnDialog", None)
+        if not dialog:
+            print("  FAIL: 列块编辑对话框没有出现")
+            return False
+
+        # 标准控件的 WM_SETTEXT 属于系统消息，跨进程会被封送，可以放心用
+        template = ctypes.create_unicode_buffer("item_\\i\\")
+        user32.SendMessageW(user32.GetDlgItem(dialog, COLUMN_TEMPLATE_EDIT), WM_SETTEXT, 0,
+                            address_of(template))
+        time.sleep(0.4)
+        user32.PostMessageW(dialog, WM_COMMAND, COLUMN_INSERT_BUTTON, 0)
+        time.sleep(1.0)
+
+        actual = scinti_text(scinti)
+        expected = "aitem_1aa\nbitem_2bb\ncitem_3cc"
+        if actual != expected:
+            print(f"  FAIL: 列块插入结果不对\n           实际 {actual!r}\n           期望 {expected!r}")
+            return False
+
+        print("  列编辑：矩形选区建立正确（3 条），Alt+C 数字序列插入结果正确")
+        return True
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+
 def test_find_bar(main_window, root):
     """查找栏：填词、点下一个，核对编辑器选区是否落在第一个匹配上。"""
     target = os.path.join(root, "README.md")
@@ -396,10 +515,14 @@ def run():
         if proc.poll() is None:
             proc.kill()
 
+    # 列编辑另起一个实例：跨进程无法用 SCI_SETTEXT 准备文档
+    if not test_column_editing(root):
+        failed = True
+
     if failed:
         print("FAIL: 界面回归未通过")
         return 1
-    print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换）")
+    print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑）")
     return 0
 
 

@@ -12,6 +12,8 @@
 #include "core/DocumentManager.h"
 #include "core/SessionManager.h"
 #include "edit/DocBuffer.h"
+#include "edit/ColumnEdit.h"
+#include "edit/ColumnText.h"
 #include "edit/Encoding.h"
 #include "edit/EditView.h"
 #include "io/AtomicFile.h"
@@ -39,13 +41,37 @@ void Check(bool condition, const char* what) {
     }
 }
 
+// 把字符串转成一行可读的调试文本：换行显示为 \n，过长截断
+std::string QuoteForLog(const std::string& text, std::size_t limit = 120) {
+    std::string out;
+    for (std::size_t i = 0; i < text.size() && out.size() < limit; ++i) {
+        const char ch = text[i];
+        if (ch == '\n') {
+            out += "\\n";
+        } else if (ch == '\r') {
+            out += "\\r";
+        } else if (ch == '\t') {
+            out += "\\t";
+        } else {
+            out += ch;
+        }
+    }
+    if (text.size() > limit) {
+        out += "...";
+    }
+    return out;
+}
+
 void CheckEqual(const std::string& actual, const std::string& expected, const char* what) {
     ++g_checks;
     if (actual != expected) {
         ++g_failures;
-        std::printf("    [FAIL] %s (实际 %u 字节, 期望 %u 字节)\n", what,
-                    static_cast<unsigned>(actual.size()),
-                    static_cast<unsigned>(expected.size()));
+        // 失败时把两边的内容也打出来——只看字节数很难判断差在哪里
+        std::printf("    [FAIL] %s\n", what);
+        std::printf("           实际(%u): %s\n", static_cast<unsigned>(actual.size()),
+                    QuoteForLog(actual).c_str());
+        std::printf("           期望(%u): %s\n", static_cast<unsigned>(expected.size()),
+                    QuoteForLog(expected).c_str());
     }
 }
 
@@ -365,6 +391,166 @@ int main() {
 
         std::filesystem::remove_all(dir, ec);
         ::DestroyWindow(host);
+    }
+
+    // ---------------------------------------------------------------- 列编辑序列
+    Section("列块编辑的序列生成");
+    {
+        Check(npcc::edit::FormatSequenceValue(7, 0, 10) == L"7", "十进制不带补零");
+        Check(npcc::edit::FormatSequenceValue(7, 4, 10) == L"0007", "十进制补零");
+        Check(npcc::edit::FormatSequenceValue(-7, 4, 10) == L"-0007", "负数补零时负号在前");
+        Check(npcc::edit::FormatSequenceValue(12345, 4, 10) == L"12345", "超出补零宽度时不截断");
+        Check(npcc::edit::FormatSequenceValue(255, 0, 16) == L"FF", "十六进制大写");
+        Check(npcc::edit::FormatSequenceValue(255, 4, 16) == L"00FF", "十六进制补零");
+        Check(npcc::edit::FormatSequenceValue(0, 2, 16) == L"00", "零值补零");
+
+        npcc::edit::ColumnInsertOptions options;
+        options.templateText = L"item_\\i\\";
+        options.start = 1;
+        options.step = 1;
+        options.zeroPad = 3;
+        options.lineCount = 3;
+        {
+            const auto texts = npcc::edit::BuildColumnInsertTexts(options);
+            Check(texts.size() == 3, "生成 3 行文本");
+            Check(texts.size() == 3 && texts[0] == L"item_001" && texts[1] == L"item_002" &&
+                      texts[2] == L"item_003",
+                  "序号从 1 起、按 3 位补零");
+        }
+
+        options.resetEvery = 2;
+        options.lineCount = 4;
+        {
+            const auto texts = npcc::edit::BuildColumnInsertTexts(options);
+            Check(texts.size() == 4 && texts[0] == L"item_001" && texts[1] == L"item_002" &&
+                      texts[2] == L"item_001" && texts[3] == L"item_002",
+                  "每 2 行重置序号");
+        }
+
+        options.resetEvery = 0;
+        options.start = 100;
+        options.step = 5;
+        options.zeroPad = 0;
+        options.lineCount = 3;
+        {
+            const auto texts = npcc::edit::BuildColumnInsertTexts(options);
+            Check(texts.size() == 3 && texts[0] == L"item_100" && texts[1] == L"item_105" &&
+                      texts[2] == L"item_110",
+                  "自定义起始值与步长");
+        }
+
+        options.templateText = L"0x\\i\\";
+        options.start = 10;
+        options.step = 1;
+        options.base = 16;
+        options.zeroPad = 2;
+        options.lineCount = 2;
+        {
+            const auto texts = npcc::edit::BuildColumnInsertTexts(options);
+            Check(texts.size() == 2 && texts[0] == L"0x0A" && texts[1] == L"0x0B",
+                  "十六进制序列");
+        }
+
+        options.templateText = L"固定文本";
+        options.lineCount = 2;
+        {
+            const auto texts = npcc::edit::BuildColumnInsertTexts(options);
+            Check(texts.size() == 2 && texts[0] == L"固定文本" && texts[1] == L"固定文本",
+                  "模板没有占位符时按字面量插入每一行");
+        }
+
+        options.templateText = L"\\i\\_\\i\\";
+        options.base = 10;
+        options.zeroPad = 0;
+        options.start = 1;
+        options.step = 1;
+        options.lineCount = 2;
+        {
+            const auto texts = npcc::edit::BuildColumnInsertTexts(options);
+            Check(texts.size() == 2 && texts[0] == L"1_1" && texts[1] == L"2_2",
+                  "模板里的多个占位符都被替换");
+        }
+
+        options.lineCount = 0;
+        Check(npcc::edit::BuildColumnInsertTexts(options).empty(), "零行时返回空");
+    }
+
+    // ---------------------------------------------------------------- 列编辑
+    Section("列编辑（矩形选区上的批量操作）");
+    {
+        HWND host = CreateHiddenHost();
+        Check(host != nullptr, "创建隐藏宿主窗口");
+        if (host != nullptr) {
+            auto view = std::make_unique<npcc::edit::EditView>();
+            Check(view->Create(host, 701), "创建编辑视图");
+            view->ConfigureColumnEditing();
+            view->ApplyLightTheme();
+
+            // 三行等长：aaa / bbb / ccc，字节偏移 0-2 / 4-6 / 8-10
+            auto reset = [&]() {
+                view->SetText("aaa\nbbb\nccc");
+                view->ClearUndoBuffer();
+                view->MarkSavePoint();
+                // 第 0 行第 1 列 → 第 2 行第 3 列（矩形选区左闭右开，宽度 = 2 列）
+                view->SetRectangularSelection(1, 11);
+                return view->GetAllText();
+            };
+            reset();
+
+            Check(view->IsRectangularSelection(), "选区处于矩形模式");
+            Check(view->Send(2570) == 3, "矩形选区被展开成 3 条选区");   // SCI_GETSELECTIONS
+            int32_t firstLine = -1;
+            int32_t lastLine = -1;
+            view->ColumnRange(firstLine, lastLine);
+            Check(firstLine == 0 && lastLine == 2, "矩形选区覆盖第 0~2 行");
+            Check(view->LineSelectionStart(0) == 1, "第 0 行选区起点在第 1 列");
+            Check(view->LineSelectionStart(1) == 5, "第 1 行选区起点在第 1 列");
+            Check(view->LineSelectionStart(2) == 9, "第 2 行选区起点在第 1 列");
+            Check(view->LineSelectionEnd(0) == 3, "第 0 行选区终点在第 3 列");
+
+            // 说明：在矩形选区上打字会逐行插入，这条依赖 Scintilla 的
+            // SetRectangularRange，而它需要渲染表面——隐藏窗口里展开不出来。
+            // 因此该行为放到界面回归脚本里用真实窗口验证。
+
+            // 批量插入（数字序列）
+            reset();
+            const int applied = npcc::edit::ApplyColumnInsert(
+                *view, {L"1", L"2", L"3"}, true, 936);
+            Check(applied == 3, "三行都插入了");
+            CheckEqual(view->GetAllText(), "a1aa\nb2bb\nc3cc", "列插入结果正确");
+
+            // 一次撤销应回退整个列插入
+            view->Send(2176);   // SCI_UNDO
+            CheckEqual(view->GetAllText(), "aaa\nbbb\nccc", "列插入是单个撤销单元");
+
+            // 删除列选区
+            reset();
+            const int removed = npcc::edit::DeleteColumnSelection(*view);
+            Check(removed == 3, "三行的列选区都被删除");
+            CheckEqual(view->GetAllText(), "a\nb\nc", "删除列块结果正确（每行保留首字符）");
+
+            // 覆盖模式
+            Check(!view->OverwriteMode(), "默认是插入模式");
+            view->SetOverwriteMode(true);
+            Check(view->OverwriteMode(), "可以切到覆盖模式");
+            view->SetOverwriteMode(false);
+            Check(!view->OverwriteMode(), "可以切回插入模式");
+
+            // 参差不齐的行：虚拟空间让选区能越过短行的行尾
+            view->SetText("aaa\nb\nccc");
+            view->ClearUndoBuffer();
+            view->SetRectangularSelection(1, 9);
+            Check(view->IsRectangularSelection(), "参差行上仍是矩形选区");
+            int32_t shortFirst = -1;
+            int32_t shortLast = -1;
+            view->ColumnRange(shortFirst, shortLast);
+            Check(shortFirst == 0 && shortLast == 2, "参差行的行范围仍正确");
+            const int32_t shortStart = view->LineSelectionStart(1);
+            Check(shortStart >= 0, "短行也能取到列选区起点（虚拟空间生效）");
+
+            view->Destroy();
+            ::DestroyWindow(host);
+        }
     }
 
     // ---------------------------------------------------------------- 书签

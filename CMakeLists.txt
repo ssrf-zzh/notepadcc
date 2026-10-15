@@ -124,6 +124,8 @@ set(NPCC_CORE_SOURCES
     src/core/CommandRegistry.cpp
     src/core/DocumentManager.cpp
     src/core/SessionManager.cpp
+    src/edit/ColumnEdit.cpp
+    src/edit/ColumnText.cpp
     src/edit/EditView.cpp
     src/edit/Encoding.cpp
     src/infra/Log.cpp
@@ -146,6 +148,7 @@ set(NPCC_CORE_SOURCES
     src/shell/MainWindow.cpp
     src/shell/MenuBuilder.cpp
     src/shell/FindBar.cpp
+    src/shell/ColumnDialog.cpp
     src/shell/SearchPanel.cpp
     src/shell/StatusBar.cpp
     src/shell/TabBar.cpp)
