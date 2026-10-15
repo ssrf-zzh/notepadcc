@@ -221,6 +221,8 @@ bool ConfigCenter::Load(std::wstring* error) {
         backup_.keepSnapshots = static_cast<std::uint32_t>(
             ReadIntInRange(backup, L"keepSnapshots", static_cast<int>(backup_.keepSnapshots), 1,
                            100, warnings_, L"backup"));
+        backup_.keepConvertBackup =
+            ReadBool(backup, L"keepConvertBackup", backup_.keepConvertBackup, warnings_, L"backup");
     }
 
     const infra::XmlElement* large = Section(root, L"largeFile");
@@ -308,6 +310,7 @@ bool ConfigCenter::Save(bool force, std::wstring* error) {
     backup->SetAttributeBool(L"enabled", backup_.enabled);
     backup->SetAttributeInt(L"intervalSeconds", static_cast<int>(backup_.intervalSeconds));
     backup->SetAttributeInt(L"keepSnapshots", static_cast<int>(backup_.keepSnapshots));
+    backup->SetAttributeBool(L"keepConvertBackup", backup_.keepConvertBackup);
 
     infra::XmlElementPtr large = root->AddChild(L"largeFile");
     large->SetAttributeInt(L"tier1MaxMB",

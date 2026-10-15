@@ -26,6 +26,8 @@ enum class CmdCategory : uint8_t {
     Plugin,
     Window,
     Help,
+    // 追加在末尾：类别值会被编进命令 ID 的高 4 位，改前面的取值会让旧快捷键失效
+    Encoding,
 };
 
 enum ShortcutMods : uint8_t {

@@ -40,6 +40,8 @@ struct BackupConfig {
     bool          enabled = true;
     std::uint32_t intervalSeconds = 30;
     std::uint32_t keepSnapshots = 10;
+    // 编码转换前给文件留一份 <名字>.bak（设计文档 6.2：转换是不可逆操作）
+    bool          keepConvertBackup = true;
 };
 
 struct LargeFileConfig {

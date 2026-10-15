@@ -87,6 +87,10 @@ CMD_SPLIT_TOGGLE = (4 << 12) | 11   # 分屏查看（克隆当前文档）
 CMD_CYCLE_PANE = (4 << 12) | 12
 CMD_SCROLL_SYNC = (4 << 12) | 13
 CMD_EDIT_UNDO = (2 << 12) | 1
+CMD_FILE_SAVE = (1 << 12) | 3
+CMD_FORMAT_EOL_CRLF = (5 << 12) | 1
+CMD_ENCODING_ANSI = (13 << 12) | 1
+CMD_ENCODING_UTF8 = (13 << 12) | 2
 
 COLUMN_TEMPLATE_EDIT = 751
 COLUMN_INSERT_BUTTON = 758
@@ -117,6 +121,7 @@ SCI_GETFOLDEXPANDED = 2230
 SC_FOLDLEVELHEADERFLAG = 0x2000
 SCI_GETFIRSTVISIBLELINE = 2152
 SCI_GETMODIFY = 2159
+SCI_GETCODEPAGE = 2137
 
 WM_VSCROLL = 0x0115
 SB_PAGEDOWN = 3
@@ -820,6 +825,157 @@ def test_folding(root):
                 os.remove(target)
 
     print("  代码折叠：边距与层级正确、折叠/展开命令生效、折叠状态随会话恢复")
+    return True
+
+
+def test_encoding_convert(root):
+    """编码与行尾转换：核对**磁盘上的字节**真的变了，以及表示不了的字符被挡下来。
+
+    只测"命令执行没报错"没有意义——编码转换错的后果是文件被改坏，
+    所以这一段一律读回磁盘原始字节来核对，并且检查 .bak 备份确实留下了原样。
+    """
+    work = os.path.join(root, "build", "convert_test")
+    os.makedirs(work, exist_ok=True)
+    path = os.path.join(work, "code.txt")
+    original = "中文 test\n第二行\n"
+    # GBK 下的 "中文" 是 D6D0 CEC4（单元测试里已经核过一遍）
+    gbk_head = b"\xd6\xd0\xce\xc4"
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write(original)
+    backup = path + ".bak"
+    if os.path.exists(backup):
+        os.remove(backup)
+
+    cfg = os.path.join(root, "build", "bin", "config")
+    for name in ("config.xml", "session.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - code.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到可见的编辑控件")
+            return False
+        if scinti_text(scinti) != original:
+            print(f"  FAIL: 初始内容不对 {scinti_text(scinti)!r}")
+            return False
+
+        # 1) 转为 ANSI 并保存：磁盘上应当变成 GBK，且留下 .bak
+        user32.PostMessageW(window, WM_COMMAND, CMD_ENCODING_ANSI, 0)
+        time.sleep(0.8)
+        if "无法转换编码" in str(dump_top_level_windows()):
+            print("  FAIL: 纯中文内容转 ANSI 不该失败")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_FILE_SAVE, 0)
+        time.sleep(1.2)
+        with open(path, "rb") as handle:
+            converted = handle.read()
+        if not converted.startswith(gbk_head):
+            print(f"  FAIL: 转为 ANSI 之后磁盘上应当是 GBK 字节，实际 {converted[:8]!r}")
+            return False
+        if len(converted) >= len(original.encode("utf-8")):
+            print(f"  FAIL: GBK 版本不该比 UTF-8 版本更长（{len(converted)}）")
+            return False
+        if not os.path.exists(backup):
+            print("  FAIL: 转换前应当留下 .bak 备份")
+            return False
+        with open(backup, "rb") as handle:
+            if handle.read() != original.encode("utf-8"):
+                print("  FAIL: .bak 里应当是转换前的那份内容")
+                return False
+        # 转成 ANSI 之后缓冲区里就是 GBK 字节了：Scintilla 按代码页 936 解释它们、
+        # 屏幕上显示中文，而测试助手是按 UTF-8 解码读字节的，所以这里会读到替换符。
+        # 这是预期行为，不是内容坏了——判据是磁盘字节与 Scintilla 的代码页设置。
+        if user32.SendMessageW(scinti, SCI_GETCODEPAGE, 0, 0) != 936:
+            print("  FAIL: 转为 ANSI 之后 Scintilla 的代码页应当是 936")
+            return False
+        if scinti_text(scinti) == original:
+            print("  FAIL: 转为 ANSI 之后缓冲区字节应当变成 GBK")
+            return False
+
+        # 2) 转回 UTF-8 并保存：磁盘上恢复成 UTF-8
+        user32.PostMessageW(window, WM_COMMAND, CMD_ENCODING_UTF8, 0)
+        time.sleep(0.8)
+        user32.PostMessageW(window, WM_COMMAND, CMD_FILE_SAVE, 0)
+        time.sleep(1.2)
+        with open(path, "rb") as handle:
+            back = handle.read()
+        if back != original.encode("utf-8"):
+            print(f"  FAIL: 转回 UTF-8 之后磁盘内容应当与最初一致，实际 {back!r}")
+            return False
+        if user32.SendMessageW(scinti, SCI_GETCODEPAGE, 0, 0) != 65001:
+            print("  FAIL: 转回 UTF-8 之后 Scintilla 的代码页应当是 65001")
+            return False
+        if scinti_text(scinti) != original:
+            print(f"  FAIL: 转回 UTF-8 之后编辑器内容不对 {scinti_text(scinti)!r}")
+            return False
+
+        # 3) 行尾转为 CRLF 并保存
+        user32.PostMessageW(window, WM_COMMAND, CMD_FORMAT_EOL_CRLF, 0)
+        time.sleep(0.8)
+        user32.PostMessageW(window, WM_COMMAND, CMD_FILE_SAVE, 0)
+        time.sleep(1.2)
+        with open(path, "rb") as handle:
+            crlf = handle.read()
+        if crlf != original.replace("\n", "\r\n").encode("utf-8"):
+            print(f"  FAIL: 转为 CRLF 之后磁盘内容不对 {crlf!r}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    # 4) 表示不了的字符必须被挡下来，文件不能被改坏
+    with open(path, "wb") as handle:
+        handle.write("emoji \U0001F600\n".encode("utf-8"))
+    emoji_bytes = os.path.getsize(path)
+    proc = subprocess.Popen([exe, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - code.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到第二个实例的主窗口")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_ENCODING_ANSI, 0)
+        if not dismiss_dialog("无法转换编码", IDOK, timeout=8.0):
+            print("  FAIL: 表示不了的字符应当弹出说明，而不是静默转换")
+            return False
+        time.sleep(0.5)
+        user32.PostMessageW(window, WM_COMMAND, CMD_FILE_SAVE, 0)
+        time.sleep(1.0)
+        with open(path, "rb") as handle:
+            after = handle.read()
+        if len(after) != emoji_bytes:
+            print(f"  FAIL: 转换失败之后文件不该被改动（{len(after)} vs {emoji_bytes}）")
+            return False
+        if "😀" not in after.decode("utf-8", errors="replace"):
+            print("  FAIL: 文件内容被改坏了")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        for name in ("config.xml", "session.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+        if os.path.exists(backup):
+            os.remove(backup)
+
+    print("  编码转换：UTF-8 ↔ ANSI(GBK) ↔ UTF-8 字节正确、.bak 留底、"
+          "行尾转 CRLF、表示不了的字符被挡下")
     return True
 
 
@@ -1758,12 +1914,14 @@ def run():
         failed = True
     if not test_split_view(root):
         failed = True
+    if not test_encoding_convert(root):
+        failed = True
 
     if failed:
         print("FAIL: 界面回归未通过")
         return 1
     print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + "
-          "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆）")
+          "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + 编码转换）")
     return 0
 
 

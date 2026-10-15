@@ -226,6 +226,9 @@ public:
     // 是"让颜色真的看得见"的那一步（词法器本身只标样式号，不设颜色）。
     void ApplySyntaxColours(const char* lexerName) const;
 
+    // 行尾转换：既改"以后新输入用什么行尾"，也把现有行尾一次性换掉
+    void ConvertLineEndings(EolMode eol) const;
+
 private:
     HWND hwnd_ = nullptr;
     mutable const wchar_t* languageName_ = L"普通文本";

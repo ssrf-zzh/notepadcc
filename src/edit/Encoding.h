@@ -64,4 +64,21 @@ const char* EolToken(EolMode eol);
 bool ParseUniModeToken(std::string_view token, UniMode& out);
 bool ParseEolToken(std::string_view token, EolMode& out);
 
+// ---- 编码转换（设计文档 6.2）----
+// 把编辑器缓冲区从一种编码形态转到另一种。纯函数：给字节与状态，返回新字节与新状态，
+// 不做任何 IO，也不碰窗口——转换是不可逆的高风险操作，逻辑要能单独测。
+//
+// 注意编辑器缓冲区的表示：UTF-8 / UTF-8-BOM / UTF-16LE / UTF-16BE 这几种在缓冲区里
+// 一律是 UTF-8（保存时才按 uniMode 编回去），只有 ANSI 是原始代码页字节。所以
+// "转为 UTF-16" 只需要改状态，而 "转为 ANSI" 必须真的把缓冲区字节换成代码页字节。
+struct ConvertResult {
+    bool         ok = false;
+    std::string  editorBytes;    // 转换后的缓冲区字节
+    EncodingState encoding;      // 转换后的编码状态
+    std::wstring problem;        // ok=false 时说明原因（含无法表示的字符样例）
+};
+
+ConvertResult ConvertTo(std::string_view editorBytes, const EncodingState& from, UniMode targetMode,
+                        uint32_t targetCodePage);
+
 }  // namespace npcc::edit

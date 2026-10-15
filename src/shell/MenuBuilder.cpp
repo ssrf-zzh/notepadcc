@@ -14,6 +14,8 @@ const core::CmdCategory kMenuOrder[] = {
     core::CmdCategory::Edit,
     core::CmdCategory::Search,
     core::CmdCategory::View,
+    core::CmdCategory::Format,
+    core::CmdCategory::Encoding,
     core::CmdCategory::Settings,
     core::CmdCategory::Window,
     core::CmdCategory::Macro,

@@ -2501,6 +2501,88 @@ int main() {
     // 这一段按**真实 token 的位置**核对：那个位置的样式号不是默认样式，
     // 且它的前景色与默认前景色不同。样式号抄错、或者词法器名字写错（本版真发生过：
     // Lexilla 里没有 "javascript" 词法器，JS 文件一直没有任何样式），都会被它抓住。
+    // ---------------------------------------------------------------- 编码转换
+    // 转换是不可逆的高风险操作，逻辑必须能单独测：能不能转、转出来的字节对不对、
+    // 表示不了的字符有没有被**发现**（而不是静默变成 '?'）。
+    Section("编码转换（转为 ANSI / UTF-8 / UTF-16）");
+    {
+        using npcc::edit::ConvertResult;
+        using npcc::edit::UniMode;
+
+        const std::string chinese = "\xE4\xB8\xAD\xE6\x96\x87";   // "中文" 的 UTF-8
+        npcc::edit::EncodingState utf8;
+        utf8.uniMode = UniMode::Utf8;
+        utf8.codePage = npcc::edit::kCodePageUtf8;
+
+        // UTF-8 → ANSI(936)：字节要真的变成 GBK，转回来要一模一样
+        {
+            const ConvertResult toAnsi = npcc::edit::ConvertTo(chinese, utf8, UniMode::Ansi, 936);
+            Check(toAnsi.ok, "UTF-8 转 ANSI 成功");
+            Check(toAnsi.editorBytes.size() == 4, "中文在 GBK 下是 4 字节");
+            Check(static_cast<unsigned char>(toAnsi.editorBytes[0]) == 0xD6 &&
+                      static_cast<unsigned char>(toAnsi.editorBytes[1]) == 0xD0,
+                  "GBK 字节与预期一致");
+            Check(toAnsi.encoding.uniMode == UniMode::Ansi && toAnsi.encoding.codePage == 936,
+                  "转换后的编码状态正确");
+            Check(!toAnsi.encoding.hasBom, "ANSI 不带 BOM");
+
+            const ConvertResult back =
+                npcc::edit::ConvertTo(toAnsi.editorBytes, toAnsi.encoding, UniMode::Utf8, 936);
+            Check(back.ok && back.editorBytes == chinese, "ANSI 再转回 UTF-8 与原文一致");
+        }
+
+        // 表示不了的字符必须被**发现**：静默变成 '?' 是最坏的结果
+        {
+            const std::string withEmoji = "ok \xF0\x9F\x98\x80";   // U+1F600
+            const ConvertResult failed =
+                npcc::edit::ConvertTo(withEmoji, utf8, UniMode::Ansi, 936);
+            Check(!failed.ok, "GBK 表示不了的字符会让转换失败而不是静默替换");
+            Check(failed.problem.find(L"无法用代码页") != std::wstring::npos,
+                  "失败原因说明是代码页表示不了");
+            Check(failed.problem.find(L"\U0001F600") != std::wstring::npos ||
+                      failed.problem.size() > 20,
+                  "失败原因里列出具体字符");
+        }
+
+        // UTF-8 → UTF-8-BOM：缓冲区字节不变，只是保存时加 BOM
+        {
+            const ConvertResult toBom = npcc::edit::ConvertTo(chinese, utf8, UniMode::Utf8Bom, 936);
+            Check(toBom.ok && toBom.editorBytes == chinese, "转 UTF-8-BOM 不改动缓冲区字节");
+            Check(toBom.encoding.hasBom, "转 UTF-8-BOM 后带上 BOM 标记");
+            const std::string saved = npcc::edit::EncodeForSave(toBom.editorBytes, toBom.encoding);
+            Check(saved.size() == chinese.size() + 3 && saved.compare(0, 3, "\xEF\xBB\xBF") == 0,
+                  "保存时才真的写出 BOM");
+        }
+
+        // UTF-8 → UTF-16LE：缓冲区同样是 UTF-8，保存时编成 UTF-16
+        {
+            const ConvertResult toUtf16 =
+                npcc::edit::ConvertTo(chinese, utf8, UniMode::Utf16LE, 936);
+            Check(toUtf16.ok && toUtf16.editorBytes == chinese, "转 UTF-16 不改动缓冲区字节");
+            const std::string saved = npcc::edit::EncodeForSave(toUtf16.editorBytes,
+                                                                toUtf16.encoding);
+            Check(saved.size() == 2 + 2 * 2 && saved.compare(0, 2, "\xFF\xFE") == 0,
+                  "保存时写出 UTF-16LE 的 BOM 与双字节内容");
+            // 再转回来：UTF-16 形态（缓冲区是 UTF-8）转 ANSI 也要能走通
+            const ConvertResult toAnsi =
+                npcc::edit::ConvertTo(toUtf16.editorBytes, toUtf16.encoding, UniMode::Ansi, 936);
+            Check(toAnsi.ok && toAnsi.editorBytes.size() == 4, "UTF-16 状态的内容转 ANSI 同样正确");
+        }
+
+        // 空内容不该出错
+        {
+            const ConvertResult empty = npcc::edit::ConvertTo("", utf8, UniMode::Ansi, 936);
+            Check(empty.ok && empty.editorBytes.empty(), "空内容转 ANSI 成功且仍为空");
+        }
+
+        // 声明是 UTF-8 但字节不是合法 UTF-8：要报出来，而不是猜
+        {
+            const std::string broken("\xC3\x28", 2);
+            const ConvertResult failed = npcc::edit::ConvertTo(broken, utf8, UniMode::Utf8, 936);
+            Check(!failed.ok, "非法 UTF-8 字节被拒绝");
+        }
+    }
+
     Section("语法着色（配色确实落到样式号上）");
     {
         struct Sample {

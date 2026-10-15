@@ -338,6 +338,124 @@ bool ParseEolToken(std::string_view token, EolMode& out) {
     return true;
 }
 
+namespace {
+
+// 编辑器字节 → 宽字符。ANSI 走代码页，其余都走 UTF-8。
+bool BufferToWide(std::string_view bytes, const EncodingState& state, std::wstring& wide,
+                  std::wstring& problem) {
+    const bool isUtf8 = state.uniMode != UniMode::Ansi;
+    const UINT codePage = isUtf8 ? CP_UTF8 : state.codePage;
+    // MB_ERR_INVALID_CHARS：不加这个标志的话，非法 UTF-8 会被静默换成 U+FFFD
+    // 并返回成功——我们要的是"发现并报出来"，而不是把坏字节悄悄改写掉。
+    // 这个标志只对 UTF-8/UTF-16 有效，代码页转换传它会被直接判为无效参数。
+    const DWORD flags = isUtf8 ? MB_ERR_INVALID_CHARS : 0;
+    if (bytes.empty()) {
+        wide.clear();
+        return true;
+    }
+    const int count = ::MultiByteToWideChar(codePage, flags, bytes.data(),
+                                           static_cast<int>(bytes.size()), nullptr, 0);
+    if (count <= 0) {
+        problem = L"当前内容无法按声明的编码解释（字节序列不合法）";
+        return false;
+    }
+    wide.assign(static_cast<std::size_t>(count), L'\0');
+    ::MultiByteToWideChar(codePage, flags, bytes.data(), static_cast<int>(bytes.size()),
+                          wide.data(),
+                          count);
+    return true;
+}
+
+std::string WideToUtf8Bytes(const std::wstring& wide) {
+    if (wide.empty()) {
+        return {};
+    }
+    const int count = ::WideCharToMultiByte(CP_UTF8, 0, wide.data(),
+                                            static_cast<int>(wide.size()), nullptr, 0, nullptr,
+                                            nullptr);
+    if (count <= 0) {
+        return {};
+    }
+    std::string out(static_cast<std::size_t>(count), '\0');
+    ::WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), out.data(),
+                          count, nullptr, nullptr);
+    return out;
+}
+
+// 宽字符 → 代码页字节，遇到无法表示的字符就失败。
+// 必须用 WC_NO_BEST_FIT_CHARS 并检查 usedDefaultChar：不这样做的话
+// WideCharToMultiByte 会把无法表示的字符**静默替换成 '?'** 还返回成功，
+// 用户的文档就在无声无息中被改坏了。
+bool WideToAnsiStrict(const std::wstring& wide, uint32_t codePage, std::string& bytes,
+                      std::wstring& problem) {
+    if (wide.empty()) {
+        bytes.clear();
+        return true;
+    }
+    BOOL usedDefault = FALSE;
+    const int count = ::WideCharToMultiByte(static_cast<UINT>(codePage), WC_NO_BEST_FIT_CHARS,
+                                            wide.data(), static_cast<int>(wide.size()), nullptr, 0,
+                                            nullptr, &usedDefault);
+    if (count <= 0) {
+        problem = L"代码页 " + std::to_wstring(codePage) + L" 不可用";
+        return false;
+    }
+    std::string converted(static_cast<std::size_t>(count), '\0');
+    usedDefault = FALSE;
+    ::WideCharToMultiByte(static_cast<UINT>(codePage), WC_NO_BEST_FIT_CHARS, wide.data(),
+                          static_cast<int>(wide.size()), converted.data(), count, nullptr,
+                          &usedDefault);
+    if (usedDefault != FALSE) {
+        // 把表示不了的字符列出来给用户看：只说"有字符表示不了"没用，用户得知道是哪个
+        std::wstring samples;
+        for (const wchar_t ch : wide) {
+            BOOL lossy = FALSE;
+            const std::wstring one(1, ch);
+            if (::WideCharToMultiByte(static_cast<UINT>(codePage), WC_NO_BEST_FIT_CHARS, one.data(),
+                                      1, nullptr, 0, nullptr, &lossy) <= 0 ||
+                lossy != FALSE) {
+                if (samples.find(ch) == std::wstring::npos) {
+                    if (!samples.empty()) {
+                        samples += L"、";
+                    }
+                    samples += std::wstring(1, ch);
+                }
+                if (samples.size() >= 24) {
+                    break;
+                }
+            }
+        }
+        problem = L"以下字符无法用代码页 " + std::to_wstring(codePage) + L" 表示：" + samples;
+        return false;
+    }
+    bytes = std::move(converted);
+    return true;
+}
+
+}  // namespace
+
+ConvertResult ConvertTo(std::string_view editorBytes, const EncodingState& from,
+                        UniMode targetMode, uint32_t targetCodePage) {
+    ConvertResult result;
+    std::wstring wide;
+    if (!BufferToWide(editorBytes, from, wide, result.problem)) {
+        return result;
+    }
+    if (targetMode == UniMode::Ansi) {
+        if (!WideToAnsiStrict(wide, targetCodePage, result.editorBytes, result.problem)) {
+            return result;
+        }
+    } else {
+        result.editorBytes = WideToUtf8Bytes(wide);
+    }
+    result.encoding.uniMode = targetMode;
+    result.encoding.codePage = targetMode == UniMode::Ansi ? targetCodePage : kCodePageUtf8;
+    result.encoding.hasBom = targetMode == UniMode::Utf8Bom;
+    result.encoding.confidence = 100;
+    result.ok = true;
+    return result;
+}
+
 std::string EncodeForSave(std::string_view editorBytes, const EncodingState& state) {
     switch (state.uniMode) {
         case UniMode::Ansi:

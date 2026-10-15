@@ -47,6 +47,7 @@ enum PrefControl : int {
     kPrefBackupEnabled  = 1040,
     kPrefBackupInterval = 1041,
     kPrefBackupKeep     = 1042,
+    kPrefConvertBackup  = 1047,
     kPrefTier1MB        = 1043,
     kPrefTier2MB        = 1044,
     kPrefRefuseMB       = 1045,
@@ -224,6 +225,7 @@ void PreferencesDialog::BuildAdvancedPage() {
     Row(page, nullptr, Check(kPrefBackupEnabled, L"启用崩溃恢复快照"));
     Row(page, Label(L"快照间隔（秒，5~3600）："), Edit(kPrefBackupInterval, L"30"), Scale(90));
     Row(page, Label(L"保留崩溃快照数（1~100）："), Edit(kPrefBackupKeep, L"10"), Scale(90));
+    Row(page, nullptr, Check(kPrefConvertBackup, L"转换编码前给文件留一份 .bak 备份"));
     Row(page, Label(L"降级阈值（MB，超过改用映射装载）："), Edit(kPrefTier1MB, L"8"), Scale(90));
     Row(page, Label(L"只读阈值（MB，超过只读打开）："), Edit(kPrefTier2MB, L"64"), Scale(90));
     Row(page, Label(L"拒绝阈值（MB，超过不再打开）："), Edit(kPrefRefuseMB, L"512"), Scale(90));
@@ -418,6 +420,7 @@ void PreferencesDialog::LoadFromConfig() {
     SetChecked(kPrefBackupEnabled, config.Backup().enabled);
     SetInt(kPrefBackupInterval, static_cast<int>(config.Backup().intervalSeconds));
     SetInt(kPrefBackupKeep, static_cast<int>(config.Backup().keepSnapshots));
+    SetChecked(kPrefConvertBackup, config.Backup().keepConvertBackup);
 
     const core::LargeFileConfig& large = config.LargeFile();
     SetInt(kPrefTier1MB, static_cast<int>(large.tier1MaxBytes / (1024 * 1024)));
@@ -520,6 +523,7 @@ bool PreferencesDialog::StoreToConfig(std::wstring& error, int& badControlId) {
     config.Backup().enabled = IsChecked(kPrefBackupEnabled);
     config.Backup().intervalSeconds = interval;
     config.Backup().keepSnapshots = keep;
+    config.Backup().keepConvertBackup = IsChecked(kPrefConvertBackup);
 
     config.LargeFile().tier1MaxBytes = static_cast<std::uint64_t>(tier1) * 1024 * 1024;
     config.LargeFile().tier2MaxBytes = static_cast<std::uint64_t>(tier2) * 1024 * 1024;

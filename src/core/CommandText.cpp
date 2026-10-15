@@ -25,6 +25,7 @@ const CategoryEntry kCategories[] = {
     {CmdCategory::Plugin,   L"插件",     L'P'},
     {CmdCategory::Window,   L"窗口",     L'W'},
     {CmdCategory::Help,     L"帮助",     L'H'},
+    {CmdCategory::Encoding, L"编码",     L'N'},
 };
 
 const CategoryEntry* FindCategory(CmdCategory category) {

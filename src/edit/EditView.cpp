@@ -257,6 +257,13 @@ void EditView::SetCodePage(uint32_t codePage) const {
     Send(SCI_SETCODEPAGE, codePage);
 }
 
+void EditView::ConvertLineEndings(EolMode eol) const {
+    SetEolMode(eol);
+    // SCI_CONVERTEOLS 按当前 EOL 模式把已有的行尾整体换掉。
+    // 两步都要：只设模式的话，已有内容还是旧行尾；只转换的话，之后新敲的回车又是旧的。
+    Send(SCI_CONVERTEOLS, static_cast<uintptr_t>(Send(SCI_GETEOLMODE)));
+}
+
 void EditView::SetEolMode(EolMode eol) const {
     int mode = SC_EOL_CRLF;
     switch (eol) {

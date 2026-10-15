@@ -76,6 +76,18 @@ enum : npcc::core::CmdId {
     kCmdViewCyclePane     = npcc::core::MakeCmdId(4, 12),
     kCmdViewScrollSync    = npcc::core::MakeCmdId(4, 13),
 
+    // 格式（5 类）：行尾转换
+    kCmdFormatEolCrlf = npcc::core::MakeCmdId(5, 1),
+    kCmdFormatEolLf   = npcc::core::MakeCmdId(5, 2),
+    kCmdFormatEolCr   = npcc::core::MakeCmdId(5, 3),
+
+    // 编码（13 类）：转换编码
+    kCmdEncodingAnsi    = npcc::core::MakeCmdId(13, 1),
+    kCmdEncodingUtf8    = npcc::core::MakeCmdId(13, 2),
+    kCmdEncodingUtf8Bom = npcc::core::MakeCmdId(13, 3),
+    kCmdEncodingUtf16Le = npcc::core::MakeCmdId(13, 4),
+    kCmdEncodingUtf16Be = npcc::core::MakeCmdId(13, 5),
+
     kCmdWindowNext = npcc::core::MakeCmdId(11, 1),
     kCmdWindowPrev = npcc::core::MakeCmdId(11, 2),
 
@@ -653,6 +665,30 @@ void MainWindow::RegisterCommands() {
         core::kCmdCheckable, [this](const CmdContext&) {
             splitScrollSync_ = !splitScrollSync_;
         });
+
+    // ---- 格式（行尾转换）----
+    add(kCmdFormatEolCrlf, CmdCategory::Format, L"cmd.format.eolCrlf", L"转为 Windows 行尾（CRLF）",
+        needsWritable, [this](const CmdContext&) { CommandConvertEol(edit::EolMode::Crlf); });
+    add(kCmdFormatEolLf, CmdCategory::Format, L"cmd.format.eolLf", L"转为 Unix 行尾（LF）",
+        needsWritable, [this](const CmdContext&) { CommandConvertEol(edit::EolMode::Lf); });
+    add(kCmdFormatEolCr, CmdCategory::Format, L"cmd.format.eolCr", L"转为 Mac 行尾（CR）",
+        needsWritable, [this](const CmdContext&) { CommandConvertEol(edit::EolMode::Cr); });
+
+    // ---- 编码（转为 XX 编码）----
+    add(kCmdEncodingAnsi, CmdCategory::Encoding, L"cmd.encoding.ansi",
+        L"转为 ANSI（按默认代码页）(&A)", needsWritable,
+        [this](const CmdContext&) { CommandConvertEncoding(edit::UniMode::Ansi); });
+    add(kCmdEncodingUtf8, CmdCategory::Encoding, L"cmd.encoding.utf8", L"转为 UTF-8(&U)",
+        needsWritable, [this](const CmdContext&) { CommandConvertEncoding(edit::UniMode::Utf8); });
+    add(kCmdEncodingUtf8Bom, CmdCategory::Encoding, L"cmd.encoding.utf8Bom",
+        L"转为 UTF-8（带 BOM）(&B)", needsWritable,
+        [this](const CmdContext&) { CommandConvertEncoding(edit::UniMode::Utf8Bom); });
+    add(kCmdEncodingUtf16Le, CmdCategory::Encoding, L"cmd.encoding.utf16Le",
+        L"转为 UTF-16 LE(&L)", needsWritable,
+        [this](const CmdContext&) { CommandConvertEncoding(edit::UniMode::Utf16LE); });
+    add(kCmdEncodingUtf16Be, CmdCategory::Encoding, L"cmd.encoding.utf16Be",
+        L"转为 UTF-16 BE(&E)", needsWritable,
+        [this](const CmdContext&) { CommandConvertEncoding(edit::UniMode::Utf16BE); });
 
     // ---- 窗口 ----
     add(kCmdWindowNext, CmdCategory::Window, L"cmd.window.next", L"下一个标签(&N)",
@@ -2393,6 +2429,90 @@ void MainWindow::CommandPreferences() {
     UpdateStatus();
     ::InvalidateRect(hwnd_, nullptr, TRUE);
     ScheduleAutosave();   // 快照开关与间隔都可能刚被改过
+}
+
+void MainWindow::WriteConvertBackup(const std::wstring& path) const {
+    if (path.empty()) {
+        return;
+    }
+    const std::wstring backup = path + L".bak";
+    if (::GetFileAttributesW(backup.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        // 不覆盖已有的备份：最早那一份才是用户最可能想找回来的"原样"
+        infra::LogInfo(L"convert", L"已存在转换备份，保留最早的一份: " + backup);
+        return;
+    }
+    if (::CopyFileW(path.c_str(), backup.c_str(), TRUE) == 0) {
+        // 备份失败不该阻断转换（转换本身还能转回来），但必须留下痕迹
+        infra::LogWarn(L"convert", L"生成转换备份失败（错误码 " +
+                                      std::to_wstring(::GetLastError()) + L"）: " + backup);
+        return;
+    }
+    infra::LogInfo(L"convert", L"已生成转换备份: " + backup);
+}
+
+void MainWindow::CommandConvertEol(edit::EolMode target) {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr) {
+        return;
+    }
+    if (document->buffer.isReadOnly) {
+        ::MessageBoxW(hwnd_, L"这份文档是只读打开的，无法转换行尾。", L"转换为行尾",
+                      MB_ICONINFORMATION);
+        return;
+    }
+    if (document->buffer.eol == target) {
+        return;   // 已经是这个行尾，不白改一次（那会把文档标成已修改）
+    }
+    document->view->ConvertLineEndings(target);
+    document->buffer.eol = target;
+    document->buffer.detectedEol = target;
+    document->buffer.isModified = true;
+    infra::LogInfo(L"convert", L"行尾已转为 " + edit::EolName(target) + L": " +
+                                   document->buffer.displayName);
+    SyncTabBar();
+    UpdateStatus();
+}
+
+void MainWindow::CommandConvertEncoding(edit::UniMode target) {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr) {
+        return;
+    }
+    if (document->buffer.isReadOnly) {
+        ::MessageBoxW(hwnd_, L"这份文档是只读打开的，无法转换编码。", L"转换编码",
+                      MB_ICONINFORMATION);
+        return;
+    }
+    // 目标代码页：本来就按某个代码页解释就用那个，否则用新建文档的默认代码页
+    const std::uint32_t codePage = document->buffer.encoding.uniMode == edit::UniMode::Ansi
+                                       ? document->buffer.encoding.codePage
+                                       : config_.NewFile().defaultCodePage;
+    const std::string current = document->view->GetAllText();
+    const edit::ConvertResult result =
+        edit::ConvertTo(current, document->buffer.encoding, target, codePage);
+    if (!result.ok) {
+        ::MessageBoxW(hwnd_, result.problem.c_str(), L"无法转换编码", MB_ICONWARNING);
+        return;
+    }
+    if (document->buffer.encoding.uniMode == target &&
+        document->buffer.encoding.hasBom == result.encoding.hasBom) {
+        return;   // 已经是这个编码，不用改
+    }
+    // 备份放在改动之前：转换是高风险操作，磁盘上那一份得先留住
+    if (config_.Backup().keepConvertBackup) {
+        WriteConvertBackup(document->buffer.filePath);
+    }
+    document->view->SetCodePage(target == edit::UniMode::Ansi ? codePage : edit::kCodePageUtf8);
+    if (result.editorBytes != current) {
+        // 只有 ANSI 与 UTF-8 之间才真的换字节；UTF-16 那几种缓冲区本来就是 UTF-8
+        document->view->SetText(result.editorBytes);
+    }
+    document->buffer.encoding = result.encoding;
+    document->buffer.isModified = true;
+    infra::LogInfo(L"convert", L"编码已转为 " + edit::EncodingName(result.encoding) + L": " +
+                                   document->buffer.displayName);
+    SyncTabBar();
+    UpdateStatus();
 }
 
 edit::EditView* MainWindow::SecondaryView() const {
