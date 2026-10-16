@@ -164,6 +164,8 @@ CMD_TOOL_COMPARE_DOCUMENT = (14 << 12) | 36
 CMD_TOOL_COMPARE_DISK = (14 << 12) | 37
 CMD_WINDOW_NEXT = (11 << 12) | 1
 CMD_WINDOW_PREV = (11 << 12) | 2
+CMD_VIEW_JSON_TREE = (4 << 12) | 25
+JSON_TREE_CLASS = "notepadccJsonTree"
 PREF_UI_LANGUAGE_COMBO = 1048
 PREF_CANCEL = 1061
 CB_GETCOUNT = 0x0146
@@ -4043,6 +4045,8 @@ def run():
         failed = True
     if not test_compare(root):
         failed = True
+    if not test_json_tree(root):
+        failed = True
     if not test_auto_complete(root):
         failed = True
     if not test_associated_commands(root):
@@ -4058,7 +4062,7 @@ def run():
           "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + UDL + 暗色模式 + "
           "宏 + 文件夹工作区 + 函数列表 + 导出与打印 + 插件宿主 + JSON/XML 格式化 + "
           "运行命令 + 界面语言 + 十六进制查看 + 复制为富文本 + Markdown 预览 + 对话框文案 + "
-          "比较 + 自动完成 + 文件关联 + 绿色打包）")
+          "比较 + JSON 树视图 + 自动完成 + 文件关联 + 绿色打包）")
     return 0
 
 
@@ -4285,6 +4289,158 @@ def dialog_texts(dialog):
         if text:
             found.append(text)
     return found
+
+
+def test_json_tree(root):
+    """JSON 树视图：面板里按层级列出结构、点容器折叠、点标量跳到源码那一行。
+
+    点击位置固定是**第一行**（y=1）：面板的命中测试是 `topLine + y/行高`，y=1 必然落在
+    第一行上，所以不需要知道行高就能确定点到了谁。第一行永远是根，"点一下折叠、再点一下
+    展开"因此是确定的。跳跃那条用一个"第一个节点就是标量"的文件（顶层数字 + 几个空行），
+    点第一行就能看出光标被挪回了第 1 行。
+    """
+    work = os.path.join(root, "build", "json_test")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    cfg = os.path.join(root, "build", "bin", "config")
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+
+    nestedPath = os.path.join(work, "nested.json")
+    nestedText = ('{\n  "name": "npp",\n  "nested": {\n    "n": 1,\n'
+                  '    "arr": [true, null, "x"]\n  },\n  "empty": {}\n}\n')
+    with open(nestedPath, "w", encoding="utf-8", newline="") as handle:
+        handle.write(nestedText)
+    scalarPath = os.path.join(work, "scalar.json")
+    with open(scalarPath, "w", encoding="utf-8", newline="") as handle:
+        handle.write("42\n\n\n\n")
+
+    def clean_config():
+        for name in ("config.xml", "session.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    clean_config()
+    log_file = remove_log_with_retry(root)
+
+    def panel_lines(window, timeout=8.0):
+        """等 JSON 树面板出现并读回它渲染的那几行。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            panel = find_child(window, JSON_TREE_CLASS)
+            if panel and user32.IsWindowVisible(panel):
+                text = window_text(panel)
+                if text:
+                    return panel, text.split("\r\n")
+            time.sleep(0.2)
+        return None, []
+
+    def caret_line(window):
+        scinti = visible_scintilla(window)
+        position = user32.SendMessageW(scinti, SCI_GETCURRENTPOS, 0, 0)
+        return user32.SendMessageW(scinti, SCI_LINEFROMPOSITION, position, 0)
+
+    def click_first_row(panel):
+        user32.PostMessageW(panel, WM_LBUTTONDOWN, 0, (1 << 16) | 1)
+
+    # ---- 1) 结构与折叠 ----
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", nestedPath], cwd=root)
+    window = wait_for_main_window("notepadcc - nested.json")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        time.sleep(0.8)
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_JSON_TREE, 0)
+        panel, lines = panel_lines(window)
+        if not panel:
+            print("  FAIL: 打开 JSON 树之后没看到那个控件")
+            return False
+        expected = [
+            "v {",
+            '    "name": "npp"',
+            '  v "nested": {',
+            '      "n": 1',
+            '    v "arr": [',
+            "        true",
+            "        null",
+            '        "x"',
+            '  v "empty": {',   # empty 与 nested 同级（都是根的键），所以缩进一样
+        ]
+        if lines != expected:
+            print(f"  FAIL: 树的结构不对\n           实际 {lines}\n           期望 {expected}")
+            return False
+
+        click_first_row(panel)
+        time.sleep(0.6)
+        _, collapsed = panel_lines(window)
+        if collapsed != ["> { 3 }"]:
+            print(f"  FAIL: 点根应当折叠成一行摘要，实际 {collapsed}")
+            return False
+        click_first_row(panel)
+        time.sleep(0.6)
+        _, expanded = panel_lines(window)
+        if expanded != expected:
+            print(f"  FAIL: 再点一次应当展开回来，实际 {expanded[:3]}…")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    # ---- 2) 点标量跳到源码那一行；内容不合法时面板里说清原因 ----
+    clean_config()
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", scalarPath], cwd=root)
+    window = wait_for_main_window("notepadcc - scalar.json")
+    try:
+        if not window:
+            print("  FAIL: 找不到第二个实例的主窗口")
+            return False
+        time.sleep(0.8)
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_JSON_TREE, 0)
+        panel, lines = panel_lines(window)
+        if not panel or lines[0] != "  42":
+            print(f"  FAIL: 顶层标量应当渲染成一行，实际 {lines}")
+            return False
+        # 先把光标挪到文末，再点树里的那一行
+        scinti = visible_scintilla(window)
+        user32.SendMessageW(scinti, SCI_GOTOPOS, 6, 0)   # "42\n\n\n\n" 共六个字节
+        time.sleep(0.3)
+        if caret_line(window) == 0:
+            print("  FAIL: 光标没有先挪开，这条就测不出跳跃")
+            return False
+        click_first_row(panel)
+        time.sleep(0.6)
+        if caret_line(window) != 0:
+            print(f"  FAIL: 点标量应当跳到源码第 1 行，实际第 {caret_line(window) + 1} 行")
+            return False
+
+        # 把文档改坏 → 面板里应当说明"不是合法的 JSON"（错误信息含行列）
+        user32.SendMessageW(scinti, SCI_GOTOPOS, 0, 0)
+        user32.PostMessageW(scinti, WM_CHAR_INPUT, ord("{"), 0)
+        time.sleep(1.2)   # 刷新是节流的（300 ms），等宽裕一点
+        _, broken = panel_lines(window)
+        if not broken or "不是合法的 JSON" not in broken[0]:
+            print(f"  FAIL: 内容不合法时面板里应当说明原因，实际 {broken[:2]}")
+            return False
+        if "第 1 行" not in broken[0]:
+            print(f"  FAIL: 错误信息里应当带行列，实际 {broken[0]!r}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        clean_config()
+
+    print("  JSON 树视图：按层级列出结构（缩进/折叠记号/键名/值逐行核对）、"
+          "点容器折叠与展开、点标量跳到源码那一行、内容不合法时说明原因（含行列）")
+    return True
 
 
 def test_compare(root):

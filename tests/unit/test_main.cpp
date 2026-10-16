@@ -22,6 +22,7 @@
 #include "core/ExportRtf.h"
 #include "core/MarkdownRender.h"
 #include "core/Diff.h"
+#include "core/JsonTree.h"
 #include "core/PrintText.h"
 #include "core/PrintPaging.h"
 #include "plugin/PluginHost.h"
@@ -4907,6 +4908,121 @@ int main() {
             ::DestroyWindow(colourHost);
         } else {
             Check(false, "创建编辑控件失败");
+        }
+    }
+
+    Section("JSON 结构树（解析 / 行号 / 上限）");
+    {
+        using npcc::core::JsonKind;
+        using npcc::core::JsonNode;
+        using npcc::core::ParseJsonTree;
+
+        // ---- 结构、名字、值、行号 ----
+        {
+            const char* text = "{\n  \"name\": \"npp\",\n  \"nested\": {\n    \"n\": 1,\n"
+                               "    \"arr\": [true, null, \"x\"]\n  },\n  \"empty\": {}\n}\n";
+            const npcc::core::JsonTreeResult result = ParseJsonTree(text);
+            Check(result.ok, "合法 JSON 应当解析成功");
+            Check(result.root.kind == JsonKind::Object, "根是对象");
+            Check(result.root.count == 3, "根有三个键");
+            Check(result.root.line == 1, "根在第 1 行");
+            if (result.root.children.size() == 3) {
+                const JsonNode& name = result.root.children[0];
+                Check(name.name == "name" && name.kind == JsonKind::String &&
+                          name.value == "npp",
+                      "第一个键是字符串，名字与值都对");
+                Check(name.line == 2, "字符串在第 2 行（行号是**源文本**里的）");
+                const JsonNode& nested = result.root.children[1];
+                Check(nested.name == "nested" && nested.kind == JsonKind::Object &&
+                          nested.count == 2,
+                      "嵌套对象");
+                Check(nested.line == 3, "嵌套对象在第 3 行");
+                if (nested.children.size() == 2) {
+                    Check(nested.children[0].kind == JsonKind::Number &&
+                              nested.children[0].value == "1",
+                          "数字原样保留");
+                    const JsonNode& array = nested.children[1];
+                    Check(array.kind == JsonKind::Array && array.count == 3, "数组三个元素");
+                    Check(array.children[0].kind == JsonKind::Bool &&
+                              array.children[0].value == "true",
+                          "true 是布尔");
+                    Check(array.children[1].kind == JsonKind::Null, "null 是空值");
+                    Check(array.children[2].kind == JsonKind::String, "数组里的字符串");
+                    Check(array.children[2].name.empty(), "数组元素没有名字");
+                }
+                const JsonNode& empty = result.root.children[2];
+                Check(empty.kind == JsonKind::Object && empty.count == 0, "空对象");
+            }
+            // 节点数：根(1) + name(1) + nested(1) + n(1) + arr(1) + arr 的三个元素(3)
+            //         + empty(1) = 9
+            Check(result.nodeCount == 9, "节点数数得对");
+            Check(!result.truncated, "这么小的文档不会被截断");
+        }
+
+        // ---- 转义原样保留（与格式化器一个态度：显示要忠实于文件里到底是什么） ----
+        {
+            const npcc::core::JsonTreeResult result =
+                ParseJsonTree("{\"k\":\"a\\u4e2d\\tb\"}");
+            Check(result.ok, "带转义的字符串合法");
+            if (result.ok && result.root.children.size() == 1) {
+                Check(result.root.children[0].value == "a\\u4e2d\\tb",
+                      "转义写法原样留着（没有被解成真汉字与制表符）");
+            }
+        }
+
+        // ---- 顶层标量 / 空容器 ----
+        {
+            const npcc::core::JsonTreeResult number = ParseJsonTree("42");
+            Check(number.ok && number.root.kind == JsonKind::Number && number.root.value == "42",
+                  "顶层数字");
+            Check(number.root.line == 1 && number.nodeCount == 1, "只有一个节点");
+            const npcc::core::JsonTreeResult array = ParseJsonTree("[]");
+            Check(array.ok && array.root.kind == JsonKind::Array && array.root.count == 0,
+                  "空数组");
+            const npcc::core::JsonTreeResult object = ParseJsonTree("{}");
+            Check(object.ok && object.root.kind == JsonKind::Object, "空对象");
+        }
+
+        // ---- 非法 JSON：错误信息直接来自格式化器（含行列），两边口径一致 ----
+        {
+            const npcc::core::JsonTreeResult result = ParseJsonTree("{a:1}");
+            Check(!result.ok, "非法 JSON 解析失败");
+            Check(result.error.find(L"第 1 行第 2 列") != std::wstring::npos,
+                  "错误信息带行列（与格式化器同一套）");
+            Check(result.nodeCount == 0, "失败时没有节点");
+            Check(!ParseJsonTree("").ok, "空内容也失败");
+        }
+
+        // ---- 节点数上限：太大就只建前一部分并标明 ----
+        {
+            std::string big = "[";
+            for (int index = 0; index < 21000; ++index) {
+                if (index > 0) {
+                    big += ",";
+                }
+                big += "1";
+            }
+            big += "]";
+            const npcc::core::JsonTreeResult result = ParseJsonTree(big);
+            Check(result.ok, "两万多个元素的数组仍然是合法 JSON");
+            Check(result.truncated, "超过上限时标明被截断");
+            Check(result.nodeCount <= npcc::core::kMaxJsonNodes + 1, "节点数停在上限附近");
+            Check(result.root.children.size() < 21000, "子节点确实只建了一部分");
+        }
+
+        // ---- 深嵌套不炸栈 ----
+        {
+            std::string deep;
+            for (int index = 0; index < 200; ++index) {
+                deep += "[";
+            }
+            deep += "1";
+            for (int index = 0; index < 200; ++index) {
+                deep += "]";
+            }
+            const npcc::core::JsonTreeResult result = ParseJsonTree(deep);
+            Check(result.ok, "200 层嵌套能解析");
+            Check(result.nodeCount == 201, "层数数得对");
         }
     }
 

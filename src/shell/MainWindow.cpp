@@ -61,6 +61,7 @@ constexpr UINT_PTR kTimerCrashTest = 2;
 constexpr UINT_PTR kTimerFunctionList = 3;   // 函数列表的节流定时器（一次性）
 constexpr UINT_PTR kTimerRunCommand = 4;     // 轮询后台命令有没有跑完（捕获输出时才用）
 constexpr UINT_PTR kTimerMarkdownPreview = 5;   // Markdown 预览的节流定时器（一次性）
+constexpr UINT_PTR kTimerJsonTree = 6;          // JSON 树面板的节流定时器（一次性）
 
 enum : npcc::core::CmdId {
     kCmdFileNew     = npcc::core::MakeCmdId(1, 1),
@@ -121,6 +122,7 @@ enum : npcc::core::CmdId {
     kCmdViewHexGoTo          = npcc::core::MakeCmdId(4, 22),
     kCmdViewPreviewBrowser   = npcc::core::MakeCmdId(4, 23),
     kCmdViewMarkdownPreview  = npcc::core::MakeCmdId(4, 24),
+    kCmdViewJsonTree         = npcc::core::MakeCmdId(4, 25),
     // 宏（8 类）
     kCmdMacroRecord       = npcc::core::MakeCmdId(8, 1),
     kCmdMacroPlayLast     = npcc::core::MakeCmdId(8, 3),
@@ -319,6 +321,20 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             MarkdownPreview::RegisterWindowClass(::GetModuleHandleW(nullptr));
             markdownPreview_.Create(hwnd_, 6);
             markdownPreview_.SetDark(darkMode_);
+            JsonTreePanel::RegisterWindowClass(::GetModuleHandleW(nullptr));
+            jsonTreePanel_.Create(hwnd_, 7);
+            jsonTreePanel_.SetDark(darkMode_);
+            // 点了树里的标量 → 跳到源码里那一行（这就是树视图真正的用处）
+            jsonTreePanel_.SetJumpCallback([this](int line) {
+                if (edit::Document* document = ActiveDocument();
+                    document != nullptr && document->view != nullptr && line > 0) {
+                    // PositionFromLine 返回 int64（Scintilla 的位置类型），这里按 int32 收
+                    const int32_t target =
+                        static_cast<int32_t>(document->view->PositionFromLine(line - 1));
+                    document->view->SetCaretPosition(target);
+                    document->view->ScrollToLine(line - 1);
+                }
+            });
             functionPool_ = std::make_unique<infra::ThreadPool>();
             findBar_.Create(hwnd_);
             searchPanel_.Create(hwnd_);
@@ -385,6 +401,14 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             // Markdown 预览面板的开关同样来自配置（打开时整块内容在文档打开之后就有了）
             markdownPreviewVisible_ = config_.General().markdownPreviewVisible;
             markdownPreview_.SetVisible(markdownPreviewVisible_);
+    // JSON 树面板同理。两者都用右侧那一栏，配置里同时为真时以 JSON 树为准
+    // （互斥规则见 CommandToggleJsonTree）
+    jsonTreeVisible_ = config_.General().jsonTreeVisible;
+    if (jsonTreeVisible_) {
+        markdownPreviewVisible_ = false;
+        markdownPreview_.SetVisible(false);
+    }
+    jsonTreePanel_.SetVisible(jsonTreeVisible_);
             // 工作区目录来自配置：目录不在了就当"没有工作区"，配置留着不动
             if (!config_.General().workspaceFolder.empty()) {
                 std::error_code ec;
@@ -687,6 +711,11 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
                 RefreshMarkdownPreview();
                 return 0;
             }
+            if (wParam == kTimerJsonTree) {
+                ::KillTimer(hwnd_, kTimerJsonTree);   // 一次性
+                RefreshJsonTree();
+                return 0;
+            }
             break;
         case WM_DROPFILES: {
             const HDROP drop = reinterpret_cast<HDROP>(wParam);
@@ -963,6 +992,8 @@ void MainWindow::RegisterCommands() {
     add(kCmdViewMarkdownPreview, CmdCategory::View, L"cmd.view.markdownPreview",
         L"Markdown 预览面板(&M)", core::kCmdCheckable,
         [this](const CmdContext&) { CommandToggleMarkdownPreview(); });
+    add(kCmdViewJsonTree, CmdCategory::View, L"cmd.view.jsonTree", L"JSON 树视图(&J)",
+        core::kCmdCheckable, [this](const CmdContext&) { CommandToggleJsonTree(); });
 
     // ---- 宏 ----
     add(kCmdMacroRecord, CmdCategory::Macro, L"cmd.macro.record", L"开始/停止录制宏(&R)",
@@ -1226,6 +1257,7 @@ void MainWindow::RegisterCommands() {
     bindChecked(kCmdViewFunctionJump, [this] { return functionListPanel_.SelectedLine() >= 0; });
     bindChecked(kCmdViewHexToggle, [this] { return hexMode_; });
     bindChecked(kCmdViewMarkdownPreview, [this] { return markdownPreviewVisible_; });
+    bindChecked(kCmdViewJsonTree, [this] { return jsonTreeVisible_; });
     // "跳到偏移"只在十六进制视图里才有意义：不在的时候灰掉，而不是点了没反应
     if (core::Command* hexGoTo =
             const_cast<core::Command*>(registry_.Find(kCmdViewHexGoTo));
@@ -1425,12 +1457,18 @@ void MainWindow::LayoutViews() const {
     // Markdown 预览占右边一栏。宽度按比例写死（与左侧固定栏同一个态度：没有真正的
     // DockHost，拖动分隔条留给那一版），编辑区就是剩下的部分
     RECT editor = viewRect;
-    if (markdownPreviewVisible_ && viewRect.right - viewRect.left > 320) {
+    const bool rightPanel = markdownPreviewVisible_ || jsonTreeVisible_;
+    if (rightPanel && viewRect.right - viewRect.left > 320) {
         const int width = viewRect.right - viewRect.left;
         const int previewWidth = std::max(160, width * 45 / 100);
         RECT preview = viewRect;
         preview.left = viewRect.right - previewWidth;
-        markdownPreview_.Resize(preview);
+        // 两个面板互斥（都用右侧这一栏），谁开着就摆谁
+        if (jsonTreeVisible_) {
+            jsonTreePanel_.Resize(preview);
+        } else {
+            markdownPreview_.Resize(preview);
+        }
         editor.right = preview.left;
     }
     if (hexMode_) {
@@ -1914,6 +1952,9 @@ void MainWindow::ActivateDocument(core::BufferId id) {
     if (markdownPreviewVisible_) {
         RefreshMarkdownPreview();
     }
+    if (jsonTreeVisible_) {
+        RefreshJsonTree();
+    }
     if (edit::Document* document = documents_->Active(); document != nullptr && document->view) {
         ApplyViewToggles(*document);
         FocusActivePane();   // 分屏时焦点可能落在另一侧
@@ -2233,6 +2274,7 @@ void MainWindow::HandleEditorNotify(const NMHDR& header) {
             if (document == documents_->Active()) {
                 ScheduleFunctionParse();
                 ScheduleMarkdownPreview();
+                ScheduleJsonTree();
             }
             // 崩溃抢救只看"有没有未保存的改动"，所以这一刻必须同步刷新槽位：
             // 否则刚打完字就崩，抢救会以为这个文档是干净的，直接跳过。
@@ -4224,6 +4266,49 @@ void MainWindow::ShowComparison(edit::Document& left, const std::string& leftTex
                           std::to_wstring(stats.inserted) + L"）");
 }
 
+// ---- JSON 树面板（M3 的内置 JSON 能力）----
+
+void MainWindow::CommandToggleJsonTree() {
+    jsonTreeVisible_ = !jsonTreeVisible_;
+    if (jsonTreeVisible_ && markdownPreviewVisible_) {
+        // 两者都占右侧那一栏，只能开一个：开 JSON 树就把 Markdown 预览关掉，
+        // 并说一声（不然用户会以为预览坏了）
+        markdownPreviewVisible_ = false;
+        markdownPreview_.SetVisible(false);
+        statusBar_.SetMessage(L"JSON 树与 Markdown 预览都用右侧那一栏，已关掉 Markdown 预览");
+    }
+    jsonTreePanel_.SetVisible(jsonTreeVisible_);
+    config_.General().jsonTreeVisible = jsonTreeVisible_;
+    config_.General().markdownPreviewVisible = markdownPreviewVisible_;
+    config_.SaveNow();
+    if (jsonTreeVisible_) {
+        RefreshJsonTree();
+        jsonTreePanel_.Focus();
+    }
+    LayoutViews();
+    RebuildMenu();
+}
+
+void MainWindow::ScheduleJsonTree() {
+    if (!jsonTreeVisible_) {
+        return;
+    }
+    // 与其它面板同一套节流：停手 300 ms 才重新解析
+    ::SetTimer(hwnd_, kTimerJsonTree, 300, nullptr);
+}
+
+void MainWindow::RefreshJsonTree() {
+    if (!jsonTreeVisible_) {
+        return;
+    }
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr) {
+        jsonTreePanel_.Clear();
+        return;
+    }
+    jsonTreePanel_.SetJson(document->view->GetAllText());
+}
+
 bool MainWindow::OpenDocumentPath(const std::wstring& path) {
     const core::OpenOutcome outcome = documents_->Open(path);
     if (outcome.status != core::OpenStatus::Ok &&
@@ -4851,6 +4936,7 @@ void MainWindow::CommandToggleDarkMode() {
     ApplyStyleSchemeToAllViews();
     hexView_.SetDark(darkMode_);   // 十六进制视图的自绘配色也跟着走
     markdownPreview_.SetDark(darkMode_);
+    jsonTreePanel_.SetDark(darkMode_);
 }
 
 void MainWindow::CommandStyleConfigurator() {

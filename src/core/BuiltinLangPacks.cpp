@@ -72,6 +72,7 @@ std::vector<LangPack> MakeBuiltin() {
         Entry(L"cmd.view.hexGoTo", L"Go to Offset...", L"O"),
         Entry(L"cmd.view.previewBrowser", L"Open Preview in Browser", L"B"),
         Entry(L"cmd.view.markdownPreview", L"Markdown Preview Panel", L"M"),
+        Entry(L"cmd.view.jsonTree", L"JSON Tree View", L"J"),
         Entry(L"cmd.view.workspaceOpen", L"Open Folder as Workspace...", L"F"),
         Entry(L"cmd.view.workspaceClose", L"Close Workspace", L"C"),
         Entry(L"cmd.view.workspaceRefresh", L"Refresh Workspace", L"R"),

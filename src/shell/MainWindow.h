@@ -28,6 +28,7 @@
 #include "shell/FunctionListPanel.h"
 #include "shell/HexView.h"
 #include "shell/MarkdownPreview.h"
+#include "shell/JsonTreePanel.h"
 #include "plugin/PluginHost.h"
 #include "shell/FindBar.h"
 #include "shell/SearchPanel.h"
@@ -171,6 +172,9 @@ private:
     MarkdownPreview markdownPreview_;
     bool            markdownPreviewVisible_ = false;
     int             previewFileCounter_ = 0;
+    // JSON 树面板（与 Markdown 预览互斥：两者都用右侧那一栏）
+    JsonTreePanel   jsonTreePanel_;
+    bool            jsonTreeVisible_ = false;
     // ---- 界面语言（设计文档 6.6 / 7.7）----
     void RegisterLanguageCommands();
     void CommandSwitchLanguage(const std::wstring& locale);
@@ -192,6 +196,10 @@ private:
     void ScheduleMarkdownPreview();     // 内容变了之后节流刷新（300 ms）
     void RefreshMarkdownPreview();      // 立刻按活动文档重排面板
     bool ActiveDocumentIsMarkdown() const;
+    // ---- JSON 树面板（M3 的内置 JSON 能力）----
+    void CommandToggleJsonTree();
+    void ScheduleJsonTree();
+    void RefreshJsonTree();
     // ---- 比较（设计文档第 10 章 M3 的内置 Compare）----
     void CommandCompareWithDocument();   // 与另一个**已打开**的文档比
     void CommandCompareWithDisk();       // 与这份文档在磁盘上的版本比（"我改了哪些"）

@@ -26,6 +26,8 @@ struct GeneralConfig {
     bool functionListVisible = false;
     // Markdown 预览面板的开关（与函数列表同一个待遇：面板的可见性记在配置里）
     bool markdownPreviewVisible = false;
+    // JSON 树面板的开关（与 Markdown 预览互斥：两者都用右侧那一栏）
+    bool jsonTreeVisible = false;
 };
 
 struct EditConfig {
