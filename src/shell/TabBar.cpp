@@ -8,15 +8,33 @@
 namespace npcc::shell {
 namespace {
 
-constexpr COLORREF kColorBackground  = RGB(0xF0, 0xF0, 0xF0);
-constexpr COLORREF kColorActiveTab   = RGB(0xFF, 0xFF, 0xFF);
-constexpr COLORREF kColorInactiveTab = RGB(0xE4, 0xE4, 0xE4);
-constexpr COLORREF kColorHoverTab    = RGB(0xEC, 0xEC, 0xEC);
-constexpr COLORREF kColorBorder      = RGB(0xC8, 0xC8, 0xC8);
-constexpr COLORREF kColorText        = RGB(0x1E, 0x1E, 0x1E);
-constexpr COLORREF kColorTextMuted   = RGB(0x77, 0x77, 0x77);
-constexpr COLORREF kColorCloseHover  = RGB(0xD9, 0x5B, 0x5B);
-constexpr COLORREF kColorDropMarker  = RGB(0x1F, 0x6F, 0xC0);
+// 标签栏自绘用的那一组颜色。浅色/深色各一套——**窗口本身（菜单栏、面板）仍是系统配色**，
+// 暗色模式这一版管到标签栏为止（见设计说明书 2.6 第 4 条的"够到哪一层"）。
+struct TabColours {
+    COLORREF background;
+    COLORREF activeTab;
+    COLORREF inactiveTab;
+    COLORREF hoverTab;
+    COLORREF border;
+    COLORREF text;
+    COLORREF textMuted;
+    COLORREF closeHover;
+    COLORREF closeHoverText;
+    COLORREF dropMarker;
+};
+
+constexpr TabColours kLightColours = {
+    RGB(0xF0, 0xF0, 0xF0), RGB(0xFF, 0xFF, 0xFF), RGB(0xE4, 0xE4, 0xE4), RGB(0xEC, 0xEC, 0xEC),
+    RGB(0xC8, 0xC8, 0xC8), RGB(0x1E, 0x1E, 0x1E), RGB(0x77, 0x77, 0x77), RGB(0xD9, 0x5B, 0x5B),
+    RGB(0xFF, 0xFF, 0xFF), RGB(0x1F, 0x6F, 0xC0),
+};
+
+// 深色：未激活标签要比背景更亮一点（浅色下是更暗），否则分不出"哪个是当前标签"
+constexpr TabColours kDarkColours = {
+    RGB(0x25, 0x25, 0x26), RGB(0x1E, 0x1E, 0x1E), RGB(0x2D, 0x2D, 0x2E), RGB(0x33, 0x33, 0x34),
+    RGB(0x3C, 0x3C, 0x3C), RGB(0xE4, 0xE4, 0xE4), RGB(0x9A, 0x9A, 0x9A), RGB(0xD9, 0x5B, 0x5B),
+    RGB(0xFF, 0xFF, 0xFF), RGB(0x5A, 0x9E, 0xE0),
+};
 
 int DpiScaleFor(HWND hwnd, int value) {
     UINT dpi = 96;
@@ -257,6 +275,16 @@ void TabBar::SetActive(npcc::core::BufferId active) {
     }
 }
 
+void TabBar::SetDark(bool dark) {
+    if (dark_ == dark) {
+        return;
+    }
+    dark_ = dark;
+    if (hwnd_ != nullptr) {
+        ::InvalidateRect(hwnd_, nullptr, TRUE);   // 整块重画（背景色变了）
+    }
+}
+
 void TabBar::Notify(TabAction action, npcc::core::BufferId source,
                     npcc::core::BufferId target) const {
     if (hwnd_ == nullptr) {
@@ -308,7 +336,8 @@ void TabBar::Paint(HDC target, const RECT& client) {
     const HGDIOBJ previousFont = ::SelectObject(target, font_);
     ::SetBkMode(target, TRANSPARENT);
 
-    const HBRUSH background = ::CreateSolidBrush(kColorBackground);
+    const TabColours& colours = dark_ ? kDarkColours : kLightColours;
+    const HBRUSH background = ::CreateSolidBrush(colours.background);
     ::FillRect(target, &client, background);
 
     const int textPadding = paddingX_;
@@ -320,16 +349,17 @@ void TabBar::Paint(HDC target, const RECT& client) {
 
         const bool isActive = (items_[i].id == active_);
         const bool isHot = (static_cast<int>(i) == hotIndex_);
-        COLORREF fill = isActive ? kColorActiveTab : (isHot ? kColorHoverTab : kColorInactiveTab);
+        COLORREF fill = isActive ? colours.activeTab
+                                  : (isHot ? colours.hoverTab : colours.inactiveTab);
         if (dragging_ && static_cast<int>(i) == dragIndex_) {
-            fill = kColorBackground;   // 正在拖动的那一项画成"空位"
+            fill = colours.background;   // 正在拖动的那一项画成"空位"
         }
 
         const HBRUSH brush = ::CreateSolidBrush(fill);
         ::FillRect(target, &rc, brush);
         ::DeleteObject(brush);
 
-        ::SetTextColor(target, isActive ? kColorText : kColorTextMuted);
+        ::SetTextColor(target, isActive ? colours.text : colours.textMuted);
 
         // 标题区域：减去左右内边距与关闭按钮
         RECT textRect = rc;
@@ -351,24 +381,24 @@ void TabBar::Paint(HDC target, const RECT& client) {
                        boxLeft + boxSize, rc.top + (tabHeight_ + boxSize) / 2};
         const bool closeHot = (static_cast<int>(i) == hotCloseIndex_);
         if (closeHot) {
-            const HBRUSH hotBrush = ::CreateSolidBrush(kColorCloseHover);
+            const HBRUSH hotBrush = ::CreateSolidBrush(colours.closeHover);
             ::FillRect(target, &closeRect, hotBrush);
             ::DeleteObject(hotBrush);
         }
-        ::SetTextColor(target, closeHot ? RGB(0xFF, 0xFF, 0xFF) : kColorTextMuted);
+        ::SetTextColor(target, closeHot ? colours.closeHoverText : colours.textMuted);
         ::DrawTextW(target, L"×", -1, &closeRect,
                     DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
 
         // 活动标签与相邻标签之间画竖分隔
         if (i + 1 < items_.size() && !isActive && items_[i + 1].id != active_) {
-            ::SetDCPenColor(target, kColorBorder);
+            ::SetDCPenColor(target, colours.border);
             ::MoveToEx(target, rc.right, rc.top + tabHeight_ / 4, nullptr);
             ::LineTo(target, rc.right, rc.bottom - tabHeight_ / 4);
         }
     }
 
     // 底部边线
-    const HPEN border = ::CreatePen(PS_SOLID, 1, kColorBorder);
+    const HPEN border = ::CreatePen(PS_SOLID, 1, colours.border);
     const HGDIOBJ previousPen = ::SelectObject(target, border);
     ::MoveToEx(target, client.left, client.bottom - 1, nullptr);
     ::LineTo(target, client.right, client.bottom - 1);
@@ -380,7 +410,7 @@ void TabBar::Paint(HDC target, const RECT& client) {
         const int markerX = (static_cast<size_t>(dropIndex_) < items_.size())
                                 ? ItemRect(static_cast<size_t>(dropIndex_)).left
                                 : ItemRect(items_.size() - 1).right;
-        const HPEN marker = ::CreatePen(PS_SOLID, Scale(2), kColorDropMarker);
+        const HPEN marker = ::CreatePen(PS_SOLID, Scale(2), colours.dropMarker);
         const HGDIOBJ oldPen = ::SelectObject(target, marker);
         ::MoveToEx(target, markerX, Scale(2), nullptr);
         ::LineTo(target, markerX, tabHeight_ - Scale(2));

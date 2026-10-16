@@ -114,6 +114,7 @@ private:
     void CommandExportLanguageDefs();
     void CommandStyleConfigurator();
     void CommandExportUdlSample();
+    void CommandToggleDarkMode();
     void ApplyStyleSchemeToAllViews();
     void CommandAutoComplete();
     const edit::LanguageDef* ActiveLanguage() const;
@@ -186,6 +187,7 @@ private:
     bool showEol_ = false;
     bool showLineNumbers_ = true;
     bool wrapEnabled_ = false;
+    bool darkMode_ = false;
     // 分屏：左右两个视图共用同一份文档，比例与"在哪一侧编辑"随会话保存
     bool          splitEnabled_ = false;
     int           splitRatioPercent_ = 50;

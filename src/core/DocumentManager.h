@@ -52,6 +52,10 @@ public:
     // 语言定义（可被用户的 langs.xml 覆盖）。为空时用内置表。
     // 只持有指针：语言表的生命周期由外壳负责。
     void SetLanguages(const edit::LanguageRegistry* languages) noexcept { languages_ = languages; }
+    // 新文档的"控件皮肤"用哪套（浅色/深色）——由外壳在启动与切换主题时告知。
+    // 不这么做的话，深色模式里每新开一个标签都会先闪一下浅色的边距。
+    void SetPalette(const edit::EditorPalette& palette) noexcept { palette_ = palette; }
+    const edit::EditorPalette& Palette() const noexcept { return palette_; }
     // 样式方案（用户可调的配色）。为空时用内置默认配色。
     void SetStyles(const edit::StyleScheme* styles) noexcept { styles_ = styles; }
 
@@ -136,6 +140,7 @@ private:
     std::uint32_t                            newFileCodePage_ = 936;
     const edit::LanguageRegistry*            languages_ = nullptr;
     const edit::StyleScheme*                 styles_ = nullptr;
+    edit::EditorPalette                      palette_ = edit::EditorPalette::Light();
 };
 
 }  // namespace npcc::core

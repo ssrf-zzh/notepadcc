@@ -7,6 +7,10 @@
 #include <string_view>
 #include <vector>
 
+namespace npcc::infra {
+struct XmlElement;
+}
+
 namespace npcc::edit {
 
 // 样式方案（设计文档 6.4 / 7.5 的 stylers.xml）。
@@ -63,6 +67,20 @@ public:
     bool Load(std::wstring* error = nullptr, std::vector<std::wstring>* warnings = nullptr);
     bool Save(std::wstring* error = nullptr) const;
 
+    // ---- 主题（设计文档 2.6 第 4 条：暗色模式）----
+    // 一份方案里可以有多套主题，每套都是"完整的配色"（默认前景/背景/字体 + 每个语言的
+    // 角色与逐样式号条目）。下面所有读写接口都作用于**当前主题**，所以样式配置器改的是
+    // "现在这一套"，不会串到另一套去。
+    //
+    // 内置两套：light（原来那套浅色）与 dark。stylers.xml 里出现哪套就覆盖哪套，
+    // 没出现的仍用内置值——与 langs.xml 同一条规则。
+    static std::vector<std::wstring> BuiltinThemeNames();
+    std::vector<std::wstring> ThemeNames() const;
+    const std::wstring& ActiveTheme() const;
+    bool IsDark() const;
+    // 名字不认识时返回 false 且不改动当前主题
+    bool SetActiveTheme(std::wstring_view name);
+
     RoleStyle Role(const std::wstring& language, StyleRole role) const;
     void      SetRole(const std::wstring& language, StyleRole role, const RoleStyle& style);
     // 逐样式号覆盖：按样式号升序；没有则返回空表
@@ -74,10 +92,10 @@ public:
     void ResetLanguage(const std::wstring& language);
     bool HasOverride(const std::wstring& language) const;
 
-    std::uint32_t Fore() const noexcept { return fore_; }
-    std::uint32_t Back() const noexcept { return back_; }
-    const std::wstring& FontFace() const noexcept { return fontFace_; }
-    int FontSize() const noexcept { return fontSize_; }
+    std::uint32_t Fore() const noexcept { return Active().fore; }
+    std::uint32_t Back() const noexcept { return Active().back; }
+    const std::wstring& FontFace() const noexcept { return Active().fontFace; }
+    int FontSize() const noexcept { return Active().fontSize; }
     void SetDefault(std::uint32_t fore, std::uint32_t back, std::wstring fontFace, int fontSize);
 
     // 颜色文本 "#RRGGBB" 与数值互转（配置文件里写文本，人可读）
@@ -100,11 +118,29 @@ private:
         std::vector<StyleOverride>    styles;
     };
 
-    std::uint32_t                fore_ = 0x1E1E1E;
-    std::uint32_t                back_ = 0xFFFFFF;
-    std::wstring                 fontFace_ = L"Consolas";
-    int                          fontSize_ = 11;
-    std::vector<LanguageEntry>   overrides_;
+    // 一套完整配色
+    struct Theme {
+        std::wstring               name;
+        bool                       dark = false;
+        std::uint32_t              fore = 0x1E1E1E;
+        std::uint32_t              back = 0xFFFFFF;
+        std::wstring               fontFace = L"Consolas";
+        int                        fontSize = 11;
+        std::vector<LanguageEntry> overrides;
+    };
+
+    Theme&       Active();
+    const Theme& Active() const;
+    static Theme BuiltinLight();
+    static Theme BuiltinDark();
+    // 找到（或建立）指定名字的主题；返回 nullptr 表示这个名字不接受
+    Theme* Find(std::wstring_view name);
+    // 读一套主题的内容（<Theme> 里那部分；旧版扁平写法也走这里）
+    static void ReadThemeBody(const infra::XmlElement& node, StyleScheme& scheme,
+                              std::vector<std::wstring>& sink);
+
+    std::vector<Theme> themes_;
+    std::size_t        active_ = 0;
 };
 
 }  // namespace npcc::edit

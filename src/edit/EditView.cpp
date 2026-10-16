@@ -359,24 +359,33 @@ void EditView::SetDefaultFont(const char* faceName, int pointSize) const {
     Send(SCI_STYLECLEARALL);   // 把默认样式扩散到所有样式
 }
 
-void EditView::ApplyLightTheme() const {
-    Send(SCI_STYLESETFORE, STYLE_DEFAULT, RGB(0x1E, 0x1E, 0x1E));
-    Send(SCI_STYLESETBACK, STYLE_DEFAULT, RGB(0xFF, 0xFF, 0xFF));
-    SetDefaultFont("Consolas", 11);
-
-    // 行号边距
-    Send(SCI_STYLESETFORE, STYLE_LINENUMBER, RGB(0x80, 0x80, 0x80));
-    Send(SCI_STYLESETBACK, STYLE_LINENUMBER, RGB(0xF5, 0xF5, 0xF5));
+void EditView::ApplyPalette(const EditorPalette& palette) const {
+    palette_ = palette;
+    const auto colour = [](std::uint32_t rrggbb) {
+        return static_cast<intptr_t>(StyleScheme::ToScintillaColour(rrggbb));
+    };
+    // 只设"控件皮肤"那几项；默认前景/背景与字体由 StyleScheme（当前主题）决定，
+    // 不在这里重复——否则主题一换，两份设置会互相打架（见 ApplySchemeDefaults）
+    Send(SCI_STYLESETFORE, STYLE_LINENUMBER, colour(palette.lineNumberFore));
+    Send(SCI_STYLESETBACK, STYLE_LINENUMBER, colour(palette.lineNumberBack));
     Send(SCI_SETMARGINTYPEN, 0, SC_MARGIN_NUMBER);
     Send(SCI_SETMARGINWIDTHN, 0, 48);
     ConfigureBookmarkMargin();
     ConfigureFoldMargin();
 
-    Send(SCI_SETCARETFORE, RGB(0x00, 0x00, 0x00));
+    Send(SCI_SETCARETFORE, colour(palette.caret));
     Send(SCI_SETCARETLINEVISIBLE, 1);
-    Send(SCI_SETCARETLINEBACK, RGB(0xF2, 0xF6, 0xFA));
-    Send(SCI_SETSELBACK, 1, RGB(0xCC, 0xE0, 0xF5));
-    SetTabWidth(4, false);
+    Send(SCI_SETCARETLINEBACK, colour(palette.caretLineBack));
+    Send(SCI_SETSELBACK, 1, colour(palette.selectionBack));
+    if (palette.whitespace != 0) {
+        Send(SCI_SETWHITESPACEFORE, 1, colour(palette.whitespace));
+    } else {
+        Send(SCI_SETWHITESPACEFORE, 0, 0);
+    }
+}
+
+void EditView::ApplyLightTheme() const {
+    ApplyPalette(EditorPalette::Light());
 }
 
 void EditView::ShowLineNumbers(bool visible) const {
@@ -386,8 +395,10 @@ void EditView::ShowLineNumbers(bool visible) const {
 void EditView::ConfigureBookmarkMargin() const {
     // 书签放在独立边距里：可以"在行号右侧、可点击"，而不必去动行号边距
     Send(SCI_MARKERDEFINE, static_cast<uintptr_t>(kMarkerBookmark), SC_MARK_CIRCLE);
-    Send(SCI_MARKERSETFORE, static_cast<uintptr_t>(kMarkerBookmark), RGB(0xFF, 0xFF, 0xFF));
-    Send(SCI_MARKERSETBACK, static_cast<uintptr_t>(kMarkerBookmark), RGB(0x2E, 0x86, 0xC1));
+    Send(SCI_MARKERSETFORE, static_cast<uintptr_t>(kMarkerBookmark),
+         static_cast<intptr_t>(StyleScheme::ToScintillaColour(palette_.bookmarkFore)));
+    Send(SCI_MARKERSETBACK, static_cast<uintptr_t>(kMarkerBookmark),
+         static_cast<intptr_t>(StyleScheme::ToScintillaColour(palette_.bookmarkBack)));
     Send(SCI_SETMARGINTYPEN, static_cast<uintptr_t>(kMarginBookmark), SC_MARGIN_SYMBOL);
     Send(SCI_SETMARGINMASKN, static_cast<uintptr_t>(kMarginBookmark), 1u << kMarkerBookmark);
     Send(SCI_SETMARGINWIDTHN, static_cast<uintptr_t>(kMarginBookmark), 16);
@@ -405,10 +416,14 @@ void EditView::ConfigureFoldMargin() const {
     Send(SCI_MARKERDEFINE, SC_MARKNUM_FOLDEREND, SC_MARK_EMPTY);
     Send(SCI_MARKERDEFINE, SC_MARKNUM_FOLDEROPENMID, SC_MARK_EMPTY);
     Send(SCI_MARKERDEFINE, SC_MARKNUM_FOLDERMIDTAIL, SC_MARK_EMPTY);
-    Send(SCI_MARKERSETFORE, SC_MARKNUM_FOLDER, RGB(0x60, 0x60, 0x60));
-    Send(SCI_MARKERSETBACK, SC_MARKNUM_FOLDER, RGB(0xFF, 0xFF, 0xFF));
-    Send(SCI_MARKERSETFORE, SC_MARKNUM_FOLDEROPEN, RGB(0x60, 0x60, 0x60));
-    Send(SCI_MARKERSETBACK, SC_MARKNUM_FOLDEROPEN, RGB(0xFF, 0xFF, 0xFF));
+    Send(SCI_MARKERSETFORE, SC_MARKNUM_FOLDER,
+         static_cast<intptr_t>(StyleScheme::ToScintillaColour(palette_.foldFore)));
+    Send(SCI_MARKERSETBACK, SC_MARKNUM_FOLDER,
+         static_cast<intptr_t>(StyleScheme::ToScintillaColour(palette_.foldBack)));
+    Send(SCI_MARKERSETFORE, SC_MARKNUM_FOLDEROPEN,
+         static_cast<intptr_t>(StyleScheme::ToScintillaColour(palette_.foldFore)));
+    Send(SCI_MARKERSETBACK, SC_MARKNUM_FOLDEROPEN,
+         static_cast<intptr_t>(StyleScheme::ToScintillaColour(palette_.foldBack)));
 
     Send(SCI_SETMARGINTYPEN, static_cast<uintptr_t>(kMarginFold), SC_MARGIN_SYMBOL);
     Send(SCI_SETMARGINMASKN, static_cast<uintptr_t>(kMarginFold), SC_MASK_FOLDERS);
@@ -642,6 +657,13 @@ int32_t EditView::DefaultForeColor() const {
     return static_cast<int32_t>(Send(SCI_STYLEGETFORE, static_cast<uintptr_t>(STYLE_DEFAULT)));
 }
 
+int32_t EditView::StyleBackColor(int32_t style) const {
+    if (style < 0) {
+        return -1;
+    }
+    return static_cast<int32_t>(Send(SCI_STYLEGETBACK, static_cast<uintptr_t>(style)));
+}
+
 bool EditView::HasBookmark(int32_t line) const {
     const intptr_t mask = Send(SCI_MARKERGET, static_cast<uintptr_t>(line));
     return (mask & (1 << kMarkerBookmark)) != 0;
@@ -767,6 +789,9 @@ void EditView::ApplySchemeDefaults(const StyleScheme& scheme) const {
     // SetDefaultFont 会 STYLECLEARALL：把默认扩到所有样式。所以必须在设角色色**之前**调用，
     // 否则会把刚设好的角色色又抹平。
     SetDefaultFont(face.c_str(), scheme.FontSize());
+    // STYLECLEARALL 把行号边距、记号那几项也清回默认了，所以皮肤配色要在这里重铺一遍——
+    // 不然换一次语言，深色下的行号栏就会变回白的（浅色下几乎看不出来，深色下一眼就看见）
+    ApplyPalette(palette_);
 }
 
 void EditView::ApplySyntaxColours(const LanguageDef& language, const StyleScheme& scheme) const {

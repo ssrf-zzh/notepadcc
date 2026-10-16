@@ -14,18 +14,13 @@ namespace npcc::edit {
 namespace {
 
 constexpr const wchar_t* kRootName = L"NotepadccStyles";
-constexpr int            kSchemaVersion = 1;
+constexpr const wchar_t* kThemeName = L"Theme";
+constexpr int            kSchemaVersion = 2;   // 2 = 引入主题（1 的扁平写法仍读得进来）
 
-// 内置默认配色。这里与原来的硬编码表格是同一份值——搬过来的目的是让它成为
+// 内置默认配色。这里与原来硬编码在 EditView 里的表格是同一份值——搬过来的目的是让它成为
 // **唯一来源**：用户改不了的地方，至少要让它只有一处定义。
 constexpr std::uint32_t kDefaultFore = 0x1E1E1E;
 constexpr std::uint32_t kDefaultBack = 0xFFFFFF;
-constexpr std::uint32_t kCommentColour = 0x2E7D32;    // 注释：绿
-constexpr std::uint32_t kKeywordColour = 0x0000C0;    // 关键字：深蓝
-constexpr std::uint32_t kNumberColour = 0x986500;     // 数字：棕
-constexpr std::uint32_t kStringColour = 0xA31515;     // 字符串：暗红
-constexpr std::uint32_t kHighlightColour = 0x800080;  // 强调项：紫
-constexpr std::uint32_t kExtraColour = 0x266B9E;      // 次要项：蓝
 
 struct RoleEntry {
     StyleRole      role;
@@ -36,22 +31,53 @@ struct RoleEntry {
     bool           italic;
 };
 
-const RoleEntry kRoles[] = {
-    {StyleRole::Comment,   "comment",   L"注释",     kCommentColour,   false, true},
-    {StyleRole::Keyword,   "keyword",   L"关键字",   kKeywordColour,   true,  false},
-    {StyleRole::Number,    "number",    L"数字",     kNumberColour,    false, false},
-    {StyleRole::String,    "string",    L"字符串",   kStringColour,    false, false},
-    {StyleRole::Highlight, "highlight", L"强调项",   kHighlightColour, false, false},
-    {StyleRole::Extra,     "extra",     L"次要项",   kExtraColour,     false, false},
+// 浅色（原来那套）
+const RoleEntry kRolesLight[] = {
+    {StyleRole::Comment,   "comment",   L"注释",   0x2E7D32, false, true},
+    {StyleRole::Keyword,   "keyword",   L"关键字", 0x0000C0, true,  false},
+    {StyleRole::Number,    "number",    L"数字",   0x986500, false, false},
+    {StyleRole::String,    "string",    L"字符串", 0xA31515, false, false},
+    {StyleRole::Highlight, "highlight", L"强调项", 0x800080, false, false},
+    {StyleRole::Extra,     "extra",     L"次要项", 0x266B9E, false, false},
 };
 
-const RoleEntry* FindRole(StyleRole role) {
-    for (const RoleEntry& entry : kRoles) {
-        if (entry.role == role) {
-            return &entry;
+// 深色：不是"把浅色反过来"，而是照常见深色配色（编辑器社区的惯例）各给一个够亮的颜色——
+// 深底上的关键字要够蓝、字符串要够橙，压暗的绿/红在深底上根本读不清。
+// 角色名与 key 必须与浅色表逐条一致（界面上是同一组切片，只是取值不同）。
+const RoleEntry kRolesDark[] = {
+    {StyleRole::Comment,   "comment",   L"注释",   0x6A9955, false, true},
+    {StyleRole::Keyword,   "keyword",   L"关键字", 0x569CD6, true,  false},
+    {StyleRole::Number,    "number",    L"数字",   0xB5CEA8, false, false},
+    {StyleRole::String,    "string",    L"字符串", 0xCE9178, false, false},
+    {StyleRole::Highlight, "highlight", L"强调项", 0xC586C0, false, false},
+    {StyleRole::Extra,     "extra",     L"次要项", 0x4FC1FF, false, false},
+};
+
+constexpr std::uint32_t kDarkFore = 0xD4D4D4;
+constexpr std::uint32_t kDarkBack = 0x1E1E1E;
+
+const RoleEntry* RoleTable(bool dark) {
+    return dark ? kRolesDark : kRolesLight;
+}
+
+const RoleEntry* FindRole(bool dark, StyleRole role) {
+    const RoleEntry* table = RoleTable(dark);
+    for (int index = 0; index < kStyleRoleCount; ++index) {
+        if (table[index].role == role) {
+            return &table[index];
         }
     }
     return nullptr;
+}
+
+RoleStyle DefaultRoleStyle(bool dark, StyleRole role) {
+    RoleStyle value;
+    if (const RoleEntry* entry = FindRole(dark, role); entry != nullptr) {
+        value.fore = entry->fore;
+        value.bold = entry->bold;
+        value.italic = entry->italic;
+    }
+    return value;
 }
 
 std::wstring WidenAscii(const char* text) {
@@ -62,15 +88,43 @@ std::wstring WidenAscii(const char* text) {
     return out;
 }
 
+std::string NarrowAscii(std::wstring_view text) {
+    std::string out;
+    out.reserve(text.size());
+    for (const wchar_t ch : text) {
+        out.push_back(ch < 0x80 ? static_cast<char>(ch) : '?');
+    }
+    return out;
+}
+
 }  // namespace
+
+StyleScheme::Theme StyleScheme::BuiltinLight() {
+    Theme theme;
+    theme.name = L"light";
+    theme.dark = false;
+    theme.fore = kDefaultFore;
+    theme.back = kDefaultBack;
+    theme.fontFace = L"Consolas";
+    theme.fontSize = 11;
+    return theme;
+}
+
+StyleScheme::Theme StyleScheme::BuiltinDark() {
+    Theme theme;
+    theme.name = L"dark";
+    theme.dark = true;
+    theme.fore = kDarkFore;
+    theme.back = kDarkBack;
+    theme.fontFace = L"Consolas";
+    theme.fontSize = 11;
+    return theme;
+}
 
 StyleScheme StyleScheme::Defaults() {
     StyleScheme scheme;
-    scheme.fore_ = kDefaultFore;
-    scheme.back_ = kDefaultBack;
-    scheme.fontFace_ = L"Consolas";
-    scheme.fontSize_ = 11;
-    scheme.overrides_.clear();   // 空 = 每个语言都用 kRoles 里那份默认
+    scheme.themes_ = {BuiltinLight(), BuiltinDark()};
+    scheme.active_ = 0;
     return scheme;
 }
 
@@ -78,15 +132,69 @@ std::filesystem::path StyleScheme::Path() {
     return infra::ConfigRoot() / L"stylers.xml";
 }
 
+std::vector<std::wstring> StyleScheme::BuiltinThemeNames() {
+    return {L"light", L"dark"};
+}
+
+StyleScheme::Theme& StyleScheme::Active() {
+    if (active_ >= themes_.size()) {
+        active_ = 0;
+    }
+    return themes_[active_];
+}
+
+const StyleScheme::Theme& StyleScheme::Active() const {
+    if (active_ >= themes_.size()) {
+        return themes_.front();   // 构造之后永远至少有一套主题
+    }
+    return themes_[active_];
+}
+
+StyleScheme::Theme* StyleScheme::Find(std::wstring_view name) {
+    for (Theme& theme : themes_) {
+        if (theme.name == name) {
+            return &theme;
+        }
+    }
+    return nullptr;
+}
+
+std::vector<std::wstring> StyleScheme::ThemeNames() const {
+    std::vector<std::wstring> names;
+    names.reserve(themes_.size());
+    for (const Theme& theme : themes_) {
+        names.push_back(theme.name);
+    }
+    return names;
+}
+
+const std::wstring& StyleScheme::ActiveTheme() const {
+    return Active().name;
+}
+
+bool StyleScheme::IsDark() const {
+    return Active().dark;
+}
+
+bool StyleScheme::SetActiveTheme(std::wstring_view name) {
+    for (std::size_t index = 0; index < themes_.size(); ++index) {
+        if (themes_[index].name == name) {
+            active_ = index;
+            return true;
+        }
+    }
+    return false;
+}
+
 const char* StyleScheme::RoleKey(StyleRole role) {
-    const RoleEntry* entry = FindRole(role);
+    const RoleEntry* entry = FindRole(false, role);
     return entry != nullptr ? entry->key : "";
 }
 
 bool StyleScheme::ParseRoleKey(std::string_view key, StyleRole& out) {
-    for (const RoleEntry& entry : kRoles) {
-        if (key == entry.key) {
-            out = entry.role;
+    for (int index = 0; index < kStyleRoleCount; ++index) {
+        if (key == kRolesLight[index].key) {
+            out = kRolesLight[index].role;
             return true;
         }
     }
@@ -94,7 +202,7 @@ bool StyleScheme::ParseRoleKey(std::string_view key, StyleRole& out) {
 }
 
 std::wstring StyleScheme::RoleDisplayName(StyleRole role) {
-    const RoleEntry* entry = FindRole(role);
+    const RoleEntry* entry = FindRole(false, role);
     return entry != nullptr ? std::wstring(entry->display) : std::wstring(L"未知");
 }
 
@@ -146,7 +254,8 @@ void StyleScheme::SetRole(const std::wstring& language, StyleRole role, const Ro
     if (language.empty() || role == StyleRole::Count) {
         return;
     }
-    for (LanguageEntry& entry : overrides_) {
+    Theme& theme = Active();
+    for (LanguageEntry& entry : theme.overrides) {
         if (entry.name == language) {
             entry.roles[static_cast<std::size_t>(role)] = style;
             return;
@@ -154,47 +263,41 @@ void StyleScheme::SetRole(const std::wstring& language, StyleRole role, const Ro
     }
     LanguageEntry entry;
     entry.name = language;
-    // 新条目先铺一份默认值，再改指定角色：这样界面上"没动过的角色"也有确定的值
-    for (const RoleEntry& roleEntry : kRoles) {
-        RoleStyle value;
-        value.fore = roleEntry.fore;
-        value.bold = roleEntry.bold;
-        value.italic = roleEntry.italic;
-        entry.roles[static_cast<std::size_t>(roleEntry.role)] = value;
+    // 新条目先铺一份本主题的默认值，再改指定角色：这样界面上"没动过的角色"也有确定的值
+    for (int index = 0; index < kStyleRoleCount; ++index) {
+        const auto kind = static_cast<StyleRole>(index);
+        entry.roles[static_cast<std::size_t>(index)] = DefaultRoleStyle(theme.dark, kind);
     }
     entry.roles[static_cast<std::size_t>(role)] = style;
-    overrides_.push_back(std::move(entry));
+    theme.overrides.push_back(std::move(entry));
 }
 
 RoleStyle StyleScheme::Role(const std::wstring& language, StyleRole role) const {
     if (role == StyleRole::Count) {
         return {};
     }
-    for (const LanguageEntry& entry : overrides_) {
+    const Theme& theme = Active();
+    for (const LanguageEntry& entry : theme.overrides) {
         if (entry.name == language) {
             return entry.roles[static_cast<std::size_t>(role)];
         }
     }
-    RoleStyle value;
-    if (const RoleEntry* roleEntry = FindRole(role); roleEntry != nullptr) {
-        value.fore = roleEntry->fore;
-        value.bold = roleEntry->bold;
-        value.italic = roleEntry->italic;
-    }
-    return value;
+    return DefaultRoleStyle(theme.dark, role);
 }
 
 void StyleScheme::ResetLanguage(const std::wstring& language) {
-    overrides_.erase(std::remove_if(overrides_.begin(), overrides_.end(),
-                                    [&language](const LanguageEntry& entry) {
-                                        return entry.name == language;
-                                    }),
-                     overrides_.end());
+    Theme& theme = Active();
+    theme.overrides.erase(std::remove_if(theme.overrides.begin(), theme.overrides.end(),
+                                         [&language](const LanguageEntry& entry) {
+                                             return entry.name == language;
+                                         }),
+                          theme.overrides.end());
 }
 
 const std::vector<StyleOverride>& StyleScheme::Styles(const std::wstring& language) const {
     static const std::vector<StyleOverride> empty;
-    for (const LanguageEntry& entry : overrides_) {
+    const Theme& theme = Active();
+    for (const LanguageEntry& entry : theme.overrides) {
         if (entry.name == language) {
             return entry.styles;
         }
@@ -209,7 +312,8 @@ void StyleScheme::SetStyle(const std::wstring& language, int number, std::wstrin
     if (language.empty() || number < 0 || number > 255) {
         return;
     }
-    for (LanguageEntry& entry : overrides_) {
+    Theme& theme = Active();
+    for (LanguageEntry& entry : theme.overrides) {
         if (entry.name != language) {
             continue;
         }
@@ -223,22 +327,19 @@ void StyleScheme::SetStyle(const std::wstring& language, int number, std::wstrin
         entry.styles.push_back(StyleOverride{number, std::move(name), style});
         return;
     }
-    // 这个语言还没有条目：先按默认值铺一份角色，再挂上这条覆盖
     LanguageEntry entry;
     entry.name = language;
-    for (const RoleEntry& roleEntry : kRoles) {
-        RoleStyle value;
-        value.fore = roleEntry.fore;
-        value.bold = roleEntry.bold;
-        value.italic = roleEntry.italic;
-        entry.roles[static_cast<std::size_t>(roleEntry.role)] = value;
+    for (int index = 0; index < kStyleRoleCount; ++index) {
+        const auto kind = static_cast<StyleRole>(index);
+        entry.roles[static_cast<std::size_t>(index)] = DefaultRoleStyle(theme.dark, kind);
     }
     entry.styles.push_back(StyleOverride{number, std::move(name), style});
-    overrides_.push_back(std::move(entry));
+    theme.overrides.push_back(std::move(entry));
 }
 
 void StyleScheme::ClearStyle(const std::wstring& language, int number) {
-    for (LanguageEntry& entry : overrides_) {
+    Theme& theme = Active();
+    for (LanguageEntry& entry : theme.overrides) {
         if (entry.name != language) {
             continue;
         }
@@ -252,16 +353,20 @@ void StyleScheme::ClearStyle(const std::wstring& language, int number) {
 }
 
 bool StyleScheme::HasOverride(const std::wstring& language) const {
-    return std::any_of(overrides_.begin(), overrides_.end(),
-                       [&language](const LanguageEntry& entry) { return entry.name == language; });
+    const Theme& theme = Active();
+    return std::any_of(theme.overrides.begin(), theme.overrides.end(),
+                       [&language](const LanguageEntry& entry) {
+                           return entry.name == language;
+                       });
 }
 
 void StyleScheme::SetDefault(std::uint32_t fore, std::uint32_t back, std::wstring fontFace,
                              int fontSize) {
-    fore_ = fore & 0xFFFFFFu;
-    back_ = back & 0xFFFFFFu;
-    fontFace_ = std::move(fontFace);
-    fontSize_ = std::max(6, std::min(72, fontSize));
+    Theme& theme = Active();
+    theme.fore = fore & 0xFFFFFFu;
+    theme.back = back & 0xFFFFFFu;
+    theme.fontFace = std::move(fontFace);
+    theme.fontSize = std::max(6, std::min(72, fontSize));
 }
 
 bool StyleScheme::Load(std::wstring* error, std::vector<std::wstring>* warnings) {
@@ -296,71 +401,107 @@ bool StyleScheme::Load(std::wstring* error, std::vector<std::wstring>* warnings)
         return false;
     }
 
-    if (const infra::XmlElement* base = root->Child(L"Default"); base != nullptr) {
-        std::uint32_t fore = fore_;
-        std::uint32_t back = back_;
-        if (ParseColour(base->AttributeOr(L"fore", L""), fore) == false) {
-            sink.push_back(L"Default.fore 不是 #RRGGBB，已用默认值");
+    // 两代写法都要认：
+    //   旧（schemaVersion 1）：根下直接是 <Default> 与 <Language>，那就是浅色主题
+    //   新（schemaVersion 2）：根下是若干 <Theme name="...">，每套里再放 Default/Language
+    // 文件里出现哪套主题就覆盖哪套，没出现的仍用内置值（与 langs.xml 同一条规则）。
+    const std::vector<const infra::XmlElement*> themeNodes = root->Children(kThemeName);
+    if (themeNodes.empty()) {
+        SetActiveTheme(L"light");
+        ReadThemeBody(*root, *this, sink);
+    } else {
+        for (const infra::XmlElement* node : themeNodes) {
+            if (node == nullptr) {
+                continue;
+            }
+            const std::wstring name = node->AttributeOr(L"name", L"");
+            if (name.empty()) {
+                sink.push_back(L"stylers.xml 里有一套没有 name 的主题，已跳过");
+                continue;
+            }
+            Theme* theme = Find(name);
+            if (theme == nullptr) {
+                // 文件里可以出现我们不认识的主题名（用户自己加一套），照样据实读进来
+                Theme extra;
+                extra.name = name;
+                extra.dark = name == L"dark";
+                themes_.push_back(std::move(extra));
+            }
+            SetActiveTheme(name);   // 按名字激活：不拿 push_back 之后的指针去算下标
+            ReadThemeBody(*node, *this, sink);
         }
-        if (ParseColour(base->AttributeOr(L"back", L""), back) == false) {
-            sink.push_back(L"Default.back 不是 #RRGGBB，已用默认值");
-        }
-        const std::wstring font = base->AttributeOr(L"font", fontFace_);
-        const int size = base->AttributeInt(L"size", fontSize_);
-        SetDefault(fore, back, font, size);
+        SetActiveTheme(L"light");
     }
 
-    for (const infra::XmlElement* node : root->Children(L"Language")) {
-        const std::wstring name = node->AttributeOr(L"name", L"");
+    // 内置的两套主题永远在：文件里没提到 dark 时，用户切过去也该有一套像样的深色，
+    // 而不是"切了没反应"
+    for (const std::wstring& name : BuiltinThemeNames()) {
+        if (Find(name) == nullptr) {
+            themes_.push_back(name == L"dark" ? BuiltinDark() : BuiltinLight());
+        }
+    }
+    SetActiveTheme(L"light");
+    return true;
+}
+
+void StyleScheme::ReadThemeBody(const infra::XmlElement& node, StyleScheme& scheme,
+                                std::vector<std::wstring>& sink) {
+    const StyleScheme::Theme& active = scheme.Active();
+    if (const infra::XmlElement* base = node.Child(L"Default")) {
+        std::uint32_t fore = active.fore;
+        std::uint32_t back = active.back;
+        if (!StyleScheme::ParseColour(base->AttributeOr(L"fore", L""), fore)) {
+            sink.push_back(L"Default.fore 不是 #RRGGBB，已用默认值");
+        }
+        if (!StyleScheme::ParseColour(base->AttributeOr(L"back", L""), back)) {
+            sink.push_back(L"Default.back 不是 #RRGGBB，已用默认值");
+        }
+        const std::wstring font = base->AttributeOr(L"font", active.fontFace);
+        const int size = base->AttributeInt(L"size", active.fontSize);
+        scheme.SetDefault(fore, back, font, size);
+    }
+
+    for (const infra::XmlElement* language : node.Children(L"Language")) {
+        const std::wstring name = language->AttributeOr(L"name", L"");
         if (name.empty()) {
             sink.push_back(L"stylers.xml 里有一条没有 name 的语言条目，已跳过");
             continue;
         }
-        for (const infra::XmlElement* style : node->Children(L"Style")) {
+        for (const infra::XmlElement* style : language->Children(L"Style")) {
             StyleRole role = StyleRole::Comment;
             const std::wstring key = style->AttributeOr(L"role", L"");
-            std::string narrow;
-            narrow.reserve(key.size());
-            for (const wchar_t ch : key) {
-                narrow.push_back(ch < 0x80 ? static_cast<char>(ch) : '?');
-            }
-            if (!ParseRoleKey(narrow, role)) {
+            if (!StyleScheme::ParseRoleKey(NarrowAscii(key), role)) {
                 sink.push_back(name + L"：认不出的样式角色 " + key + L"，已跳过");
                 continue;
             }
-            RoleStyle value = Role(name, role);
-            if (!ParseColour(style->AttributeOr(L"fore", L""), value.fore)) {
+            RoleStyle value = scheme.Role(name, role);
+            if (!StyleScheme::ParseColour(style->AttributeOr(L"fore", L""), value.fore)) {
                 sink.push_back(name + L"." + key + L"：颜色不是 #RRGGBB，已跳过");
                 continue;
             }
             value.bold = style->AttributeBool(L"bold", value.bold);
             value.italic = style->AttributeBool(L"italic", value.italic);
-            SetRole(name, role, value);
+            scheme.SetRole(name, role, value);
         }
         // 逐样式号覆盖：颜色必须写全（没有"角色默认"可以继承——这个样式号可能是
         // 目录里都没有的，程序此刻并不知道它该是什么色）
-        for (const infra::XmlElement* style : node->Children(L"StyleNumber")) {
+        for (const infra::XmlElement* style : language->Children(L"StyleNumber")) {
             const int number = style->AttributeInt(L"number", -1);
             if (number < 0 || number > 255) {
                 sink.push_back(name + L"：样式号越界（应当 0~255），已跳过");
                 continue;
             }
             RoleStyle value;
-            if (!ParseColour(style->AttributeOr(L"fore", L""), value.fore)) {
+            if (!StyleScheme::ParseColour(style->AttributeOr(L"fore", L""), value.fore)) {
                 sink.push_back(name + L"：样式号 " + std::to_wstring(number) +
                                L" 没写颜色或颜色不是 #RRGGBB，已跳过");
                 continue;
             }
             value.bold = style->AttributeBool(L"bold", false);
             value.italic = style->AttributeBool(L"italic", false);
-            SetStyle(name, number, style->AttributeOr(L"name", L""), value);
+            scheme.SetStyle(name, number, style->AttributeOr(L"name", L""), value);
         }
     }
-
-    for (const std::wstring& warning : sink) {
-        infra::LogWarn(L"styles", L"样式方案: " + warning);
-    }
-    return true;
 }
 
 bool StyleScheme::Save(std::wstring* error) const {
@@ -368,34 +509,38 @@ bool StyleScheme::Save(std::wstring* error) const {
     infra::XmlElementPtr root = document.CreateRoot(kRootName);
     root->SetAttributeInt(L"schemaVersion", kSchemaVersion);
 
-    infra::XmlElementPtr base = root->AddChild(L"Default");
-    base->SetAttribute(L"fore", ColourText(fore_));
-    base->SetAttribute(L"back", ColourText(back_));
-    base->SetAttribute(L"font", fontFace_);
-    base->SetAttributeInt(L"size", fontSize_);
+    for (const Theme& theme : themes_) {
+        infra::XmlElementPtr node = root->AddChild(kThemeName);
+        node->SetAttribute(L"name", theme.name);
+        infra::XmlElementPtr base = node->AddChild(L"Default");
+        base->SetAttribute(L"fore", ColourText(theme.fore));
+        base->SetAttribute(L"back", ColourText(theme.back));
+        base->SetAttribute(L"font", theme.fontFace);
+        base->SetAttributeInt(L"size", theme.fontSize);
 
-    for (const LanguageEntry& entry : overrides_) {
-        infra::XmlElementPtr node = root->AddChild(L"Language");
-        node->SetAttribute(L"name", entry.name);
-        for (std::size_t index = 0; index < entry.roles.size(); ++index) {
-            const RoleStyle& value = entry.roles[index];
-            infra::XmlElementPtr style = node->AddChild(L"Style");
-            style->SetAttribute(L"role", WidenAscii(RoleKey(static_cast<StyleRole>(index))));
-            style->SetAttribute(L"fore", ColourText(value.fore));
-            style->SetAttributeBool(L"bold", value.bold);
-            style->SetAttributeBool(L"italic", value.italic);
-        }
-        // 逐样式号的覆盖跟在角色后面，一行一个样式号
-        for (const StyleOverride& item : entry.styles) {
-            infra::XmlElementPtr style = node->AddChild(L"StyleNumber");
-            style->SetAttributeInt(L"number", item.number);
-            if (!item.name.empty()) {
-                // 名字只为让人看得懂这一行是什么；程序不用它
-                style->SetAttribute(L"name", item.name);
+        for (const LanguageEntry& entry : theme.overrides) {
+            infra::XmlElementPtr language = node->AddChild(L"Language");
+            language->SetAttribute(L"name", entry.name);
+            for (std::size_t index = 0; index < entry.roles.size(); ++index) {
+                const RoleStyle& value = entry.roles[index];
+                infra::XmlElementPtr style = language->AddChild(L"Style");
+                style->SetAttribute(L"role", WidenAscii(RoleKey(static_cast<StyleRole>(index))));
+                style->SetAttribute(L"fore", ColourText(value.fore));
+                style->SetAttributeBool(L"bold", value.bold);
+                style->SetAttributeBool(L"italic", value.italic);
             }
-            style->SetAttribute(L"fore", ColourText(item.value.fore));
-            style->SetAttributeBool(L"bold", item.value.bold);
-            style->SetAttributeBool(L"italic", item.value.italic);
+            // 逐样式号的覆盖跟在角色后面，一行一个样式号
+            for (const StyleOverride& item : entry.styles) {
+                infra::XmlElementPtr style = language->AddChild(L"StyleNumber");
+                style->SetAttributeInt(L"number", item.number);
+                if (!item.name.empty()) {
+                    // 名字只为让人看得懂这一行是什么；程序不用它
+                    style->SetAttribute(L"name", item.name);
+                }
+                style->SetAttribute(L"fore", ColourText(item.value.fore));
+                style->SetAttributeBool(L"bold", item.value.bold);
+                style->SetAttributeBool(L"italic", item.value.italic);
+            }
         }
     }
     return io::SaveXmlFile(Path().wstring(), document, error);

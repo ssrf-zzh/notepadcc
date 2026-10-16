@@ -14,6 +14,10 @@ struct GeneralConfig {
     bool         restoreSessionOnStart = true;
     bool         multiInstance = false;
     std::uint32_t recentFileCount = 20;
+    // 主题名：只认 "light" / "dark"（配色本身在 stylers.xml 里，这里只记"用哪一套"）。
+    // 放配置里而不是 stylers.xml 里：用户可以把配色文件整份换成别人的，
+    // 而"我要深色"是这台机器上的使用偏好，不该被换文件带走。
+    std::wstring theme = L"light";
 };
 
 struct EditConfig {

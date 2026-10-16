@@ -56,6 +56,10 @@ public:
     void SetItems(std::vector<TabItem> items, npcc::core::BufferId active);
     void SetActive(npcc::core::BufferId active);
     void EnsureActiveVisible();
+    // 深色还是浅色（设计文档 2.6 第 4 条：暗色模式）。只影响自绘的那几个颜色，
+    // 不影响标签行为——窗口本身（菜单栏、面板）仍是系统配色，见文档里的"够到哪一层"。
+    void SetDark(bool dark);
+    bool IsDark() const noexcept { return dark_; }
 
 private:
     static LRESULT CALLBACK WndProcThunk(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -86,6 +90,7 @@ private:
     int                  hotIndex_ = -1;
     int                  hotCloseIndex_ = -1;
     bool                 dragging_ = false;
+    bool                 dark_ = false;
     POINT                dragOrigin_{};
 
     // 由字体实时测得的度量，随 DPI / 字体变化重建

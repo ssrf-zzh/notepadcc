@@ -84,6 +84,7 @@ enum : npcc::core::CmdId {
     kCmdViewSplitToggle   = npcc::core::MakeCmdId(4, 11),
     kCmdViewCyclePane     = npcc::core::MakeCmdId(4, 12),
     kCmdViewScrollSync    = npcc::core::MakeCmdId(4, 13),
+    kCmdViewDarkMode      = npcc::core::MakeCmdId(4, 14),
 
     // 格式（5 类）：行尾转换
     kCmdFormatEolCrlf = npcc::core::MakeCmdId(5, 1),
@@ -261,6 +262,19 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             std::wstring styleError;
             if (!styles_.Load(&styleError)) {
                 infra::LogWarn(L"styles", L"样式方案加载失败，改用默认配色: " + styleError);
+            }
+            // 用哪套主题来自 config.xml；名字不认识就停在浅色（并把配置改回 light，
+            // 免得每次启动都带着一个无效值）
+            {
+                const std::wstring& theme = config_.General().theme;
+                if (!styles_.SetActiveTheme(theme)) {
+                    infra::LogWarn(L"styles", L"配置里的主题名不可用，改用浅色: " + theme);
+                    config_.General().theme = L"light";
+                    config_.RequestSave();
+                }
+                darkMode_ = styles_.IsDark();
+                documents_->SetPalette(darkMode_ ? edit::EditorPalette::Dark()
+                                                 : edit::EditorPalette::Light());
             }
             documents_->SetStyles(&styles_);
             ApplyConfigToRuntime();
@@ -770,6 +784,8 @@ void MainWindow::RegisterCommands() {
         core::kCmdCheckable, [this](const CmdContext&) {
             splitScrollSync_ = !splitScrollSync_;
         });
+    add(kCmdViewDarkMode, CmdCategory::View, L"cmd.view.darkMode", L"暗色模式(&D)",
+        core::kCmdCheckable, [this](const CmdContext&) { CommandToggleDarkMode(); });
 
     // ---- 格式（行尾转换）----
     add(kCmdFormatEolCrlf, CmdCategory::Format, L"cmd.format.eolCrlf", L"转为 Windows 行尾（CRLF）",
@@ -969,6 +985,7 @@ void MainWindow::RegisterCommands() {
     bindChecked(kCmdViewToggleNumbers, [this] { return showLineNumbers_; });
     bindChecked(kCmdViewSplitToggle, [this] { return splitEnabled_; });
     bindChecked(kCmdViewScrollSync, [this] { return splitScrollSync_; });
+    bindChecked(kCmdViewDarkMode, [this] { return darkMode_; });
 
     // ---- 默认快捷键 ----
     const uint8_t ctrl = core::kModCtrl;
@@ -2837,18 +2854,40 @@ void MainWindow::ApplyStyleSchemeToAllViews() {
     if (documents_ == nullptr) {
         return;
     }
+    // 控件皮肤跟着主题走（边距、光标、选区、记号），语法颜色由 ApplyLanguageForPath 负责。
+    // 顺序无所谓：ApplySchemeDefaults 里会做 STYLECLEARALL，但它自己会把皮肤重铺一遍。
+    const edit::EditorPalette palette =
+        styles_.IsDark() ? edit::EditorPalette::Dark() : edit::EditorPalette::Light();
     for (edit::Document* document : documents_->All()) {
         if (document == nullptr || document->view == nullptr) {
             continue;
         }
+        document->view->ApplyPalette(palette);
         document->view->ApplyLanguageForPath(document->buffer.filePath, &languages_, &styles_);
     }
     // 克隆视图是独立的 Scintilla 控件，也得重新上色
     if (edit::EditView* clone = SecondaryView(); clone != nullptr && clone->Valid()) {
+        clone->ApplyPalette(palette);
         if (edit::Document* active = documents_->Active(); active != nullptr) {
             clone->ApplyLanguageForPath(active->buffer.filePath, &languages_, &styles_);
         }
     }
+    tabBar_.SetDark(styles_.IsDark());
+}
+
+void MainWindow::CommandToggleDarkMode() {
+    darkMode_ = !darkMode_;
+    // 主题名落进 config.xml；配色本身（两套）在 stylers.xml 里
+    config_.General().theme = darkMode_ ? L"dark" : L"light";
+    config_.RequestSave();
+    if (!styles_.SetActiveTheme(config_.General().theme)) {
+        // 理论上不会发生（内置两套主题永远在），真发生了就明说，不要静默停在旧主题上
+        infra::LogWarn(L"styles", L"配置里的主题名找不到，继续用当前主题: " +
+                                     config_.General().theme);
+    }
+    // 之后新建的标签也要用同一套皮肤（DocumentManager 建视图时会用）
+    documents_->SetPalette(darkMode_ ? edit::EditorPalette::Dark() : edit::EditorPalette::Light());
+    ApplyStyleSchemeToAllViews();
 }
 
 void MainWindow::CommandStyleConfigurator() {

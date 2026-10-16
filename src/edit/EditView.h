@@ -10,6 +10,7 @@
 
 #include "edit/Encoding.h"
 #include "edit/LanguageRegistry.h"
+#include "edit/EditorPalette.h"
 #include "edit/StyleScheme.h"
 
 namespace npcc::edit {
@@ -88,6 +89,10 @@ public:
     void ClearUndoBuffer() const;
 
     // ---- 外观 ----
+    // 控件皮肤（边距、光标、选区、记号）用哪套配色。语法颜色由 StyleScheme 的主题决定，
+    // 两者独立：用户可以整份替换 stylers.xml，而"深色下边距该是深灰"由这里兜住。
+    void ApplyPalette(const EditorPalette& palette) const;
+    const EditorPalette& Palette() const noexcept { return palette_; }
     void ApplyLightTheme() const;
     void SetDefaultFont(const char* faceName, int pointSize) const;
     void ShowLineNumbers(bool visible) const;
@@ -210,6 +215,7 @@ public:
     // 而"该转换的地方忘了转换"（红蓝互换）这种错误才可能被测试抓住。
     int32_t StyleAt(int32_t position) const;
     int32_t StyleForeColor(int32_t style) const;
+    int32_t StyleBackColor(int32_t style) const;
     int32_t DefaultForeColor() const;
 
     // ---- 代码折叠（设计文档 2.6）----
@@ -275,6 +281,7 @@ private:
     mutable const wchar_t* languageName_ = L"普通文本";
     mutable std::wstring   languageKey_ = L"null";   // 语言定义里的稳定标识，供注释等按语言的功能使用
     mutable bool           foldingEnabled_ = false;
+    mutable EditorPalette  palette_ = EditorPalette::Light();
     mutable bool           largeFileMode_ = false;   // 大文件档：折叠一律关掉
 };
 

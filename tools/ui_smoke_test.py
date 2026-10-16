@@ -129,6 +129,7 @@ CMD_TOOL_EXPORT_LANGS = (14 << 12) | 29
 CMD_TOOL_STYLE_CONFIG = (14 << 12) | 30
 CMD_EDIT_AUTOCOMPLETE = (2 << 12) | 33
 CMD_TOOL_EXPORT_UDL = (14 << 12) | 31
+CMD_VIEW_DARK_MODE = (4 << 12) | 14
 
 COLUMN_TEMPLATE_EDIT = 751
 COLUMN_INSERT_BUTTON = 758
@@ -181,6 +182,9 @@ SCI_GETFIRSTVISIBLELINE = 2152
 SCI_GETMODIFY = 2159
 SCI_GETCODEPAGE = 2137
 SCI_GETSTYLEAT = 2010
+SCI_STYLEGETBACK = 2482
+STYLE_DEFAULT = 32          # Scintilla 的 STYLE_DEFAULT
+STYLE_LINENUMBER = 33       # Scintilla 的 STYLE_LINENUMBER（行号边距）
 
 WM_VSCROLL = 0x0115
 SB_PAGEDOWN = 3
@@ -1227,6 +1231,141 @@ def test_udl(root):
 
     print("  UDL：导出的示例能被自己读回来并生效；自写的语言定义重进后接管着色"
           "（样式号与配色都核对）、注释符用 # 、折叠词生效")
+    return True
+
+
+def test_dark_mode(root):
+    """暗色模式：菜单里切一下，编辑区、行号边距、语法颜色真的变深；重启后还记着。
+
+    这一段的重点是"看得见的东西"：读的是控件里**真正拿去绘制**的前景/背景色
+    （COLORREF），不是配置文件里的值。另外还要核对暗色下打开样式配置器点确定不会把
+    主题冲掉——配置器改的是"当前主题"，写回文件时两套主题都要在。
+    """
+    work = os.path.join(root, "build", "dark_ui_test")
+    os.makedirs(work, exist_ok=True)
+    path = os.path.join(work, "night.cpp")
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write("// comment\nint alpha = 42;\n")
+
+    cfg = os.path.join(root, "build", "bin", "config")
+    config = os.path.join(cfg, "config.xml")
+    styles = os.path.join(cfg, "stylers.xml")
+    for name in ("config.xml", "session.xml", "stylers.xml", "langs.xml", "userlangs.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - night.cpp")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到可见的编辑控件")
+            return False
+
+        # 1) 默认是浅色：白底 + 深蓝关键字
+        if user32.SendMessageW(scinti, SCI_STYLEGETBACK, STYLE_DEFAULT, 0) != to_colorref(0xFFFFFF):
+            print("  FAIL: 默认（浅色）背景应当是白的")
+            return False
+        if user32.SendMessageW(scinti, SCI_STYLEGETFORE, 5, 0) != to_colorref(0x0000C0):
+            print("  FAIL: 浅色下关键字应当是深蓝 #0000C0")
+            return False
+
+        # 2) 切到暗色
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_DARK_MODE, 0)
+        time.sleep(0.8)
+        if user32.SendMessageW(scinti, SCI_STYLEGETBACK, STYLE_DEFAULT, 0) != to_colorref(0x1E1E1E):
+            print(f"  FAIL: 暗色下编辑区背景应当变深，实际 "
+                  f"0x{user32.SendMessageW(scinti, SCI_STYLEGETBACK, STYLE_DEFAULT, 0):06X}")
+            return False
+        if user32.SendMessageW(scinti, SCI_STYLEGETBACK, STYLE_LINENUMBER, 0) != to_colorref(0x2D2D2D):
+            print("  FAIL: 暗色下行号边距也该变深（不能留一块白的）")
+            return False
+        if user32.SendMessageW(scinti, SCI_STYLEGETFORE, 5, 0) != to_colorref(0x569CD6):
+            print("  FAIL: 暗色下关键字应当用深色主题的 #569CD6")
+            return False
+        if not os.path.exists(config):
+            print("  FAIL: 切主题之后没有写出 config.xml")
+            return False
+        with open(config, "r", encoding="utf-8", errors="replace") as handle:
+            saved = handle.read()
+        if 'theme="dark"' not in saved:
+            print(f"  FAIL: config.xml 里没有 theme=\"dark\"\n{saved[:300]}")
+            return False
+
+        # 3) 暗色下开一次样式配置器（什么都不改就确定）：主题不能被冲掉
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_STYLE_CONFIG, 0)
+        time.sleep(1.0)
+        dialog = user32.FindWindowW("notepadccStyleConfig", None)
+        if not dialog:
+            print("  FAIL: 样式配置器没有出现")
+            return False
+        user32.PostMessageW(dialog, WM_COMMAND, 1271, 0)   # 确定
+        deadline = time.time() + 5
+        while time.time() < deadline and user32.FindWindowW("notepadccStyleConfig", None):
+            time.sleep(0.2)
+        time.sleep(0.6)
+        if user32.SendMessageW(scinti, SCI_STYLEGETBACK, STYLE_DEFAULT, 0) != to_colorref(0x1E1E1E):
+            print("  FAIL: 在暗色下动过样式配置器之后，编辑区不再是暗的")
+            return False
+        if os.path.exists(styles):
+            with open(styles, "r", encoding="utf-8", errors="replace") as handle:
+                written = handle.read()
+            if 'name="light"' not in written or 'name="dark"' not in written:
+                print(f"  FAIL: stylers.xml 里两套主题应当都在\n{written[:400]}")
+                return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    # 4) 重启：还是暗的（用哪套主题记在 config.xml 里）
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - night.cpp")
+    try:
+        if not window:
+            print("  FAIL: 重启后找不到主窗口")
+            return False
+        scinti = visible_scintilla(window)
+        if user32.SendMessageW(scinti, SCI_STYLEGETBACK, STYLE_DEFAULT, 0) != to_colorref(0x1E1E1E):
+            print("  FAIL: 重启之后应当还是暗色")
+            return False
+        if user32.SendMessageW(scinti, SCI_STYLEGETFORE, 5, 0) != to_colorref(0x569CD6):
+            print("  FAIL: 重启之后关键字该用深色主题的颜色")
+            return False
+
+        # 5) 切回浅色
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_DARK_MODE, 0)
+        time.sleep(0.8)
+        if user32.SendMessageW(scinti, SCI_STYLEGETBACK, STYLE_DEFAULT, 0) != to_colorref(0xFFFFFF):
+            print("  FAIL: 再切一次应当回到浅色")
+            return False
+        with open(config, "r", encoding="utf-8", errors="replace") as handle:
+            saved = handle.read()
+        if 'theme="light"' not in saved:
+            print(f"  FAIL: 切回浅色之后 config.xml 没更新\n{saved[:300]}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        for name in ("config.xml", "session.xml", "stylers.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    print("  暗色模式：编辑区/行号边距/语法颜色都跟着变，重启后记住，再切能回浅色，"
+          "配置器不会把主题冲掉")
     return True
 
 
@@ -3068,6 +3207,8 @@ def run():
         failed = True
     if not test_udl(root):
         failed = True
+    if not test_dark_mode(root):
+        failed = True
     if not test_auto_complete(root):
         failed = True
     if not test_associated_commands(root):
@@ -3080,8 +3221,8 @@ def run():
         return 1
     print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + "
           "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + "
-          "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + UDL + 自动完成 + "
-          "文件关联 + 绿色打包）")
+          "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + UDL + 暗色模式 + "
+          "自动完成 + 文件关联 + 绿色打包）")
     return 0
 
 

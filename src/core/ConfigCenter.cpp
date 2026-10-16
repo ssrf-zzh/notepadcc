@@ -177,6 +177,13 @@ bool ConfigCenter::Load(std::wstring* error) {
     general_.recentFileCount = static_cast<std::uint32_t>(ReadIntInRange(
         general, L"recentFileCount", static_cast<int>(general_.recentFileCount), 0, 100,
         warnings_, L"general"));
+    // 主题名：认不出的名字记一条警告并回浅色（"认不出就用默认值"这条总则）
+    general_.theme = ReadString(general, L"theme", general_.theme);
+    if (general_.theme != L"light" && general_.theme != L"dark") {
+        warnings_.push_back(L"[general] theme 只认 light / dark，实际是 \"" + general_.theme +
+                            L"\"，已改回 light");
+        general_.theme = L"light";
+    }
 
     const infra::XmlElement* editor = Section(root, L"edit");
     if (editor != nullptr) {
@@ -287,6 +294,7 @@ bool ConfigCenter::Save(bool force, std::wstring* error) {
     general->SetAttributeBool(L"restoreSessionOnStart", general_.restoreSessionOnStart);
     general->SetAttributeBool(L"multiInstance", general_.multiInstance);
     general->SetAttributeInt(L"recentFileCount", static_cast<int>(general_.recentFileCount));
+    general->SetAttribute(L"theme", general_.theme);
 
     infra::XmlElementPtr editor = root->AddChild(L"edit");
     editor->SetAttributeBool(L"tabToSpaces", edit_.tabToSpaces);

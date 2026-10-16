@@ -86,7 +86,7 @@ edit::Document* DocumentManager::CreateUntitled() {
         infra::LogError(L"doc", L"创建编辑控件失败（新建文档）");
         return nullptr;
     }
-    document->view->ApplyLightTheme();
+    document->view->ApplyPalette(palette_);   // 浅色/深色由外壳告知（见 SetPalette）
     document->view->ConfigureColumnEditing();
     document->view->SetCodePage(newFileUniMode_ == edit::UniMode::Ansi
                                     ? newFileCodePage_
@@ -135,7 +135,7 @@ OpenOutcome DocumentManager::Open(const std::wstring& path) {
         outcome.message = L"创建编辑控件失败。";
         return outcome;
     }
-    document->view->ApplyLightTheme();
+    document->view->ApplyPalette(palette_);   // 浅色/深色由外壳告知（见 SetPalette）
     document->view->ConfigureColumnEditing();
     document->view->SetVisible(false);
 
@@ -277,7 +277,7 @@ bool DocumentManager::SplitEnableView() {
         infra::LogError(L"doc", L"创建克隆视图失败");
         return false;
     }
-    view->ApplyLightTheme();
+    view->ApplyPalette(palette_);   // 浅色/深色由外壳告知（见 SetPalette）
     view->ConfigureColumnEditing();
     view->SetVisible(false);
     splitView_ = std::move(view);

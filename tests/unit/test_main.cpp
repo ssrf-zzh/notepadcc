@@ -43,6 +43,9 @@
 #include "infra/Paths.h"
 #include "infra/Xml.h"
 
+// 只用它拿风格号常量（STYLE_DEFAULT / STYLE_LINENUMBER），不碰任何窗口逻辑
+#include <Scintilla.h>
+
 namespace {
 
 int g_checks = 0;
@@ -820,6 +823,36 @@ int main() {
             Check(reloaded.LargeFile().tier2MaxBytes == 32ull * 1024 * 1024,
                   "大文件 T2 阈值往返一致");
             Check(reloaded.Search().lastFilter == L"*.rs;*.toml", "过滤器往返一致");
+            Check(reloaded.General().theme == L"light", "主题默认是浅色");
+        }
+
+        // 主题名：认 dark；认不出的名字记警告并回浅色
+        {
+            npcc::core::ConfigCenter config;
+            config.Load(nullptr);
+            config.General().theme = L"dark";
+            std::wstring error;
+            Check(config.Save(true, &error), "把主题存成 dark");
+            npcc::core::ConfigCenter reloaded;
+            Check(reloaded.Load(&error), "重新加载成功");
+            Check(reloaded.General().theme == L"dark", "主题往返一致");
+
+            const std::string badTheme =
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<NotepadccConfig schemaVersion=\"1\">\n"
+                "  <general theme=\"neon\"/>\n"
+                "</NotepadccConfig>\n";
+            npcc::io::WriteFileAtomic(path.wstring(), badTheme);
+            npcc::core::ConfigCenter fallback;
+            Check(fallback.Load(&error), "认不出的主题名不让加载失败");
+            Check(fallback.General().theme == L"light", "认不出的主题名回退浅色");
+            bool sawThemeWarning = false;
+            for (const std::wstring& warning : fallback.Warnings()) {
+                if (warning.find(L"theme") != std::wstring::npos) {
+                    sawThemeWarning = true;
+                }
+            }
+            Check(sawThemeWarning, "认不出的主题名留下了警告");
         }
 
         // 坏配置：非法值回退默认，绝不能因此起不来
@@ -3013,6 +3046,130 @@ int main() {
             Check(tolerant.Role(L"cpp", StyleRole::Comment).fore == 0x00FF00,
                   "同一份文件里的角色色也照常生效");
             std::filesystem::remove(path, ec);
+        }
+
+        // 主题（暗色模式）：浅色/深色两套配色共用一份文件，界面只改"当前这一套"
+        {
+            StyleScheme scheme = StyleScheme::Defaults();
+            Check(scheme.ActiveTheme() == L"light" && !scheme.IsDark(), "默认是浅色主题");
+            Check(scheme.ThemeNames().size() == 2, "内置两套主题");
+            Check(scheme.SetActiveTheme(L"dark") && scheme.IsDark(), "能切到深色主题");
+            Check(scheme.SetActiveTheme(L"light") && !scheme.IsDark(), "能切回浅色");
+            Check(!scheme.SetActiveTheme(L"没有这套"), "不认识的主题名要拒绝");
+            Check(scheme.ActiveTheme() == L"light", "拒绝之后主题不变");
+
+            // 两套主题的默认配色本来就不同：默认前景/背景 + 每个角色的取值
+            const std::uint32_t lightBack = scheme.Back();
+            const std::uint32_t lightComment = scheme.Role(L"cpp", StyleRole::Comment).fore;
+            Check(lightBack == 0xFFFFFF && lightComment == 0x2E7D32, "浅色主题的取值");
+            scheme.SetActiveTheme(L"dark");
+            Check(scheme.Back() == 0x1E1E1E, "深色主题的背景是深色");
+            Check(scheme.Fore() == 0xD4D4D4, "深色主题的前景是浅色（不是把浅色反过来）");
+            Check(scheme.Role(L"cpp", StyleRole::Comment).fore == 0x6A9955,
+                  "深色主题的注释色与浅色不同");
+            Check(scheme.Role(L"cpp", StyleRole::Keyword).bold, "深色的关键字也加粗");
+            Check(scheme.Role(L"还没见过的语言", StyleRole::String).fore == 0xCE9178,
+                  "没改过的语言跟着主题走（不是跟着浅色走）");
+
+            // 两套主题各改各的：改深色不该动浅色
+            npcc::edit::RoleStyle custom;
+            custom.fore = 0x123456;
+            scheme.SetRole(L"cpp", StyleRole::Comment, custom);
+            npcc::edit::RoleStyle perStyle;
+            perStyle.fore = 0xABCDEF;
+            scheme.SetStyle(L"cpp", 7, L"次要项", perStyle);
+            Check(scheme.Role(L"cpp", StyleRole::Comment).fore == 0x123456, "深色里的修改生效");
+            scheme.SetActiveTheme(L"light");
+            Check(scheme.Role(L"cpp", StyleRole::Comment).fore == lightComment,
+                  "浅色主题没被深色那边的修改带跑");
+            Check(scheme.Styles(L"cpp").empty(), "浅色主题里没有那条逐样式号覆盖");
+            scheme.SetActiveTheme(L"dark");
+            Check(scheme.Styles(L"cpp").size() == 1, "切回来深色的覆盖还在");
+
+            // 往返：两套主题一起写文件、读回来
+            const std::filesystem::path path = StyleScheme::Path();
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+            std::wstring error;
+            Check(scheme.Save(&error), "带两套主题的方案落盘");
+            StyleScheme reloaded;
+            std::vector<std::wstring> warnings;
+            Check(reloaded.Load(&error, &warnings), "重新加载成功");
+            Check(reloaded.ThemeNames().size() == 2, "两套主题都读回来了");
+            Check(reloaded.ActiveTheme() == L"light", "加载后停在浅色（用哪套由配置决定）");
+            reloaded.SetActiveTheme(L"dark");
+            Check(reloaded.Back() == 0x1E1E1E, "深色的默认背景往返一致");
+            Check(reloaded.Role(L"cpp", StyleRole::Comment).fore == 0x123456,
+                  "深色的角色修改往返一致");
+            Check(reloaded.Styles(L"cpp").size() == 1 &&
+                      reloaded.Styles(L"cpp")[0].value.fore == 0xABCDEF,
+                  "深色的逐样式号覆盖往返一致");
+            reloaded.SetActiveTheme(L"light");
+            Check(reloaded.Styles(L"cpp").empty(), "浅色里没有那条覆盖");
+
+            // 旧文件（schemaVersion 1，根下直接放 Default/Language）仍然要读得进来，
+            // 并且当作浅色主题；此时深色仍有一套内置值可用
+            const std::string legacy =
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<NotepadccStyles schemaVersion=\"1\">\n"
+                "  <Default fore=\"#101010\" back=\"#F0F0F0\" font=\"Consolas\" size=\"12\"/>\n"
+                "  <Language name=\"cpp\">\n"
+                "    <Style role=\"comment\" fore=\"#FF0000\" bold=\"no\" italic=\"no\"/>\n"
+                "  </Language>\n"
+                "</NotepadccStyles>\n";
+            Check(WriteFileDirect(path, legacy), "写入旧版（扁平）stylers.xml");
+            StyleScheme fromLegacy;
+            warnings.clear();
+            Check(fromLegacy.Load(&error, &warnings), "旧版文件仍能加载");
+            Check(fromLegacy.Back() == 0xF0F0F0, "旧版文件的默认背景生效（当作浅色主题）");
+            Check(fromLegacy.Role(L"cpp", StyleRole::Comment).fore == 0xFF0000,
+                  "旧版文件里的角色色生效");
+            Check(fromLegacy.SetActiveTheme(L"dark") && fromLegacy.Back() == 0x1E1E1E,
+                  "旧版文件里没有深色主题时，仍有一套内置深色可用（切过去不是没反应）");
+            std::filesystem::remove(path, ec);
+        }
+
+        // 暗色模式真的落到控件上：主题（语法色）+ 皮肤（边距/光标/选区）
+        {
+            const HWND host = CreateHiddenHost();
+            npcc::edit::EditView view;
+            if (host == nullptr || !view.Create(host, 951)) {
+                Check(false, "创建隐藏宿主窗口或编辑控件失败");
+            } else {
+                npcc::edit::LanguageRegistry languages;
+                languages.Load(nullptr);
+                const npcc::edit::LanguageDef* cpp = languages.FindByExtension("cpp");
+                npcc::edit::StyleScheme scheme = npcc::edit::StyleScheme::Defaults();
+                view.SetCodePage(npcc::edit::kCodePageUtf8);
+                view.SetText("// c\nint x = 42;\n");
+                const auto cref = [](std::uint32_t rgb) {
+                    return static_cast<int32_t>(npcc::edit::StyleScheme::ToScintillaColour(rgb));
+                };
+
+                view.ApplyPalette(npcc::edit::EditorPalette::Light());
+                view.ApplyLanguage(*cpp, &scheme);
+                const int32_t lightMargin = view.StyleBackColor(STYLE_LINENUMBER);
+                Check(lightMargin == cref(0xF5F5F5), "浅色下行号边距是浅灰");
+                Check(view.StyleBackColor(STYLE_DEFAULT) == cref(0xFFFFFF), "浅色下编辑区是白底");
+
+                scheme.SetActiveTheme(L"dark");
+                view.ApplyPalette(npcc::edit::EditorPalette::Dark());
+                view.ApplyLanguage(*cpp, &scheme);
+                Check(view.StyleBackColor(STYLE_DEFAULT) == cref(0x1E1E1E),
+                      "深色下编辑区背景变深");
+                Check(view.StyleBackColor(STYLE_LINENUMBER) == cref(0x2D2D2D),
+                      "深色下行号边距跟着变深（不是白的）");
+                Check(view.StyleForeColor(5) == cref(0x569CD6),
+                      "深色下关键字用的是深色主题的颜色");
+                Check(view.StyleForeColor(5) != cref(0x0000C0), "与浅色的关键字色确实不同");
+
+                // 换语言时内部会 STYLECLEARALL（把行号边距等一起清回默认），
+                // 皮肤配色必须自己重铺一遍——否则深色下开一个 .py 就露出白边距
+                view.ApplyLanguageForPath(L"D:\\t\\a.py", &languages, &scheme);
+                Check(view.StyleBackColor(STYLE_LINENUMBER) == cref(0x2D2D2D),
+                      "换语言之后深色边距没有被冲回浅色");
+                ::DestroyWindow(host);
+            }
         }
 
         // 配色真的落到渲染上：用 cpp 的注释样式号（2）核对
