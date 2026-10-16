@@ -196,6 +196,7 @@ set(NPCC_CORE_SOURCES
     src/search/TextBytes.cpp
     src/search/Wildcard.cpp
     src/shell/MainWindow.cpp
+    src/shell/ChromeStyle.cpp
     src/shell/MenuBuilder.cpp
     src/shell/FunctionListPanel.cpp
     src/shell/FolderPanel.cpp

@@ -63,6 +63,26 @@ user32.SendMessageTimeoutW.argtypes = [wintypes.HWND, ctypes.c_uint, ctypes.c_si
                                        ctypes.c_ssize_t, ctypes.c_uint, ctypes.c_uint,
                                        ctypes.POINTER(ctypes.c_size_t)]
 
+# 现代 chrome 那一段要看真实像素（自绘的底色/下划线/圆角浅底），走 gdi32
+gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+gdi32.CreateCompatibleDC.restype = wintypes.HDC
+gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
+gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+gdi32.SelectObject.restype = wintypes.HGDIOBJ
+gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+gdi32.DeleteObject.restype = wintypes.BOOL
+gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+gdi32.DeleteDC.restype = wintypes.BOOL
+gdi32.DeleteDC.argtypes = [wintypes.HDC]
+gdi32.GetPixel.restype = wintypes.DWORD
+gdi32.GetPixel.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+user32.GetWindowDC.restype = wintypes.HDC
+user32.GetWindowDC.argtypes = [wintypes.HWND]
+user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+user32.PrintWindow.restype = wintypes.BOOL
+user32.PrintWindow.argtypes = [wintypes.HWND, wintypes.HDC, ctypes.c_uint]
+
 
 # 本脚本要跨进程核对窗口坐标（分隔条位置、面板大小），必须和 notepadcc.exe 待在同一个
 # 坐标空间里：程序清单声明的是 PerMonitorV2。脚本若保持"DPI 不感知"，在 125%/150%/200%
@@ -389,6 +409,14 @@ TB_MSG_ITEM_CENTER_X = 0x8000 + 61   # ToolBar::kMsgItemCenterX
 
 # ---- 右键菜单定制（M3 第九块）----
 CMD_SETTINGS_CONTEXT_MENU = (7 << 12) | 7     # 设置 → 自定义右键菜单…
+
+# ---- 现代 chrome（M3 第十四块）----
+TAB_CLASS = "notepadccTabBar"
+TAB_MSG_ACTIVE_TAB_CENTER_X = 0x8000 + 70     # TabBar::kMsgActiveTabCenterX
+CHROME_LIGHT = {"strip": 0xF3F3F3, "line": 0xD8D8D8, "tab": 0xFFFFFF, "accent": 0x0F6CBD,
+                "checked": 0xDAE9F8, "statusText": 0x444444}
+CHROME_DARK = {"strip": 0x272727, "line": 0x3E3E3E, "tab": 0x1E1E1E, "accent": 0x60CDFF,
+               "checked": 0x1E3D57}
 CONTEXTMENU_DIALOG_CLASS = "notepadccContextMenuCustomize"
 POPUP_MENU_CLASS = "#32768"                   # TrackPopupMenu 弹出的菜单窗口类
 MN_GETHMENU = 0x01E1                          # 向菜单窗口要 HMENU（菜单是内核对象，跨进程可用）
@@ -569,6 +597,66 @@ def window_rect(hwnd):
     return (rect.left, rect.top, rect.right, rect.bottom)
 
 
+class WindowPixels:
+    """窗口的一张像素快照：PrintWindow 把窗口画进内存位图，再按屏幕坐标取色。
+
+    为什么不抓屏：回归跑起来时窗口可能在别的窗口后面，抓屏采到的是遮挡者。
+    PW_RENDERFULLCONTENT = 2 是必须的——普通模式下 DWM 合成的窗口（非客户区、
+    自绘控件）经常整张打印成黑（第一次试就是这么拿到一张全黑图的）。
+    位图覆盖整个窗口（含标题栏），所以坐标统一用**屏幕坐标**；要采子窗口客户区里的
+    一点，先把子窗口的原点加上去（子窗口没有边框，窗口原点就是客户区原点）。
+    """
+
+    def __init__(self, window):
+        left, top, right, bottom = window_rect(window)
+        self.origin = (left, top)
+        self.width = right - left
+        self.height = bottom - top
+        window_dc = user32.GetWindowDC(window)
+        self.dc = gdi32.CreateCompatibleDC(window_dc)
+        self.bitmap = gdi32.CreateCompatibleBitmap(window_dc, self.width, self.height)
+        self.previous = gdi32.SelectObject(self.dc, self.bitmap)
+        user32.ReleaseDC(window, window_dc)
+        self.printed = bool(user32.PrintWindow(window, self.dc, 2))
+
+    def close(self):
+        gdi32.SelectObject(self.dc, self.previous)
+        gdi32.DeleteObject(self.bitmap)
+        gdi32.DeleteDC(self.dc)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+    def pixel(self, x, y):
+        """屏幕坐标 (x, y) → #RRGGBB；窗口之外或取不到返回 None。"""
+        column = x - self.origin[0]
+        row = y - self.origin[1]
+        if column < 0 or row < 0 or column >= self.width or row >= self.height:
+            return None
+        value = gdi32.GetPixel(self.dc, column, row)
+        if value == 0xFFFFFFFF:      # CLR_INVALID
+            return None
+        return ((value & 0xFF) << 16) | (value & 0xFF00) | ((value >> 16) & 0xFF)
+
+    def child_pixel(self, child, x, y):
+        """子窗口客户区坐标 (x, y) → #RRGGBB。"""
+        left, top, _, _ = window_rect(child)
+        return self.pixel(left + x, top + y)
+
+    def count_in_rect(self, child, x, y, half_width, half_height, colour):
+        """数一数子窗口客户区里某块矩形中有多少像素正好是 colour。"""
+        left, top, _, _ = window_rect(child)
+        found = 0
+        for dx in range(-half_width, half_width + 1, 2):
+            for dy in range(-half_height, half_height + 1, 2):
+                if self.pixel(left + x + dx, top + y + dy) == colour:
+                    found += 1
+        return found
+
+
 def set_text(hwnd, control_id, text):
     control = user32.GetDlgItem(hwnd, control_id)
     if not control:
@@ -596,6 +684,21 @@ def main_windows():
 
     user32.EnumWindows(callback_type(callback), 0)
     return found
+
+
+def wait_disabled(hwnd, timeout=3.0):
+    """等一个窗口真的被禁用（模态对话框刚建出来时可能有极短一瞬还没禁用）。
+
+    对话框**窗口的创建**（FindWindowW 已经找得到它）发生在 `EnableWindow(owner, FALSE)`
+    之前，紧接着就下结论会偶发地冤判成"不是模态的"——跑整段回归时实测撞到过一次，
+    单独跑那一段又永远是绿的。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not user32.IsWindowEnabled(hwnd):
+            return True
+        time.sleep(0.05)
+    return not user32.IsWindowEnabled(hwnd)
 
 
 def wait_until_equal(reader, first, second, timeout=4.0):
@@ -4579,6 +4682,8 @@ def run():
         failed = True
     if not test_text_log_view(root):
         failed = True
+    if not test_modern_chrome(root):
+        failed = True
 
     if failed:
         print("FAIL: 界面回归未通过")
@@ -4591,8 +4696,270 @@ def run():
           "比较 + JSON 树视图 + 括号匹配与摘要与全屏 + 工具栏 + 右键菜单定制 + 自动完成 + "
           "文件关联 + "
           "文件类型识别与 MIME 工具 + 护眼模式 + XML 树视图与校验 + XPath 查询 + "
-          "自动更新检查 + 远程编辑（FTP/SFTP 站点）+ 脚本插件 + T3 自绘视口 + 绿色打包）")
+          "自动更新检查 + 远程编辑（FTP/SFTP 站点）+ 脚本插件 + T3 自绘视口 + 绿色打包 + "
+          "现代 chrome（工具栏 / 标签栏 / 状态栏统一自绘 + 暗色跟随））")
     return 0
+
+
+def test_modern_chrome(root):
+    """现代 chrome（M3 第十四块）：工具栏 / 标签栏 / 状态栏一套自绘配色（浅深各一组）。
+
+    这一段不读控件里的"设置值"，而是把主窗口 PrintWindow 进内存位图后**按像素**核对：
+    当前标签脚下那条强调色下划线、三块 chrome 的平底色与分隔线、状态栏真的占了位置
+    （老实现的高度取的是 WM_SIZE 的返回值，恒为 0，编辑区一路铺到底，状态栏整条都藏在
+    编辑区后面）、状态栏里的文字是自己画上去的；然后切暗色按一套暗色值再核一遍，
+    并核对勾上的工具栏按钮是被强调色浅底衬着的。
+    """
+    work = os.path.join(root, "build", "chrome_test")
+    os.makedirs(work, exist_ok=True)
+    path = os.path.join(work, "chrome.txt")
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write("modern chrome regression\n第二行\n")
+
+    cfg = os.path.join(root, "build", "bin", "config")
+    for name in ("config.xml", "session.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+
+    def client_size(control):
+        rect = wintypes.RECT()
+        user32.GetClientRect(control, ctypes.byref(rect))
+        return rect.right, rect.bottom
+
+    def snapshot():
+        """当前主窗口的一张像素快照；PrintWindow 失败返回 None（调用方负责 close）。"""
+        pixels = WindowPixels(window)
+        if not pixels.printed:
+            pixels.close()
+            return None
+        return pixels
+
+    def expect(pixels, label, control, x, y, want):
+        got = pixels.child_pixel(control, x, y)
+        shown = "采不到像素" if got is None else f"#{got:06X}"
+        if got != want:
+            print(f"  FAIL: {label} 应当是 #{want:06X}，实际 {shown}"
+                  f"（{class_name(control)} 客户区 ({x},{y})）")
+            return False
+        return True
+
+    def wait_theme(control, x, y, want, timeout=6.0):
+        """等自绘的窗口真的重画成想要的像素了——主题切换是异步投递的。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            pixels = snapshot()
+            if pixels is not None:
+                try:
+                    if pixels.child_pixel(control, x, y) == want:
+                        return True
+                finally:
+                    pixels.close()
+            time.sleep(0.2)
+        return False
+
+    def text_ink(pixels, control, x, y, half_width, half_height, background):
+        """数一块矩形里"不是底色与分隔线"的像素：自绘的文字/角标到底画上没有。"""
+        found = 0
+        left, top, _, _ = window_rect(control)
+        for px in range(x - half_width, x + half_width, 3):
+            for py in range(y - half_height, y + half_height, 3):
+                got = pixels.pixel(left + px, top + py)
+                if got is None or got in background:
+                    continue
+                found += 1
+        return found
+
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - chrome.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        tabbar = find_child(window, TAB_CLASS)
+        toolbar = find_child(window, TOOLBAR_CONTROL_CLASS)
+        statusbar = find_child(window, STATUS_CLASS)
+        scinti = visible_scintilla(window)
+        for label, handle in (("标签栏", tabbar), ("工具栏", toolbar),
+                              ("状态栏", statusbar), ("编辑控件", scinti)):
+            if not handle:
+                print(f"  FAIL: 主窗口里找不到{label}")
+                return False
+
+        tab_width, tab_height = client_size(tabbar)
+        bar_width, bar_height = client_size(toolbar)
+        stat_width, stat_height = client_size(statusbar)
+
+        # ---- 0) 状态栏真的占着一条位置：编辑区不许盖到它头上 ----
+        # 老实现的 Height() 拿 WM_SIZE 的返回值，实测恒为 0：编辑区一路铺到底，
+        # 状态栏整条藏在编辑区后面（这个坑在 1.0.0 的包上复现过）。
+        status_rect = window_rect(statusbar)
+        editor_rect = window_rect(scinti)
+        status_height = status_rect[3] - status_rect[1]
+        if status_height < 16:
+            print(f"  FAIL: 状态栏高度只有 {status_height} 像素，不像一条状态栏")
+            return False
+        if editor_rect[3] > status_rect[1]:
+            print(f"  FAIL: 编辑区底边 {editor_rect[3]} 压到了状态栏顶边 {status_rect[1]}"
+                  "（状态栏会被编辑区整个盖住）")
+            return False
+
+        center = send_bounded(tabbar, TAB_MSG_ACTIVE_TAB_CENTER_X)
+        if center is None or center < 0:
+            print(f"  FAIL: 问不到当前标签的中心（返回 {center}）")
+            return False
+
+        pieces = [piece.strip() for piece in window_text(toolbar).split("|")]
+        buttons = [piece for piece in pieces if piece != "---"]
+        dark_ordinal = next((i for i, piece in enumerate(buttons) if "暗色模式" in piece), None)
+        if dark_ordinal is None:
+            print(f"  FAIL: 工具栏里找不到「暗色模式」按钮，实际 {window_text(toolbar)!r}")
+            return False
+        dark_x = send_bounded(toolbar, TB_MSG_ITEM_CENTER_X, dark_ordinal)
+        if dark_x is None or dark_x < 0:
+            print(f"  FAIL: 问不到暗色按钮的中心（返回 {dark_x}）")
+            return False
+
+        # ---- 1) 浅色：三块 chrome 按浅色那一套画 ----
+        pixels = snapshot()
+        if pixels is None:
+            print("  FAIL: PrintWindow 拿不到主窗口的内容（像素快照失败）")
+            return False
+        try:
+            # 下划线：从底边往上量它的厚度，顺便把颜色钉死
+            underline = 0
+            while underline < tab_height and pixels.child_pixel(
+                    tabbar, center, tab_height - 1 - underline) == CHROME_LIGHT["accent"]:
+                underline += 1
+            if underline < 1:
+                print("  FAIL: 当前标签底下没有强调色下划线（浅色应当是 #0F6CBD）")
+                return False
+            body_y = tab_height - underline - 3
+            checks = [
+                ("当前标签的底色（与编辑区连成一片）", tabbar, 3, body_y,
+                 CHROME_LIGHT["tab"]),
+                ("标签栏空白处的底色", tabbar, tab_width - 8, 4, CHROME_LIGHT["strip"]),
+                ("标签栏右侧那条底边细线", tabbar, tab_width - 8, tab_height - 1,
+                 CHROME_LIGHT["line"]),
+                ("工具栏底色", toolbar, bar_width - 8, bar_height // 2,
+                 CHROME_LIGHT["strip"]),
+                ("工具栏底下的分隔线", toolbar, bar_width - 8, bar_height - 1,
+                 CHROME_LIGHT["line"]),
+                ("状态栏顶边细线", statusbar, stat_width - 60, 0, CHROME_LIGHT["line"]),
+                ("状态栏底色", statusbar, stat_width * 87 // 100 + 6, stat_height // 2,
+                 CHROME_LIGHT["strip"]),
+                ("状态栏分区竖线", statusbar, stat_width * 42 // 100, stat_height // 2,
+                 CHROME_LIGHT["line"]),
+            ]
+            for label, control, x, y, want in checks:
+                if not expect(pixels, label, control, x, y, want):
+                    return False
+
+            # 状态栏第一段里真的画着字（底色与分隔线之外的颜色都算）
+            ink = text_ink(pixels, statusbar, stat_width * 42 // 200, stat_height // 2,
+                           stat_width * 42 // 200 - 12, stat_height // 2 - 6,
+                           (CHROME_LIGHT["strip"], CHROME_LIGHT["line"]))
+            if ink < 50:
+                print(f"  FAIL: 状态栏第一段里没画上文字（只数到 {ink} 个非底色像素）")
+                return False
+
+            # 右下角的缩放角标：自绘之后系统不再画，得有自己的像素
+            grip = pixels.count_in_rect(statusbar, stat_width - 16, stat_height - 12,
+                                        28, max(6, stat_height - 12), 0x616161)
+            if grip < 4:
+                print(f"  FAIL: 状态栏右下角的缩放角标没画出来（只数到 {grip} 个像素）")
+                return False
+
+            # 没勾的工具栏按钮不许有底色：那一带应当全是 strip
+            fill = pixels.count_in_rect(toolbar, dark_x, bar_height // 2, 18,
+                                        max(4, bar_height // 2 - 6), CHROME_LIGHT["checked"])
+            if fill != 0:
+                print(f"  FAIL: 没勾上的工具栏按钮不该有浅底，却数到 {fill} 个强调色浅底像素")
+                return False
+        finally:
+            pixels.close()
+
+        # ---- 2) 切暗色：三块 chrome 一起换成暗色那一套 ----
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_DARK_MODE, 0)
+        if not wait_theme(tabbar, center, tab_height - 1, CHROME_DARK["accent"]):
+            print("  FAIL: 切到暗色之后标签栏下划线没有变成暗色强调色 #60CDFF")
+            return False
+        pixels = snapshot()
+        if pixels is None:
+            print("  FAIL: 暗色下 PrintWindow 拿不到像素")
+            return False
+        try:
+            checks = [
+                ("当前标签的底色", tabbar, 3, tab_height - underline - 3, CHROME_DARK["tab"]),
+                ("标签栏空白处的底色", tabbar, tab_width - 8, 4, CHROME_DARK["strip"]),
+                ("标签栏右侧那条底边细线", tabbar, tab_width - 8, tab_height - 1,
+                 CHROME_DARK["line"]),
+                ("工具栏底色", toolbar, bar_width - 8, bar_height // 2, CHROME_DARK["strip"]),
+                ("工具栏底下的分隔线", toolbar, bar_width - 8, bar_height - 1,
+                 CHROME_DARK["line"]),
+                ("状态栏顶边细线", statusbar, stat_width - 60, 0, CHROME_DARK["line"]),
+                ("状态栏底色", statusbar, stat_width * 87 // 100 + 6, stat_height // 2,
+                 CHROME_DARK["strip"]),
+                ("状态栏分区竖线", statusbar, stat_width * 42 // 100, stat_height // 2,
+                 CHROME_DARK["line"]),
+            ]
+            for label, control, x, y, want in checks:
+                if not expect(pixels, f"暗色下的{label}", control, x, y, want):
+                    return False
+
+            # 勾上的"暗色模式"按钮：圆角浅底 + 强调色图标
+            fill = pixels.count_in_rect(toolbar, dark_x, bar_height // 2, 18,
+                                        max(4, bar_height // 2 - 6), CHROME_DARK["checked"])
+            if fill < 4:
+                print(f"  FAIL: 勾上的工具栏按钮应当是强调色浅底 #1E3D57，只数到 {fill} 个像素")
+                return False
+            ink = pixels.count_in_rect(toolbar, dark_x, bar_height // 2, 18,
+                                       max(4, bar_height // 2 - 6), CHROME_DARK["accent"])
+            if ink < 4:
+                print(f"  FAIL: 勾上的工具栏按钮图标应当是强调色 #60CDFF，只数到 {ink} 个像素")
+                return False
+
+            # 标题栏跟着深浅走（DWM 的深色标题栏属性，Win10 2004+/Win11 才有）
+            if sys.getwindowsversion().build >= 19041:
+                left, top, right, _ = window_rect(window)
+                caption = pixels.pixel((left + right) // 2, top + 10)
+                if caption is None or max((caption >> 16) & 0xFF,
+                                          (caption >> 8) & 0xFF, caption & 0xFF) > 0x60:
+                    print(f"  FAIL: 暗色下标题栏应当是深色，实际 "
+                          f"{'采不到像素' if caption is None else '#%06X' % caption}")
+                    return False
+        finally:
+            pixels.close()
+
+        # ---- 3) 切回浅色：像素回到浅色那一套（证明切换会重画，不是只改了配置） ----
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_DARK_MODE, 0)
+        if not wait_theme(tabbar, center, tab_height - 1, CHROME_LIGHT["accent"]):
+            print("  FAIL: 切回浅色之后下划线没有回到 #0F6CBD")
+            return False
+        pixels = snapshot()
+        if pixels is None:
+            print("  FAIL: 切回浅色后 PrintWindow 拿不到像素")
+            return False
+        try:
+            if not expect(pixels, "切回浅色后的工具栏底色", toolbar, bar_width - 8,
+                          bar_height // 2, CHROME_LIGHT["strip"]):
+                return False
+            if not expect(pixels, "切回浅色后的状态栏底色", statusbar,
+                          stat_width * 87 // 100 + 6, stat_height // 2, CHROME_LIGHT["strip"]):
+                return False
+        finally:
+            pixels.close()
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    print("  现代 chrome：下划线/三块平底色与分隔线/状态栏占位与文字/暗色两套配色逐像素核对通过")
+    return True
 
 
 def test_structured_format(root):
@@ -5250,7 +5617,7 @@ def test_xpath_query(root):
         if not dialog:
             print("  FAIL: 「XPath 查询…」没弹出对话框")
             return False
-        if user32.IsWindowEnabled(window):
+        if not wait_disabled(window):
             print("  FAIL: 对话框应当是模态的（主窗口该被禁用）")
             return False
         if status_text(dialog) != "输入表达式后按“查询”。":
@@ -6103,7 +6470,9 @@ def test_context_menu(root):
         if not box:
             print("  FAIL: 自定义右键菜单对话框没有出现")
             return False
-        if user32.IsWindowEnabled(window):
+        # 模态：主窗口该被禁用。但对话框窗口是在 EnableWindow(owner, FALSE) **之前**创建的，
+        # 照见的这一刻下结论会偶发地冤判——跑整段时实测撞到过一次，这里等一小会儿
+        if not wait_disabled(window):
             print("  FAIL: 对话框应当是模态的（主窗口该被禁用）")
             close_dialog_if_any()
             return False

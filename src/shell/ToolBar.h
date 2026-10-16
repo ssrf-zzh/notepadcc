@@ -44,6 +44,7 @@ public:
     void SetItems(const core::ToolbarItems& keys);
     void SetIconSize(int logicalPixels);
     void SetDark(bool dark);
+    void SetEyeCare(bool eyeCare);
     void Refresh() const;     // 可用 / 勾选状态变了就重画
 
     // 外壳接上来的四件事：这条命令现在能不能用、有没有勾、显示成什么、
@@ -89,6 +90,7 @@ private:
     HWND tooltip_ = nullptr;
     HFONT font_ = nullptr;
     bool dark_ = false;
+    bool eyeCare_ = false;
     bool visible_ = true;
     int  iconSize_ = 16;     // 逻辑像素
     int  hot_ = -1;

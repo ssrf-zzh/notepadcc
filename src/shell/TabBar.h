@@ -45,6 +45,10 @@ class TabBar {
 public:
     static constexpr const wchar_t* kClassName = L"notepadccTabBar";
 
+    // 界面回归的采样点：当前标签的中心 x（没有活动标签返回 -1）。
+    // 回归据此把像素分辨率按到"当前标签下划线"上，核对它真的画出来了。
+    static constexpr UINT kMsgActiveTabCenterX = WM_APP + 70;
+
     static bool RegisterWindowClass(HINSTANCE instance);
 
     bool Create(HWND parent, int controlId);

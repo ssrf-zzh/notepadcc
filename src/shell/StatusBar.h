@@ -7,11 +7,21 @@
 
 namespace npcc::shell {
 
-// 三段式状态栏：① 光标位置与选中字节数 ② 编码与行尾 ③ 语言与修改状态
+// 四段式状态栏（M3 第十四块改成自绘）：① 光标位置与选中字节数 ② 编码与行尾
+// ③ 语言与修改状态 ④ 宏录制指示。
+//
+// 文本仍然存进控件本身（SB_SETTEXTW / SB_GETTEXTW 的语义一点没动，界面回归
+// 读回走的就是官方这条路），只是"画"这一层接了过来：平底、细分区线、右下角
+// 自己画缩放角标——系统主题那套立体压边跟现代 chrome 摆在一起太出戏。
 class StatusBar {
 public:
+    ~StatusBar();
+
     bool Create(HWND parent, int controlId);
     void Resize(const RECT& client) const;
+
+    // 现代 chrome 的配色（与工具栏 / 标签栏同一套，见 ChromeStyle.h）
+    void SetTheme(bool dark, bool eyeCare);
 
     void SetPosition(int32_t line, int32_t column, int32_t selectedBytes,
                      bool overwrite = false) const;
@@ -26,8 +36,16 @@ public:
     int  Height() const;
 
 private:
+    static LRESULT CALLBACK SubclassProc(HWND hwnd, UINT message, WPARAM wParam,
+                                         LPARAM lParam, UINT_PTR subclassId,
+                                         DWORD_PTR refData);
+    void Paint(HDC dc) const;
     void SetText(int part, const std::wstring& text) const;
-    HWND hwnd_ = nullptr;
+
+    HWND  hwnd_ = nullptr;
+    HFONT font_ = nullptr;
+    bool  dark_ = false;
+    bool  eyeCare_ = false;
 };
 
 }  // namespace npcc::shell

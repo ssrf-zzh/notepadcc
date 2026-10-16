@@ -26,6 +26,7 @@
 #include "search/ByteMatcher.h"
 #include "shell/MenuBuilder.h"
 #include "shell/TabBar.h"
+#include "shell/ChromeStyle.h"
 #include "shell/ColumnDialog.h"
 #include "shell/PreferencesDialog.h"
 #include "shell/ShortcutDialog.h"
@@ -494,9 +495,7 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             // 工具栏要在命令（含宏、插件、运行命令）都注册好之后才装配：
             // 配置里记的是命令键，早一步装配就会有键查不到
             // 标签栏的深浅 / 护眼也在启动时应用一次——不然"启动即暗色 / 护眼"时它还是浅色
-            tabBar_.SetDark(darkMode_);
-            tabBar_.SetEyeCare(eyeCare_);
-            toolbar_.SetDark(darkMode_);
+            ApplyChromeTheme();
             ApplyToolbarConfig();
             ApplyContextMenuConfig();
             // 语言包盖不住哪些键，启动时就写进日志：英文界面里冒出中文时，
@@ -3728,6 +3727,19 @@ void MainWindow::CommandAutoComplete() {
                                     L"\" 给出 " + std::to_wstring(candidates.size()) + L" 个候选");
 }
 
+// 现代 chrome（M3 第十四块）：标题栏 / 标签栏 / 工具栏 / 状态栏一次换完。
+// 深浅、护眼各一组配色（见 ChromeStyle.h）；窗口边框走 DWM，Windows 11 上
+// 顺带要圆角与深色标题栏，老系统上 DWM/uxtheme 缺导出就静默降级。
+void MainWindow::ApplyChromeTheme() {
+    ApplyDarkModePreference(darkMode_);   // 系统画的菜单也跟着深浅走
+    ApplyModernWindowChrome(hwnd_, darkMode_, eyeCare_);
+    tabBar_.SetDark(darkMode_);
+    tabBar_.SetEyeCare(eyeCare_);
+    toolbar_.SetDark(darkMode_);
+    toolbar_.SetEyeCare(eyeCare_);
+    statusBar_.SetTheme(darkMode_, eyeCare_);
+}
+
 void MainWindow::ApplyStyleSchemeToAllViews() {
     if (documents_ == nullptr) {
         return;
@@ -3752,8 +3764,7 @@ void MainWindow::ApplyStyleSchemeToAllViews() {
             clone->ApplyLanguageForPath(active->buffer.filePath, &languages_, &styles_);
         }
     }
-    tabBar_.SetDark(styles_.IsDark());
-    tabBar_.SetEyeCare(eyeCare_);
+    ApplyChromeTheme();
 }
 
 namespace {
@@ -5888,7 +5899,7 @@ void MainWindow::CommandToggleDarkMode() {
     documents_->SetPalette(CurrentEditorPalette());
     ApplyStyleSchemeToAllViews();
     hexView_.SetDark(darkMode_);   // 十六进制视图的自绘配色也跟着走
-    toolbar_.SetDark(darkMode_);   // 工具栏同样（浅底/深底两套，不然深色下一条白杠）
+    // 工具栏 / 标签栏 / 状态栏 / 标题栏在 ApplyStyleSchemeToAllViews → ApplyChromeTheme 里一起换
     markdownPreview_.SetDark(darkMode_);
     structureTreePanel_.SetDark(darkMode_);
 }

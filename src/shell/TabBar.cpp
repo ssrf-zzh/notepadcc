@@ -1,5 +1,7 @@
 #include "shell/TabBar.h"
 
+#include "shell/ChromeStyle.h"
+
 #include <windows.h>
 #include <windowsx.h>   // GET_X_LPARAM / GET_Y_LPARAM
 
@@ -7,55 +9,6 @@
 
 namespace npcc::shell {
 namespace {
-
-// 标签栏自绘用的那一组颜色。浅色/深色各一套——**窗口本身（菜单栏、面板）仍是系统配色**，
-// 暗色模式这一版管到标签栏为止（见设计说明书 2.6 第 4 条的"够到哪一层"）。
-struct TabColours {
-    COLORREF background;
-    COLORREF activeTab;
-    COLORREF inactiveTab;
-    COLORREF hoverTab;
-    COLORREF border;
-    COLORREF text;
-    COLORREF textMuted;
-    COLORREF closeHover;
-    COLORREF closeHoverText;
-    COLORREF dropMarker;
-};
-
-constexpr TabColours kLightColours = {
-    RGB(0xF0, 0xF0, 0xF0), RGB(0xFF, 0xFF, 0xFF), RGB(0xE4, 0xE4, 0xE4), RGB(0xEC, 0xEC, 0xEC),
-    RGB(0xC8, 0xC8, 0xC8), RGB(0x1E, 0x1E, 0x1E), RGB(0x77, 0x77, 0x77), RGB(0xD9, 0x5B, 0x5B),
-    RGB(0xFF, 0xFF, 0xFF), RGB(0x1F, 0x6F, 0xC0),
-};
-
-// 深色：未激活标签要比背景更亮一点（浅色下是更暗），否则分不出"哪个是当前标签"
-constexpr TabColours kDarkColours = {
-    RGB(0x25, 0x25, 0x26), RGB(0x1E, 0x1E, 0x1E), RGB(0x2D, 0x2D, 0x2E), RGB(0x33, 0x33, 0x34),
-    RGB(0x3C, 0x3C, 0x3C), RGB(0xE4, 0xE4, 0xE4), RGB(0x9A, 0x9A, 0x9A), RGB(0xD9, 0x5B, 0x5B),
-    RGB(0xFF, 0xFF, 0xFF), RGB(0x5A, 0x9E, 0xE0),
-};
-
-// 护眼（低蓝光）：背景的蓝通道明显低于红通道——"低蓝光"就是字面意思。
-// 浅色下是米色纸面，深色下是暖棕黑，与编辑区那两套（EditorPalette::EyeCare）对齐。
-constexpr TabColours kEyeCareLightColours = {
-    RGB(0xED, 0xE0, 0xC8), RGB(0xF7, 0xED, 0xD9), RGB(0xE3, 0xD5, 0xB9), RGB(0xEA, 0xDD, 0xC2),
-    RGB(0xCB, 0xB9, 0x96), RGB(0x3B, 0x36, 0x2C), RGB(0x7C, 0x71, 0x5C), RGB(0xC0, 0x5B, 0x4D),
-    RGB(0xFF, 0xFF, 0xFF), RGB(0xB9, 0x8A, 0x2F),
-};
-
-constexpr TabColours kEyeCareDarkColours = {
-    RGB(0x2A, 0x23, 0x1C), RGB(0x20, 0x1A, 0x15), RGB(0x2F, 0x28, 0x20), RGB(0x35, 0x2D, 0x24),
-    RGB(0x45, 0x3A, 0x2E), RGB(0xE8, 0xDC, 0xC6), RGB(0x9A, 0x8C, 0x74), RGB(0xD9, 0x5B, 0x5B),
-    RGB(0xFF, 0xFF, 0xFF), RGB(0xC0, 0x8A, 0x3F),
-};
-
-const TabColours& TabColoursFor(bool dark, bool eyeCare) {
-    if (eyeCare) {
-        return dark ? kEyeCareDarkColours : kEyeCareLightColours;
-    }
-    return dark ? kDarkColours : kLightColours;
-}
 
 int DpiScaleFor(HWND hwnd, int value) {
     UINT dpi = 96;
@@ -367,81 +320,129 @@ void TabBar::Paint(HDC target, const RECT& client) {
     const HGDIOBJ previousFont = ::SelectObject(target, font_);
     ::SetBkMode(target, TRANSPARENT);
 
-    const TabColours& colours = TabColoursFor(dark_, eyeCare_);
-    const HBRUSH background = ::CreateSolidBrush(colours.background);
+    const ChromeColours colours = ChromeColoursFor(dark_, eyeCare_);
+    const HBRUSH background = ::CreateSolidBrush(colours.strip);
     ::FillRect(target, &client, background);
+    ::DeleteObject(background);
 
+    const int radius = Scale(7);
+    const int underline = Scale(3);
     const int textPadding = paddingX_;
+    int activeLeft = 0;
+    int activeRight = 0;
+    bool hasActive = false;
+
+    // (1) 页签底色：当前标签是"和编辑区同色"的圆角页签——底部多画 radius，
+    //     两个底角落到窗口外，看上去只有上边是圆的；悬停标签铺一层浅底。
+    //     拖动中的标签不铺底，留出"空位"。
     for (size_t i = 0; i < items_.size(); ++i) {
-        RECT rc = ItemRect(i);
+        const RECT rc = ItemRect(i);
         if (rc.right <= client.left || rc.left >= client.right) {
             continue;
         }
-
         const bool isActive = (items_[i].id == active_);
         const bool isHot = (static_cast<int>(i) == hotIndex_);
-        COLORREF fill = isActive ? colours.activeTab
-                                  : (isHot ? colours.hoverTab : colours.inactiveTab);
-        if (dragging_ && static_cast<int>(i) == dragIndex_) {
-            fill = colours.background;   // 正在拖动的那一项画成"空位"
+        if (isActive) {
+            hasActive = true;
+            activeLeft = std::max<int>(rc.left, client.left);
+            activeRight = std::min<int>(rc.right, client.right);
+            RECT tab = rc;
+            tab.bottom += radius;
+            FillRoundedRect(target, tab, radius, colours.tabActive);
+        } else if (isHot && !(dragging_ && static_cast<int>(i) == dragIndex_)) {
+            RECT tab = rc;
+            tab.bottom += radius;
+            FillRoundedRect(target, tab, radius, colours.tabHover);
         }
+    }
 
-        const HBRUSH brush = ::CreateSolidBrush(fill);
-        ::FillRect(target, &rc, brush);
+    // (2) 底边细线：当前标签脚下让开一段——"页签和编辑区连成一片"是这一眼最要紧的。
+    //     用 FillRect 而不是画线笔，细线宽度才能跟着 DPI 走（200% 下还是"一条线"）。
+    const int hairline = Scale(1);
+    const HBRUSH lineBrush = ::CreateSolidBrush(colours.line);
+    if (!hasActive || activeLeft > client.left) {
+        RECT leftLine{client.left, client.bottom - hairline,
+                      hasActive ? activeLeft : client.right, client.bottom};
+        ::FillRect(target, &leftLine, lineBrush);
+    }
+    if (hasActive && activeRight < client.right) {
+        RECT rightLine{activeRight, client.bottom - hairline, client.right, client.bottom};
+        ::FillRect(target, &rightLine, lineBrush);
+    }
+    ::DeleteObject(lineBrush);
+
+    // (3) 当前标签的强调色下划线（Windows 11 那一条）
+    if (hasActive && activeRight > activeLeft) {
+        RECT mark{activeLeft, client.bottom - underline, activeRight, client.bottom};
+        const HBRUSH brush = ::CreateSolidBrush(colours.accent);
+        ::FillRect(target, &mark, brush);
         ::DeleteObject(brush);
+    }
 
+    // (4) 标题与关闭按钮
+    for (size_t i = 0; i < items_.size(); ++i) {
+        const RECT rc = ItemRect(i);
+        if (rc.right <= client.left || rc.left >= client.right) {
+            continue;
+        }
+        if (dragging_ && static_cast<int>(i) == dragIndex_) {
+            continue;   // 正在拖动的那一项画成"空位"
+        }
+        const bool isActive = (items_[i].id == active_);
         ::SetTextColor(target, isActive ? colours.text : colours.textMuted);
 
-        // 标题区域：减去左右内边距与关闭按钮
         RECT textRect = rc;
         textRect.left += textPadding;
         textRect.right -= (textPadding / 2 + closeBoxSize_);
         if (textRect.right > textRect.left) {
+            RECT measured = textRect;
+            ::DrawTextW(target, items_[i].title.c_str(), -1, &measured,
+                        DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX | DT_CALCRECT);
+
+            // 未保存标记：标题末尾一颗强调色小圆点；量下来放不下就退回字符标记
+            const int closeGuard = rc.right - paddingX_ / 2 - closeBoxSize_;
+            const bool drawDot = items_[i].modified && measured.right + Scale(9) < closeGuard;
             std::wstring label = items_[i].title;
-            if (items_[i].modified) {
-                label += L" ●";
+            if (items_[i].modified && !drawDot) {
+                label += L" \u25cf";
             }
             ::DrawTextW(target, label.c_str(), -1, &textRect,
                         DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+            if (drawDot) {
+                const int dot = Scale(3);
+                const int dotX = measured.right + Scale(5);
+                const int dotY = rc.top + tabHeight_ / 2;
+                const HGDIOBJ oldPen = ::SelectObject(target, ::GetStockObject(NULL_PEN));
+                const HGDIOBJ oldBrush = ::SelectObject(target, ::GetStockObject(DC_BRUSH));
+                ::SetDCBrushColor(target, colours.accent);
+                ::Ellipse(target, dotX, dotY - dot, dotX + 2 * dot, dotY + dot);
+                ::SelectObject(target, oldBrush);
+                ::SelectObject(target, oldPen);
+            }
         }
 
-        // 关闭按钮：悬停时反色，让点击目标可见
+        // 关闭按钮：悬停画一个软色圆底（不再是整块反色）
         const int boxSize = closeBoxSize_;
         const int boxLeft = rc.right - paddingX_ / 2 - boxSize;
         RECT closeRect{boxLeft, rc.top + (tabHeight_ - boxSize) / 2,
                        boxLeft + boxSize, rc.top + (tabHeight_ + boxSize) / 2};
         const bool closeHot = (static_cast<int>(i) == hotCloseIndex_);
         if (closeHot) {
-            const HBRUSH hotBrush = ::CreateSolidBrush(colours.closeHover);
-            ::FillRect(target, &closeRect, hotBrush);
-            ::DeleteObject(hotBrush);
+            RECT bubble = closeRect;
+            ::InflateRect(&bubble, Scale(2), Scale(2));
+            FillRoundedRect(target, bubble, (bubble.right - bubble.left) / 2, colours.dangerSoft);
         }
-        ::SetTextColor(target, closeHot ? colours.closeHoverText : colours.textMuted);
-        ::DrawTextW(target, L"×", -1, &closeRect,
+        ::SetTextColor(target, closeHot ? colours.danger : colours.textMuted);
+        ::DrawTextW(target, L"\u00d7", -1, &closeRect,
                     DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
-
-        // 活动标签与相邻标签之间画竖分隔
-        if (i + 1 < items_.size() && !isActive && items_[i + 1].id != active_) {
-            ::SetDCPenColor(target, colours.border);
-            ::MoveToEx(target, rc.right, rc.top + tabHeight_ / 4, nullptr);
-            ::LineTo(target, rc.right, rc.bottom - tabHeight_ / 4);
-        }
     }
-
-    // 底部边线
-    const HPEN border = ::CreatePen(PS_SOLID, 1, colours.border);
-    const HGDIOBJ previousPen = ::SelectObject(target, border);
-    ::MoveToEx(target, client.left, client.bottom - 1, nullptr);
-    ::LineTo(target, client.right, client.bottom - 1);
-    ::SelectObject(target, previousPen);
-    ::DeleteObject(border);
 
     // 拖拽落点指示线
     if (dragging_ && dropIndex_ >= 0) {
         const int markerX = (static_cast<size_t>(dropIndex_) < items_.size())
                                 ? ItemRect(static_cast<size_t>(dropIndex_)).left
                                 : ItemRect(items_.size() - 1).right;
-        const HPEN marker = ::CreatePen(PS_SOLID, Scale(2), colours.dropMarker);
+        const HPEN marker = ::CreatePen(PS_SOLID, Scale(2), colours.accent);
         const HGDIOBJ oldPen = ::SelectObject(target, marker);
         ::MoveToEx(target, markerX, Scale(2), nullptr);
         ::LineTo(target, markerX, tabHeight_ - Scale(2));
@@ -454,6 +455,15 @@ void TabBar::Paint(HDC target, const RECT& client) {
 
 LRESULT TabBar::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
+        case kMsgActiveTabCenterX: {
+            for (size_t i = 0; i < items_.size(); ++i) {
+                if (items_[i].id == active_) {
+                    const RECT rc = ItemRect(i);
+                    return static_cast<LRESULT>((rc.left + rc.right) / 2);
+                }
+            }
+            return -1;
+        }
         case WM_NCCREATE: {
             // 默认尺寸只作占位，实际高度由父窗口按 Height() 设定
             return TRUE;

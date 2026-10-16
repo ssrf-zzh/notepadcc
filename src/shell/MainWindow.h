@@ -325,6 +325,7 @@ private:
     bool OpenDocumentPath(const std::wstring& path);
     // 打开后留在 loadWarning 里的提示（二进制内容、混合行尾、大文件档）在状态栏露面一次
     void AnnounceActiveLoadWarning();
+    void ApplyChromeTheme();
     void ApplyStyleSchemeToAllViews();
     void CommandAutoComplete();
     const edit::LanguageDef* ActiveLanguage() const;

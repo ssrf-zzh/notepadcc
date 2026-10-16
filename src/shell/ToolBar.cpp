@@ -1,5 +1,7 @@
 #include "shell/ToolBar.h"
 
+#include "shell/ChromeStyle.h"
+
 #include <commctrl.h>
 #include <windowsx.h>
 
@@ -31,35 +33,25 @@ struct Colors {
     COLORREF hot = 0;
     COLORREF pressed = 0;
     COLORREF checked = 0;
-    COLORREF border = 0;
+    COLORREF accent = 0;
     COLORREF fg = 0;
     COLORREF disabled = 0;
     COLORREF separator = 0;
 };
 
-// 浅色走系统配色（工具栏是"外壳的一部分"，跟着系统走最不出错），
-// 深色用编辑器那一套底色——不然深色模式里工具栏会成一条刺眼的白杠
-Colors PaletteOf(bool dark) {
+// 工具栏配色跟 chrome 一套（M3 第十四块）：底色与标签栏同色，悬停 / 按下 / 勾选
+// 都是圆角浅底，勾选的图标本身用强调色——不再画硬边框。护眼跟着深浅成四套。
+Colors PaletteOf(bool dark, bool eyeCare) {
+    const ChromeColours chrome = ChromeColoursFor(dark, eyeCare);
     Colors colors;
-    if (dark) {
-        colors.bg = RGB(0x25, 0x25, 0x26);
-        colors.hot = RGB(0x37, 0x37, 0x3D);
-        colors.pressed = RGB(0x2A, 0x2A, 0x30);
-        colors.checked = RGB(0x2F, 0x52, 0x30);
-        colors.border = RGB(0x4E, 0x4E, 0x56);
-        colors.fg = RGB(0xF0, 0xF0, 0xF0);
-        colors.disabled = RGB(0x7A, 0x7A, 0x7A);
-        colors.separator = RGB(0x46, 0x46, 0x4E);
-    } else {
-        colors.bg = ::GetSysColor(COLOR_BTNFACE);
-        colors.hot = RGB(0xD8, 0xE8, 0xFA);
-        colors.pressed = RGB(0xC2, 0xDC, 0xF8);
-        colors.checked = RGB(0xC8, 0xE8, 0xC8);
-        colors.border = ::GetSysColor(COLOR_BTNSHADOW);
-        colors.fg = ::GetSysColor(COLOR_BTNTEXT);
-        colors.disabled = ::GetSysColor(COLOR_GRAYTEXT);
-        colors.separator = ::GetSysColor(COLOR_BTNSHADOW);
-    }
+    colors.bg = chrome.strip;
+    colors.hot = chrome.buttonHot;
+    colors.pressed = chrome.buttonPressed;
+    colors.checked = chrome.accentSoft;
+    colors.accent = chrome.accent;
+    colors.fg = chrome.text;
+    colors.disabled = chrome.iconDisabled;
+    colors.separator = chrome.line;
     return colors;
 }
 
@@ -379,6 +371,13 @@ void ToolBar::SetDark(bool dark) {
     }
 }
 
+void ToolBar::SetEyeCare(bool eyeCare) {
+    if (eyeCare_ != eyeCare) {
+        eyeCare_ = eyeCare;
+        Refresh();
+    }
+}
+
 void ToolBar::Refresh() const {
     if (hwnd_ != nullptr) {
         ::InvalidateRect(hwnd_, nullptr, FALSE);
@@ -546,7 +545,7 @@ void ToolBar::HideTooltip() {
 void ToolBar::Paint(HDC dc) const {
     RECT client{};
     ::GetClientRect(hwnd_, &client);
-    const Colors colors = PaletteOf(dark_);
+    const Colors colors = PaletteOf(dark_, eyeCare_);
 
     HBRUSH background = ::CreateSolidBrush(colors.bg);
     ::FillRect(dc, &client, background);
@@ -576,31 +575,24 @@ void ToolBar::Paint(HDC dc) const {
         const bool checked = CheckedAt(index);
         const bool pressed = pressed_ == index;
         const bool hot = hot_ == index;
+        // 悬停 / 按下 / 勾选统一画成圆角浅底（不再有硬边框）
         if (pressed || checked || hot) {
-            HBRUSH brush = ::CreateSolidBrush(pressed ? colors.pressed
-                                                      : (hot ? colors.hot : colors.checked));
-            ::FillRect(dc, &box, brush);
-            ::DeleteObject(brush);
-        }
-        if (checked) {
-            HBRUSH frame = ::CreateSolidBrush(colors.border);
-            RECT top{box.left, box.top, box.right, box.top + 1};
-            RECT bottom{box.left, box.bottom - 1, box.right, box.bottom};
-            RECT leftEdge{box.left, box.top, box.left + 1, box.bottom};
-            RECT rightEdge{box.right - 1, box.top, box.right, box.bottom};
-            ::FillRect(dc, &top, frame);
-            ::FillRect(dc, &bottom, frame);
-            ::FillRect(dc, &leftEdge, frame);
-            ::FillRect(dc, &rightEdge, frame);
-            ::DeleteObject(frame);
+            RECT fill = box;
+            ::InflateRect(&fill, -Scale(2), -Scale(3));
+            const COLORREF colour = pressed ? colors.pressed
+                                            : (checked ? colors.checked : colors.hot);
+            FillRoundedRect(dc, fill, Scale(6), colour);
         }
         const int inset = (CellSize() - Scale(iconSize_)) / 2;
         RECT glyph{box.left + inset, box.top + inset, box.right - inset, box.bottom - inset};
-        PaintGlyph(dc, glyph, items_[i].key, enabled ? colors.fg : colors.disabled);
+        PaintGlyph(dc, glyph, items_[i].key,
+                   enabled ? (checked ? colors.accent : colors.fg) : colors.disabled);
     }
 
     // 底下一条分隔线：工具栏和标签栏得有个分界，不然两块底色挨着看不清
-    RECT divider{0, client.bottom - 1, client.right, client.bottom};
+    // （细线按 DPI 缩放，200% 下才不至于细成一根头发丝）
+    const int hairline = Scale(1);
+    RECT divider{0, client.bottom - hairline, client.right, client.bottom};
     HBRUSH brush = ::CreateSolidBrush(colors.separator);
     ::FillRect(dc, &divider, brush);
     ::DeleteObject(brush);
