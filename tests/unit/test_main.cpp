@@ -11,6 +11,7 @@
 #include "core/Command.h"
 #include "core/CommandRegistry.h"
 #include "core/CommandText.h"
+#include "core/ToolbarItems.h"
 #include "core/ConfigCenter.h"
 #include "core/DocumentManager.h"
 #include "core/SessionManager.h"
@@ -436,6 +437,22 @@ int main() {
         Check(npcc::core::MakeCmdId(1, 1) <= 0xFFFF, "命令 ID 落在 16 位内（菜单与加速键要求）");
         Check(npcc::core::MakeCmdId(1, 1) != npcc::core::MakeCmdId(2, 1), "不同类别不冲突");
 
+        // 按**命令键**查（工具栏按钮表记的是键）：与 ID 查到的是同一条；
+        // 认不出的键与空键都返回空
+        {
+            npcc::core::Command keyed;
+            keyed.id = npcc::core::MakeCmdId(1, 2);
+            keyed.category = npcc::core::CmdCategory::File;
+            keyed.key = L"cmd.file.sample";
+            keyed.text = L"带键的命令";
+            keyed.execute = [](const npcc::core::CmdContext&) {};
+            const npcc::core::CmdId keyedId = registry.Register(std::move(keyed));
+            const npcc::core::Command* byKey = registry.FindByKey(L"cmd.file.sample");
+            Check(byKey != nullptr && byKey->id == keyedId, "按键查得到，且是 ID 查到的那一条");
+            Check(registry.FindByKey(L"cmd.file.missing") == nullptr, "认不出的键返回空");
+            Check(registry.FindByKey(L"") == nullptr, "空键返回空");
+        }
+
         // 自动分配 ID 必须绕开用过的号。曾经踩过：菜单分隔线用自动 ID，
         // 而它正好等于紧随其后的那条命令的显式 ID，于是那条命令被静默丢弃——
         // 表现是"菜单里有这一项，点了没反应"。
@@ -472,6 +489,66 @@ int main() {
             Check(autoIds.Find(laterId) != nullptr && autoIds.Find(auto1) != nullptr,
                   "注册过的命令都查得到");
         }
+    }
+
+    // ---------------------------------------------------------------- 工具栏按钮表
+    // 纯函数：默认表长什么样、用户给的表怎么整理。工具栏控件本身要窗口，
+    // 这一段只盯"按钮表"这层逻辑；控件与配置的联动由界面回归盯
+    Section("工具栏按钮表（默认表 / 整理规则）");
+    {
+        const npcc::core::ToolbarItems& defaults = npcc::core::DefaultToolbarItems();
+        Check(!defaults.empty(), "默认表不是空的");
+        Check(defaults.front() != npcc::core::kToolbarSeparator &&
+                  defaults.back() != npcc::core::kToolbarSeparator,
+              "默认表首尾都不是分隔符");
+        int buttons = 0;
+        bool clean = true;
+        for (std::size_t i = 0; i < defaults.size(); ++i) {
+            if (defaults[i] == npcc::core::kToolbarSeparator) {
+                if (i == 0 || defaults[i - 1] == npcc::core::kToolbarSeparator) {
+                    clean = false;
+                }
+            } else {
+                ++buttons;
+            }
+        }
+        Check(clean, "默认表里没有连排的分隔符");
+        Check(buttons == 14, "默认表里有 14 个可点按钮");
+        bool unique = true;
+        for (std::size_t i = 0; i < defaults.size(); ++i) {
+            for (std::size_t j = i + 1; j < defaults.size(); ++j) {
+                if (defaults[i] != npcc::core::kToolbarSeparator && defaults[i] == defaults[j]) {
+                    unique = false;
+                }
+            }
+        }
+        Check(unique, "默认表里没有重复按钮");
+
+        const auto known = [](const std::wstring& key) {
+            return key == L"a" || key == L"b";
+        };
+        // 认不出的键丢掉（插件没装、宏被删都会走到这儿）
+        Check(npcc::core::NormalizeToolbarItems({L"a", L"ghost", L"b"}, known) ==
+                  npcc::core::ToolbarItems({L"a", L"b"}),
+              "认不出的键被丢掉，其余按原顺序保留");
+        // 同一个按钮放两次没有意义，只留第一次
+        Check(npcc::core::NormalizeToolbarItems({L"b", L"a", L"b"}, known) ==
+                  npcc::core::ToolbarItems({L"b", L"a"}),
+              "重复的按钮只保留第一次");
+        // 分隔符：站头的、连排的、站尾的都吃掉
+        Check(npcc::core::NormalizeToolbarItems(
+                  {npcc::core::kToolbarSeparator, L"a", npcc::core::kToolbarSeparator,
+                   npcc::core::kToolbarSeparator, L"b", npcc::core::kToolbarSeparator},
+                  known) == npcc::core::ToolbarItems({L"a", npcc::core::kToolbarSeparator, L"b"}),
+              "站头 / 连排 / 站尾的分隔符都被吃掉");
+        // 空表是合法结果：工具栏上一个按钮都不放
+        Check(npcc::core::NormalizeToolbarItems({}, known).empty(), "空表整理后仍然是空表");
+        Check(npcc::core::NormalizeToolbarItems({L"ghost"}, known).empty(),
+              "全是认不出的键时结果是空表");
+        Check(npcc::core::NormalizeToolbarItems({L""}, known).empty(), "空字符串键被丢掉");
+        // 没有给的 known 时一个键都不敢放（怕摆上去是个死按钮），只剩下分隔符也会被清掉
+        Check(npcc::core::NormalizeToolbarItems({L"a", L"b"}, nullptr).empty(),
+              "没有 known 时不放任何命令键");
     }
 
     // ---------------------------------------------------------------- 多文档管理
@@ -1004,6 +1081,55 @@ int main() {
             reloaded.Load(nullptr);
             Check(reloaded.General().uiLanguage == L"zh-CN",
                   "SaveNow 写下去的是最后那个值");
+        }
+
+        // 工具栏：可见性与按钮表。"没配过（用默认表）"与"用户把表删空"必须是
+        // 两种状态——不然删空之后下次启动又会悄悄退回默认表
+        {
+            std::filesystem::remove(path, ec);
+            npcc::core::ConfigCenter config;
+            config.Load(nullptr);
+            Check(config.Toolbar().visible, "工具栏默认可见");
+            Check(config.Toolbar().iconSize == 16, "默认图标尺寸是 16 逻辑像素");
+            Check(!config.Toolbar().custom, "默认没有自定义按钮表");
+            std::wstring error;
+            Check(config.Save(true, &error), "默认状态保存成功");
+            {
+                const npcc::io::ReadResult read = npcc::io::ReadWholeFile(path.wstring());
+                Check(read.ok, "读回配置");
+                // 默认表不进文件：写进去只会变成"将来改了默认表、这份旧文件还钉着"
+                Check(read.bytes.find("<Item") == std::string::npos,
+                      "没配过按钮表时配置里没有 <Item>");
+                Check(read.bytes.find("visible=") != std::string::npos, "可见性写进文件");
+            }
+
+            config.Toolbar().visible = false;
+            config.Toolbar().items = {L"cmd.edit.undo", npcc::core::kToolbarSeparator,
+                                      L"cmd.edit.redo"};
+            config.Toolbar().custom = true;
+            Check(config.Save(true, &error), "保存自定义按钮表成功");
+            npcc::core::ConfigCenter reloaded;
+            Check(reloaded.Load(&error), "重新加载成功");
+            Check(!reloaded.Toolbar().visible, "可见性往返一致");
+            Check(reloaded.Toolbar().custom, "自定义标记往返一致");
+            Check(reloaded.Toolbar().items == npcc::core::ToolbarItems(
+                                                    {L"cmd.edit.undo",
+                                                     npcc::core::kToolbarSeparator,
+                                                     L"cmd.edit.redo"}),
+                  "按钮表（含分隔符）往返一致，顺序不变");
+
+            // 用户把按钮删空：文件里写 empty="yes"，再启动时仍然是"配过的空表"
+            reloaded.Toolbar().items.clear();
+            Check(reloaded.Save(true, &error), "保存空按钮表成功");
+            npcc::core::ConfigCenter emptied;
+            Check(emptied.Load(&error), "重新加载成功");
+            Check(emptied.Toolbar().custom, "空表仍然算「用户配过」");
+            Check(emptied.Toolbar().items.empty(), "空表往返一致（没有退回默认表）");
+            {
+                const npcc::io::ReadResult read = npcc::io::ReadWholeFile(path.wstring());
+                Check(read.ok && read.bytes.find("empty=\"yes\"") != std::string::npos,
+                      "空表在文件里记成 empty=yes");
+            }
         }
 
         std::filesystem::remove(path, ec);

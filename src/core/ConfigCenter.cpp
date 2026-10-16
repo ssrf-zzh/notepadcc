@@ -278,6 +278,29 @@ bool ConfigCenter::Load(std::wstring* error) {
         search_.lastFilter = ReadString(search, L"lastFilter", search_.lastFilter);
     }
 
+    // 工具栏：可见性与按钮表。custom 只有在文件里真的出现过 <Item> 或
+    // empty="yes" 时才置位——"字段缺失"与"用户把按钮删空了"必须分得开，
+    // 否则删空之后下次启动又会退回默认表
+    const infra::XmlElement* toolbar = Section(root, L"toolbar");
+    if (toolbar != nullptr) {
+        toolbar_.visible =
+            ReadBool(toolbar, L"visible", toolbar_.visible, warnings_, L"toolbar");
+        toolbar_.iconSize =
+            ReadIntInRange(toolbar, L"iconSize", toolbar_.iconSize, 12, 48, warnings_, L"toolbar");
+        const std::vector<const infra::XmlElement*> items = toolbar->Children(L"Item");
+        const std::wstring* empty = toolbar->Attribute(L"empty");
+        if (!items.empty() || (empty != nullptr && *empty == L"yes")) {
+            toolbar_.custom = true;
+            toolbar_.items.clear();
+            for (const infra::XmlElement* item : items) {
+                const std::wstring* key = item->Attribute(L"command");
+                if (key != nullptr && !key->empty()) {
+                    toolbar_.items.push_back(*key);
+                }
+            }
+        }
+    }
+
     for (const std::wstring& warning : warnings_) {
         infra::LogWarn(L"config", L"配置项已回退默认值: " + warning);
     }
@@ -348,6 +371,20 @@ bool ConfigCenter::Save(bool force, std::wstring* error) {
     search->SetAttributeBool(L"dotMatchesNewline", search_.dotMatchesNewline);
     search->SetAttributeBool(L"wrapAround", search_.wrapAround);
     search->SetAttribute(L"lastFilter", search_.lastFilter);
+
+    infra::XmlElementPtr toolbar = root->AddChild(L"toolbar");
+    toolbar->SetAttributeBool(L"visible", toolbar_.visible);
+    toolbar->SetAttributeInt(L"iconSize", toolbar_.iconSize);
+    // 只写**用户自己那份**按钮表：默认表在代码里，写进文件只会变成一份
+    // "将来的默认表改了、这份文件还钉着旧表"的历史包袱
+    if (toolbar_.custom) {
+        if (toolbar_.items.empty()) {
+            toolbar->SetAttribute(L"empty", L"yes");
+        }
+        for (const std::wstring& key : toolbar_.items) {
+            toolbar->AddChild(L"Item")->SetAttribute(L"command", key);
+        }
+    }
 
     const bool ok = io::SaveXmlFile(Path().wstring(), document, error);
     if (ok) {

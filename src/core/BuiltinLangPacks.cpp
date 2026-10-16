@@ -82,6 +82,7 @@ std::vector<LangPack> MakeBuiltin() {
         Entry(L"cmd.view.fullScreen", L"Full Screen", L"U"),
         Entry(L"cmd.view.gotoMatchBrace", L"Go to Matching Brace", L"B"),
         Entry(L"cmd.view.summary", L"Summary...", L"S"),
+        Entry(L"cmd.view.toolbar", L"Toolbar", L"T"),
         // ---- 宏 ----
         Entry(L"cmd.macro.record", L"Start / Stop Recording", L"R"),
         Entry(L"cmd.macro.playLast", L"Play Last Macro", L"P"),
@@ -151,6 +152,7 @@ std::vector<LangPack> MakeBuiltin() {
         Entry(L"cmd.settings.registerAssoc", L"Add to 'Open with' List", L"A"),
         Entry(L"cmd.settings.unregisterAssoc", L"Remove from 'Open with' List", L"R"),
         Entry(L"cmd.settings.plugins", L"Plugin Manager...", L"G"),
+        Entry(L"cmd.settings.toolbar", L"Customize Toolbar...", L"T"),
         // 界面语言那几条命令的文本就是语言自己的名字（"English"/"简体中文"），
         // 故意不翻译：语言名要用它自己的语言写，用户才找得到
         // ---- 帮助 ----

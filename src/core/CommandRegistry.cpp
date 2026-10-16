@@ -60,6 +60,15 @@ const Command* CommandRegistry::Find(CmdId id) const {
     return it == commands_.end() ? nullptr : &*it;
 }
 
+const Command* CommandRegistry::FindByKey(std::wstring_view key) const {
+    if (key.empty()) {
+        return nullptr;
+    }
+    const auto it = std::find_if(commands_.begin(), commands_.end(),
+                                 [key](const Command& c) { return c.key == key; });
+    return it == commands_.end() ? nullptr : &*it;
+}
+
 std::vector<CmdId> CommandRegistry::ByCategory(CmdCategory category) const {
     std::vector<CmdId> result;
     for (const auto& c : commands_) {

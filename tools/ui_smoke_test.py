@@ -211,6 +211,8 @@ JSON_TREE_CLASS = "notepadccJsonTree"
 CMD_VIEW_FULL_SCREEN = (4 << 12) | 26
 CMD_VIEW_GOTO_MATCH_BRACE = (4 << 12) | 27
 CMD_VIEW_SUMMARY = (4 << 12) | 28
+CMD_VIEW_TOOLBAR = (4 << 12) | 29        # 视图 → 工具栏（勾选）
+CMD_SETTINGS_TOOLBAR = (7 << 12) | 6     # 设置 → 自定义工具栏…
 MENU_INDEX_VIEW = 3                   # 文件 / 编辑 / 查找 / 视图 …
 PREF_UI_LANGUAGE_COMBO = 1048
 PREF_CANCEL = 1061
@@ -322,6 +324,14 @@ BST_UNCHECKED = 0
 MF_BYPOSITION = 0x00000400            # 菜单项按位置而不是按命令号来找
 MF_BYCOMMAND = 0x00000000
 MF_CHECKED = 0x00000008
+# ---- 工具栏（自绘控件 notepadccToolBar）----
+WM_INITMENUPOPUP = 0x0117
+TOOLBAR_CONTROL_CLASS = "notepadccToolBar"
+TOOLBAR_DIALOG_CLASS = "notepadccToolbarCustomize"
+TB_DLG_AVAILABLE = 1601              # 对话框里"可用命令"那个列表
+TB_DLG_CURRENT = 1603                # 对话框里"现在的按钮"那个列表
+TB_MSG_ITEM_COUNT = 0x8000 + 60      # ToolBar::kMsgItemCount
+TB_MSG_ITEM_CENTER_X = 0x8000 + 61   # ToolBar::kMsgItemCenterX
 
 # ---- 状态栏（系统控件 msctls_statusbar32）----
 STATUS_CLASS = "msctls_statusbar32"
@@ -4184,6 +4194,8 @@ def run():
         failed = True
     if not test_brace_summary_fullscreen(root):
         failed = True
+    if not test_toolbar(root):
+        failed = True
     if not test_auto_complete(root):
         failed = True
     if not test_associated_commands(root):
@@ -4199,7 +4211,8 @@ def run():
           "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + UDL + 暗色模式 + "
           "宏 + 文件夹工作区 + 函数列表 + 导出与打印 + 插件宿主 + JSON/XML 格式化 + "
           "运行命令 + 界面语言 + 十六进制查看 + 复制为富文本 + Markdown 预览 + 对话框文案 + "
-          "比较 + JSON 树视图 + 括号匹配与摘要与全屏 + 自动完成 + 文件关联 + 绿色打包）")
+          "比较 + JSON 树视图 + 括号匹配与摘要与全屏 + 工具栏 + 自动完成 + 文件关联 + "
+          "绿色打包）")
     return 0
 
 
@@ -4790,6 +4803,310 @@ def test_brace_summary_fullscreen(root):
           "光标不动且状态栏给出提示、摘要四行统计逐字核对、F11 收菜单栏并铺满工作区、"
           "Esc 把菜单栏/矩形/窗口样式逐项还原（日志里有进出全屏两句）")
     return True
+
+
+def test_toolbar(root):
+    """工具栏（M3：工具栏与右键菜单定制）：按钮表由配置驱动、点按钮真的执行命令、
+    勾选态与可用态回到界面上、定制对话框改得动表，改动当场落盘。
+
+    自绘控件的文本能跨进程读回来（WM_GETTEXT 是系统消息），所以这里核对的是
+    "栏里到底有哪几个按钮、按什么顺序、哪个现在是勾上的"，而不是"命令发出去了"。
+    **点按钮走的是真正的命中测试**：先问控件"第 N 个按钮的中心 x 在哪"
+    （ToolBar::kMsgItemCenterX，只传值不封送指针），再按那个坐标把鼠标消息投进去；
+    命中测试写错、按钮位置算错，这一段就会失败。
+    """
+    work = os.path.join(root, "build", "toolbar_test")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    cfg = os.path.join(root, "build", "bin", "config")
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+
+    path = os.path.join(work, "a.txt")
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write("one\ntwo\nthree\n")
+
+    for name in ("config.xml", "session.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+    remove_log_with_retry(root)
+
+    config_path = os.path.join(cfg, "config.xml")
+    # 默认按钮表：None 是分隔符。顺序就是显示顺序，改动默认表要连这里一起改
+    expected = ["新建", "打开", "保存", None, "撤销", "重做", None,
+                "查找", "查找下一个", None, "标记/取消书签", "下一个书签", None,
+                "注释/取消注释", None, "折叠全部", "展开全部", None,
+                "暗色模式", "摘要"]
+    expected_count = len([item for item in expected if item is not None])
+    expected_as_text = ["---" if item is None else item for item in expected]
+
+    def read_config():
+        if not os.path.exists(config_path):
+            return ""
+        with open(config_path, "r", encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+
+    def wait_config(predicate, timeout=8.0):
+        # 可见性走 RequestSave（1 秒合并窗口）、按钮表走 SaveNow：两条路一条
+        # 文件晚一步才出现，统一等它出现，别跟写盘抢跑
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if predicate(read_config()):
+                return True
+            time.sleep(0.2)
+        return False
+
+    def toolbar_of(window, timeout=8.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for child in children(window):
+                if class_name(child) == TOOLBAR_CONTROL_CLASS:
+                    return child
+            time.sleep(0.2)
+        return None
+
+    def dialog():
+        return user32.FindWindowW(TOOLBAR_DIALOG_CLASS, None)
+
+    def wait_dialog(timeout=8.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            box = dialog()
+            if box:
+                return box
+            time.sleep(0.2)
+        return None
+
+    def wait_dialog_gone(timeout=8.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not dialog():
+                return True
+            time.sleep(0.2)
+        return False
+
+    def child_with_id(parent, control_id):
+        for child in children(parent):
+            if user32.GetDlgCtrlID(child) == control_id:
+                return child
+        return None
+
+    def click_button(parent, text, timeout=6.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for child in children(parent):
+                if window_text(child) == text:
+                    user32.PostMessageW(child, 0x00F5, 0, 0)   # BM_CLICK，投递不阻塞
+                    return True
+            time.sleep(0.2)
+        return False
+
+    def pieces_of(toolbar):
+        return [piece.strip() for piece in window_text(toolbar).split("|")]
+
+    def close_dialog_if_any():
+        box = dialog()
+        if box:
+            send_bounded(box, WM_CLOSE)
+            time.sleep(0.4)
+
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - a.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        time.sleep(1.0)
+
+        toolbar = toolbar_of(window)
+        if not toolbar:
+            print("  FAIL: 主窗口里找不到工具栏子窗口（notepadccToolBar）")
+            return False
+        if not user32.IsWindowVisible(toolbar):
+            print("  FAIL: 工具栏默认应当是显示的")
+            return False
+
+        # ---- 1) 默认按钮表：逐项核对（顺序、分隔符、可点按钮个数）----
+        pieces = pieces_of(toolbar)
+        if len(pieces) != len(expected):
+            print(f"  FAIL: 默认按钮表应有 {len(expected)} 项，实际 {len(pieces)}："
+                  f"{window_text(toolbar)!r}")
+            return False
+        for index, want in enumerate(expected):
+            want = "---" if want is None else want
+            if pieces[index] != want:
+                print(f"  FAIL: 第 {index} 项应当是 {want!r}，实际 {pieces[index]!r}")
+                return False
+        if "[v]" in window_text(toolbar):
+            print(f"  FAIL: 刚启动时不该有按钮是勾上的，实际 {window_text(toolbar)!r}")
+            return False
+        count = send_bounded(toolbar, TB_MSG_ITEM_COUNT)
+        if count != expected_count:
+            print(f"  FAIL: 可点按钮应当有 {expected_count} 个，实际 {count}")
+            return False
+
+        # ---- 2) 点真按钮：命中测试 → 执行命令 → 勾选态回到界面上 ----
+        dark_ordinal = [item for item in expected if item is not None].index("暗色模式")
+        x = send_bounded(toolbar, TB_MSG_ITEM_CENTER_X, dark_ordinal)
+        if x is None or x < 0:
+            print(f"  FAIL: 问不到第 {dark_ordinal} 个按钮的中心（返回 {x}）")
+            return False
+        rect = wintypes.RECT()
+        user32.GetClientRect(toolbar, ctypes.byref(rect))
+        y = (rect.bottom - rect.top) // 2
+        user32.PostMessageW(toolbar, WM_LBUTTONDOWN, 1, ((y << 16) | x) & 0xFFFFFFFF)
+        user32.PostMessageW(toolbar, WM_LBUTTONUP, 0, ((y << 16) | x) & 0xFFFFFFFF)
+        time.sleep(1.2)
+        if "[v] 暗色模式" not in window_text(toolbar):
+            print(f"  FAIL: 点了暗色按钮之后它应当是勾上的，实际 {window_text(toolbar)!r}")
+            return False
+        user32.PostMessageW(toolbar, WM_LBUTTONDOWN, 1, ((y << 16) | x) & 0xFFFFFFFF)
+        user32.PostMessageW(toolbar, WM_LBUTTONUP, 0, ((y << 16) | x) & 0xFFFFFFFF)
+        time.sleep(1.2)
+        if "[v]" in window_text(toolbar):
+            print(f"  FAIL: 再点一次应当取消勾选，实际 {window_text(toolbar)!r}")
+            return False
+
+        if not os.path.exists(config_path):
+            print("  FAIL: 启动之后 config.xml 就应当存在（工具栏的可见性写在里面）")
+            return False
+
+        # ---- 3) 菜单栏里那一项的勾选态：WM_INITMENUPOPUP 之后按注册表刷出来 ----
+        menu_bar = user32.GetMenu(window)
+        popup = user32.GetSubMenu(menu_bar, MENU_INDEX_VIEW)
+        send_bounded(window, WM_INITMENUPOPUP, popup, MENU_INDEX_VIEW)
+        position = None
+        for index in range(user32.GetMenuItemCount(popup)):
+            buffer = ctypes.create_unicode_buffer(128)
+            user32.GetMenuStringW(popup, index, buffer, 128, MF_BYPOSITION)
+            if "工具栏" in buffer.value:
+                position = index
+                break
+        if position is None:
+            print("  FAIL: 视图菜单里没有「工具栏」这一项")
+            return False
+        state = user32.GetMenuState(popup, position, MF_BYPOSITION)
+        if not state & MF_CHECKED:
+            print(f"  FAIL: 工具栏开着时菜单项应当勾上，GetMenuState={state:#x}")
+            return False
+
+        # ---- 4) 关掉工具栏：窗口真藏起来、菜单不勾了、配置里记下来 ----
+        send_bounded(window, WM_COMMAND, CMD_VIEW_TOOLBAR, 0)
+        time.sleep(1.2)
+        if user32.IsWindowVisible(toolbar):
+            print("  FAIL: 关掉之后工具栏应当隐藏")
+            return False
+        send_bounded(window, WM_INITMENUPOPUP, popup, MENU_INDEX_VIEW)
+        state = user32.GetMenuState(popup, position, MF_BYPOSITION)
+        if state & MF_CHECKED:
+            print(f"  FAIL: 关掉之后菜单项不该还勾着，GetMenuState={state:#x}")
+            return False
+        if not wait_config(lambda text: 'visible="no"' in text):
+            print(f"  FAIL: config.xml 里应当记下工具栏不可见\n{read_config()[-400:]}")
+            return False
+        send_bounded(window, WM_COMMAND, CMD_VIEW_TOOLBAR, 0)
+        time.sleep(1.0)
+        if not user32.IsWindowVisible(toolbar):
+            print("  FAIL: 再开一次应当显示回来")
+            return False
+
+        # ---- 5) 定制对话框：删掉第一个按钮 → 界面与配置一起变；恢复默认 → 又回来 ----
+        # 对话框是模态的：SendMessage 要一直占到窗口关掉才返回，这里只能投递
+        user32.PostMessageW(window, WM_COMMAND, CMD_SETTINGS_TOOLBAR, 0)
+        box = wait_dialog()
+        if not box:
+            print("  FAIL: 自定义工具栏对话框没有出现")
+            return False
+        # 窗口刚建出来时子控件与列表内容可能还没填完：等列表满员再往下走
+        current = available = None
+        listed = None
+        deadline = time.time() + 6.0
+        while time.time() < deadline:
+            box = dialog()
+            if box:
+                current = child_with_id(box, TB_DLG_CURRENT)
+                available = child_with_id(box, TB_DLG_AVAILABLE)
+                listed = send_bounded(current, LB_GETCOUNT) if current else None
+                if current and available and listed == len(expected):
+                    break
+            time.sleep(0.2)
+        if not current or not available:
+            print("  FAIL: 对话框里找不到两个列表（可用命令 / 现在的按钮）")
+            close_dialog_if_any()
+            return False
+        if listed != len(expected):
+            print(f"  FAIL: 当前按钮列表应当有 {len(expected)} 项，实际 {listed}")
+            close_dialog_if_any()
+            return False
+        send_bounded(current, LB_SETCURSEL, 0, 0)
+        if not click_button(box, "← 移除"):
+            print("  FAIL: 对话框里找不到「← 移除」按钮")
+            close_dialog_if_any()
+            return False
+        deadline = time.time() + 6.0
+        while time.time() < deadline and send_bounded(current, LB_GETCOUNT) != len(expected) - 1:
+            time.sleep(0.2)
+        if send_bounded(current, LB_GETCOUNT) != len(expected) - 1:
+            print("  FAIL: 移除之后当前列表应当少一项")
+            close_dialog_if_any()
+            return False
+        if not click_button(box, "确定"):
+            print("  FAIL: 对话框里找不到「确定」按钮")
+            close_dialog_if_any()
+            return False
+        if not wait_dialog_gone():
+            print("  FAIL: 点了确定之后对话框应当关掉")
+            return False
+        time.sleep(0.6)
+        pieces = pieces_of(toolbar)
+        if pieces[0] != "打开" or len(pieces) != len(expected) - 1:
+            print(f"  FAIL: 移除「新建」之后第一项应当是「打开」且少一项，实际 "
+                  f"{window_text(toolbar)!r}")
+            return False
+        if not wait_config(lambda text: "cmd.file.open" in text and "cmd.file.new" not in text):
+            config_text = read_config()
+            print(f"  FAIL: 配置里应当只剩改动后的按钮表\n{config_text[-400:]}")
+            return False
+
+        # 恢复默认：按钮表回到代码里那份，配置文件里不再留 <Item>
+        user32.PostMessageW(window, WM_COMMAND, CMD_SETTINGS_TOOLBAR, 0)   # 模态框，投递
+        box = wait_dialog()
+        if not box:
+            print("  FAIL: 第二次打开自定义对话框失败")
+            return False
+        if not click_button(box, "恢复默认"):
+            print("  FAIL: 对话框里找不到「恢复默认」按钮")
+            close_dialog_if_any()
+            return False
+        if not wait_dialog_gone():
+            print("  FAIL: 点了恢复默认之后对话框应当关掉")
+            return False
+        time.sleep(0.6)
+        if pieces_of(toolbar) != expected_as_text:
+            print(f"  FAIL: 恢复默认之后应当回到默认按钮表，实际 {window_text(toolbar)!r}")
+            return False
+        if not wait_config(lambda text: "cmd.file." not in text):
+            print(f"  FAIL: 恢复默认之后配置里不该再留着按钮表\n{read_config()[-400:]}")
+            return False
+    finally:
+        close_dialog_if_any()
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        for name in ("config.xml", "session.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    print(f"  工具栏：默认 {len(expected)} 项按钮逐项核对、点第 {dark_ordinal} 个按钮"
+          "（暗色）真的切换并显示勾选、菜单项勾选态跟着命令状态走、关掉后"
+          "config.xml 记下 visible=no、定制对话框删按钮后界面与配置一起变、"
+          "恢复默认又回到代码里那份表")
+    return True
+
 
 
 def test_compare(root):

@@ -20,6 +20,8 @@ public:
     bool SetCommandText(CmdId id, std::wstring text);
 
     const Command* Find(CmdId id) const;
+    // 按**命令键**找（工具栏按钮表记的是键：ID 是运行期分配的，键是稳定的）
+    const Command* FindByKey(std::wstring_view key) const;
     const std::vector<Command>& All() const noexcept { return commands_; }
     std::vector<CmdId> ByCategory(CmdCategory category) const;
 

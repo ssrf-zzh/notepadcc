@@ -144,6 +144,7 @@ set(NPCC_CORE_SOURCES
     src/core/JsonFormat.cpp
     src/core/XmlFormat.cpp
     src/core/RunCommand.cpp
+    src/core/ToolbarItems.cpp
     src/edit/ColumnEdit.cpp
     src/edit/HexModel.cpp
     src/edit/ColumnText.cpp
@@ -198,7 +199,9 @@ set(NPCC_CORE_SOURCES
     src/shell/StyleConfigDialog.cpp
     src/shell/SearchPanel.cpp
     src/shell/StatusBar.cpp
-    src/shell/TabBar.cpp)
+    src/shell/TabBar.cpp
+    src/shell/ToolBar.cpp
+    src/shell/ToolbarDialog.cpp)
 
 add_library(notepadcc_core STATIC ${NPCC_CORE_SOURCES})
 target_include_directories(notepadcc_core PUBLIC src "${CMAKE_CURRENT_SOURCE_DIR}/plugins-sdk")

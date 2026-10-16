@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "edit/Encoding.h"
+#include "core/ToolbarItems.h"
 
 namespace npcc::core {
 
@@ -72,6 +73,17 @@ struct SearchDefaults {
     std::wstring lastFilter = L"*.txt;*.cpp;*.h;*.hpp;*.md";
 };
 
+// 工具栏（设计文档 2.11 第 6 条）：可见性与按钮表都在配置里。
+// items 为空 = "用代码里那份默认表"——**不是**"一个按钮都不放"：
+// 一个按钮都不放是用户明确删空的结果，那种情况存的是一份只含分隔符被清空的表，
+// 所以这里用"字段缺失"与"空表"两种状态区分（见 ConfigCenter::Save）。
+struct ToolbarConfig {
+    bool         visible = true;
+    int          iconSize = 16;        // 逻辑像素，按 DPI 缩放后使用
+    ToolbarItems items;                // 空 = 用默认表
+    bool         custom = false;       // 用户动过按钮表（区分"没配过"与"配成了空表"）
+};
+
 // 配置中心（设计文档 4.5 / 7.2）。
 //
 // 三条硬性要求，都是"别让配置把程序搞挂"：
@@ -105,6 +117,7 @@ public:
     BackupConfig&   Backup() noexcept { return backup_; }
     LargeFileConfig& LargeFile() noexcept { return largeFile_; }
     SearchDefaults& Search() noexcept { return search_; }
+    ToolbarConfig&  Toolbar() noexcept { return toolbar_; }
 
     const GeneralConfig&  General() const noexcept { return general_; }
     const EditConfig&     Edit() const noexcept { return edit_; }
@@ -112,6 +125,7 @@ public:
     const BackupConfig&   Backup() const noexcept { return backup_; }
     const LargeFileConfig& LargeFile() const noexcept { return largeFile_; }
     const SearchDefaults& Search() const noexcept { return search_; }
+    const ToolbarConfig&  Toolbar() const noexcept { return toolbar_; }
 
     // 加载过程中被回退的属性名，供"关于/诊断"展示
     const std::vector<std::wstring>& Warnings() const noexcept { return warnings_; }
@@ -123,6 +137,7 @@ private:
     BackupConfig    backup_;
     LargeFileConfig largeFile_;
     SearchDefaults  search_;
+    ToolbarConfig   toolbar_;
     std::vector<std::wstring> warnings_;
     long long       lastSaveTick_ = 0;
     bool            dirty_ = false;

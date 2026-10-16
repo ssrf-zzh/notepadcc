@@ -24,6 +24,7 @@
 #include "infra/ThreadPool.h"
 #include "shell/StatusBar.h"
 #include "shell/TabBar.h"
+#include "shell/ToolBar.h"
 #include "shell/FolderPanel.h"
 #include "shell/FunctionListPanel.h"
 #include "shell/HexView.h"
@@ -103,6 +104,8 @@ private:
     void CommandColumnEdit();
     void CommandToggleOverwrite();
     void ApplyConfigToRuntime();
+    // 按配置装配工具栏（按钮表 + 可见性 + 图标大小），随后重排布局
+    void ApplyToolbarConfig();
     void ScheduleAutosave();
     void WriteSnapshots();
     void RemoveSnapshotFor(core::BufferId id);
@@ -123,6 +126,8 @@ private:
     void UpdateSearchProgress();
     void CommandPreferences();
     void CommandManageShortcuts();
+    void CommandToggleToolbar();
+    void CommandCustomizeToolbar();
     void CommandToggleSplit();
     void CommandCyclePane();
     void CommandConvertEol(edit::EolMode target);
@@ -337,6 +342,10 @@ private:
     bool showLineNumbers_ = true;
     bool wrapEnabled_ = false;
     bool darkMode_ = false;
+    // 工具栏（设计文档 2.11 第 6 条）：按钮表存的是命令键，见 core::ToolbarItems
+    ToolBar             toolbar_;
+    core::ToolbarItems  toolbarItems_;
+    bool                toolbarVisible_ = true;
     // 全屏（F11）：进出时把菜单、样式、窗口位置原样存下来，退出时逐项还原——
     // 只记一个"是不是全屏"的布尔量是不够的，还原时要用的东西必须一起留着
     bool            fullScreen_ = false;

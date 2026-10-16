@@ -34,6 +34,7 @@
 #include "shell/RunCommandDialog.h"
 #include "shell/Clipboard.h"
 #include "shell/ComparePickDialog.h"
+#include "shell/ToolbarDialog.h"
 #include "core/Diff.h"
 #include "core/ExportHtml.h"
 #include "core/ExportRtf.h"
@@ -127,6 +128,7 @@ enum : npcc::core::CmdId {
     kCmdViewFullScreen       = npcc::core::MakeCmdId(4, 26),
     kCmdViewGotoMatchBrace   = npcc::core::MakeCmdId(4, 27),
     kCmdViewSummary          = npcc::core::MakeCmdId(4, 28),
+    kCmdViewToolbar          = npcc::core::MakeCmdId(4, 29),
     // 宏（8 类）
     kCmdMacroRecord       = npcc::core::MakeCmdId(8, 1),
     kCmdMacroPlayLast     = npcc::core::MakeCmdId(8, 3),
@@ -196,6 +198,7 @@ enum : npcc::core::CmdId {
     kCmdSettingsRegisterAssoc   = npcc::core::MakeCmdId(7, 3),
     kCmdSettingsUnregisterAssoc = npcc::core::MakeCmdId(7, 4),
     kCmdSettingsPlugins         = npcc::core::MakeCmdId(7, 5),
+    kCmdSettingsToolbar         = npcc::core::MakeCmdId(7, 6),
     // 界面语言（设置类）：一个语言一条，编号跟着"有哪些语言包"走
     kLanguageCommandBase        = 128,
 
@@ -314,6 +317,29 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
 
             tabBar_.Create(hwnd_, 1);
             statusBar_.Create(hwnd_, 2);
+            // 工具栏（设计文档 2.11 第 6 条）：按钮表存命令键，显示文本 / 可用 /
+            // 勾选全问命令注册表，点了按钮就按命令执行——所以"宏、运行命令、插件命令
+            // 也能上工具栏"是白拿的，不用给它们各写一条工具栏通道
+            ToolBar::RegisterWindowClass(::GetModuleHandleW(nullptr));
+            toolbar_.Create(hwnd_, 8);
+            toolbar_.SetKeyResolver([this](const std::wstring& key) -> core::CmdId {
+                const core::Command* command = registry_.FindByKey(key);
+                return command != nullptr ? command->id : 0;
+            });
+            toolbar_.SetTextQuery([this](core::CmdId id) -> std::wstring {
+                const core::Command* command = registry_.Find(id);
+                return command != nullptr ? core::StripAccelerator(command->text)
+                                          : std::wstring();
+            });
+            toolbar_.SetEnabledQuery(
+                [this](core::CmdId id) { return registry_.IsEnabled(id, Context()); });
+            toolbar_.SetCheckedQuery(
+                [this](core::CmdId id) { return registry_.IsChecked(id, Context()); });
+            toolbar_.SetInvoke([this](core::CmdId id) {
+                registry_.Execute(id, Context());
+                UpdateDocumentInfo();
+                toolbar_.Refresh();   // 按钮自己的可用 / 勾选态可能刚变了
+            });
             FolderPanel::RegisterWindowClass(::GetModuleHandleW(nullptr));
             folderPanel_.Create(hwnd_, 3);
             FunctionListPanel::RegisterWindowClass(::GetModuleHandleW(nullptr));
@@ -427,6 +453,10 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             if (menu_ != nullptr) {
                 ::SetMenu(hwnd_, menu_);
             }
+            // 工具栏要在命令（含宏、插件、运行命令）都注册好之后才装配：
+            // 配置里记的是命令键，早一步装配就会有键查不到
+            toolbar_.SetDark(darkMode_);
+            ApplyToolbarConfig();
             // 语言包盖不住哪些键，启动时就写进日志：英文界面里冒出中文时，
             // 这条日志是唯一的线索（设计文档 6.6 第 2 条）
             ReportMissingLanguageKeys();
@@ -477,6 +507,36 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
         case WM_SIZE:
             LayoutChildren();
             return 0;
+        case WM_INITMENUPOPUP: {
+            // 菜单的勾选态与灰显在**菜单要显示出来的时候**才刷（设计文档 1.3 规则 1：
+            // 勾选态由命令注册表回答）。这一条此前整类缺失——`queryChecked` 装上了，
+            // 但没有任何地方读它，所有可勾命令的菜单项从来不显示勾。
+            HMENU menu = reinterpret_cast<HMENU>(wParam);
+            if (menu == nullptr) {
+                return 0;
+            }
+            const int count = ::GetMenuItemCount(menu);
+            const core::CmdContext context = Context();
+            for (int position = 0; position < count; ++position) {
+                const UINT id = ::GetMenuItemID(menu, position);
+                if (id == 0 || id == static_cast<UINT>(-1)) {
+                    continue;   // 分隔符与子菜单挂点：没有自己的命令
+                }
+                const auto command = static_cast<core::CmdId>(id);
+                if (registry_.Find(command) == nullptr) {
+                    continue;
+                }
+                ::CheckMenuItem(menu, static_cast<UINT>(position),
+                                (registry_.IsChecked(command, context) ? MF_CHECKED
+                                                                       : MF_UNCHECKED) |
+                                    MF_BYPOSITION);
+                ::EnableMenuItem(menu, static_cast<UINT>(position),
+                                 (registry_.IsEnabled(command, context) ? MF_ENABLED
+                                                                        : MF_GRAYED) |
+                                     MF_BYPOSITION);
+            }
+            return 0;
+        }
         case WM_SETFOCUS: {
             if (edit::Document* document = documents_->Active(); document != nullptr && document->view) {
                 ::SetFocus(document->view->Handle());
@@ -559,6 +619,7 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             const auto id = static_cast<core::CmdId>(controlId);
             const core::CmdContext context = Context();
             const core::ExecResult executed = registry_.Execute(id, context);
+            toolbar_.Refresh();   // 命令可能改了"哪个按钮现在可用 / 有勾"
             if (executed == core::ExecResult::Disabled && id >= 0x1000) {
                 // "点了没反应"的另一种来路：命令注册了但当前不该可用。同样要留痕，
                 // 否则只能靠人肉二分猜。
@@ -1041,6 +1102,8 @@ void MainWindow::RegisterCommands() {
         [this](const CmdContext&) { CommandGotoMatchingBrace(); });
     add(kCmdViewSummary, CmdCategory::View, L"cmd.view.summary", L"摘要(&S)...",
         needsBuffer, [this](const CmdContext&) { CommandShowSummary(); });
+    add(kCmdViewToolbar, CmdCategory::View, L"cmd.view.toolbar", L"工具栏(&T)",
+        core::kCmdCheckable, [this](const CmdContext&) { CommandToggleToolbar(); });
 
     // ---- 格式（行尾转换）----
     add(kCmdFormatEolCrlf, CmdCategory::Format, L"cmd.format.eolCrlf", L"转为 Windows 行尾（CRLF）",
@@ -1243,6 +1306,9 @@ void MainWindow::RegisterCommands() {
     add(kCmdSettingsPlugins, CmdCategory::Settings, L"cmd.settings.plugins",
         L"插件管理器(&G)...", core::kCmdNone,
         [this](const CmdContext&) { CommandPluginManager(); });
+    add(kCmdSettingsToolbar, CmdCategory::Settings, L"cmd.settings.toolbar",
+        L"自定义工具栏(&T)...", core::kCmdNone,
+        [this](const CmdContext&) { CommandCustomizeToolbar(); });
     // ---- 运行 ----
     // 用户自己存的那些命令由 RegisterRunCommands() 在加载配置之后补上
     add(kCmdRunDialog, CmdCategory::Run, L"cmd.run.dialog", L"运行(&R)...", core::kCmdNone,
@@ -1275,6 +1341,7 @@ void MainWindow::RegisterCommands() {
     bindChecked(kCmdViewMarkdownPreview, [this] { return markdownPreviewVisible_; });
     bindChecked(kCmdViewJsonTree, [this] { return jsonTreeVisible_; });
     bindChecked(kCmdViewFullScreen, [this] { return fullScreen_; });
+    bindChecked(kCmdViewToolbar, [this] { return toolbarVisible_; });
     // "跳到偏移"只在十六进制视图里才有意义：不在的时候灰掉，而不是点了没反应
     if (core::Command* hexGoTo =
             const_cast<core::Command*>(registry_.Find(kCmdViewHexGoTo));
@@ -1409,9 +1476,16 @@ void MainWindow::LayoutChildren() const {
     ::GetClientRect(hwnd_, &client);
     statusBar_.Resize(client);
 
+    // 工具栏在最上面一条：它占掉的高度要让给下面的标签栏与面板，
+    // 所以先算出来，再拿它当"上边距"
+    const int toolbarHeight = toolbar_.Visible() ? toolbar_.Height() : 0;
+    if (toolbar_.Handle() != nullptr) {
+        ::MoveWindow(toolbar_.Handle(), 0, 0, client.right, toolbarHeight, TRUE);
+    }
+
     const int tabHeight = tabBar_.Height();
     if (tabBar_.Handle() != nullptr) {
-        ::MoveWindow(tabBar_.Handle(), 0, 0, client.right, tabHeight, TRUE);
+        ::MoveWindow(tabBar_.Handle(), 0, toolbarHeight, client.right, tabHeight, TRUE);
     }
 
     int bottomInset = statusBar_.Height();
@@ -1439,7 +1513,7 @@ void MainWindow::LayoutChildren() const {
     if (panelWidth > 0) {
         RECT column{};
         column.left = 0;
-        column.top = tabHeight;
+        column.top = toolbarHeight + tabHeight;
         column.right = panelWidth;
         column.bottom = client.bottom - bottomInset;
         if (column.bottom > column.top) {
@@ -1461,7 +1535,7 @@ void MainWindow::LayoutChildren() const {
 
     RECT viewRect{};
     viewRect.left = panelWidth;
-    viewRect.top = tabHeight;
+    viewRect.top = toolbarHeight + tabHeight;
     viewRect.right = client.right;
     viewRect.bottom = client.bottom - bottomInset;
     if (viewRect.bottom < viewRect.top) {
@@ -4976,6 +5050,7 @@ void MainWindow::CommandToggleDarkMode() {
     documents_->SetPalette(darkMode_ ? edit::EditorPalette::Dark() : edit::EditorPalette::Light());
     ApplyStyleSchemeToAllViews();
     hexView_.SetDark(darkMode_);   // 十六进制视图的自绘配色也跟着走
+    toolbar_.SetDark(darkMode_);   // 工具栏同样（浅底/深底两套，不然深色下一条白杠）
     markdownPreview_.SetDark(darkMode_);
     jsonTreePanel_.SetDark(darkMode_);
 }
@@ -5043,6 +5118,57 @@ bool MainWindow::ExitFullScreenOnEscape() {
 }
 
 // ---- 跳到匹配括号（Ctrl+B，设计文档 2.1 第 5 条）----
+// ---- 工具栏（设计文档 2.11 第 6 条）----
+// 按钮表记的是**命令键**：宏、运行命令、插件命令注册进来之后照样能被摆上去。
+// 配置里存键而不是 ID，是因为 ID 是运行期分配的，重启一次就对不上了。
+void MainWindow::ApplyToolbarConfig() {
+    const core::ToolbarConfig& config = config_.Toolbar();
+    const auto known = [this](const std::wstring& key) {
+        return registry_.FindByKey(key) != nullptr;
+    };
+    const core::ToolbarItems& source =
+        config.custom ? config.items : core::DefaultToolbarItems();
+    toolbarItems_ = core::NormalizeToolbarItems(source, known);
+    if (config.custom) {
+        // 键认不出来就记一笔：宏被删、插件没装都会走到这儿。静默丢掉会让人
+        // 对着配置文件百思不得其解（"我明明配了它"）
+        for (const std::wstring& key : config.items) {
+            if (key != core::kToolbarSeparator && registry_.FindByKey(key) == nullptr) {
+                infra::LogWarn(L"toolbar", L"按钮表里的命令现在不存在，已跳过: " + key);
+            }
+        }
+    }
+    toolbarVisible_ = config.visible;
+    toolbar_.SetIconSize(config.iconSize);
+    toolbar_.SetItems(toolbarItems_);
+    toolbar_.SetVisible(toolbarVisible_);
+    LayoutChildren();
+}
+
+void MainWindow::CommandToggleToolbar() {
+    toolbarVisible_ = !toolbarVisible_;
+    config_.Toolbar().visible = toolbarVisible_;
+    config_.RequestSave();
+    toolbar_.SetVisible(toolbarVisible_);
+    LayoutChildren();
+    toolbar_.Refresh();
+}
+
+void MainWindow::CommandCustomizeToolbar() {
+    ToolbarPicks picks;
+    if (!CustomizeToolbar(hwnd_, registry_, toolbarItems_, picks)) {
+        return;   // 取消：配置一个字节都不动
+    }
+    core::ToolbarConfig& config = config_.Toolbar();
+    config.custom = picks.custom;
+    // "恢复默认"存回的就是**空表 + custom=false**：写进文件的默认表会变成
+    // 一份"将来的默认表改了、这份文件还钉着旧表"的历史包袱
+    config.items = picks.custom ? picks.items : core::ToolbarItems();
+    config_.SaveNow();   // 用户刚做的改动，不等那 1 秒的合并窗口
+    ApplyToolbarConfig();
+    statusBar_.SetMessage(core::Tr(L"status.toolbarUpdated", L"工具栏已更新"));
+}
+
 // 设计里写的是"失败时给出状态栏提示而非静默无响应"：点了没反应是最难排查的那类问题。
 void MainWindow::CommandGotoMatchingBrace() {
     edit::Document* document = documents_ != nullptr ? documents_->Active() : nullptr;
