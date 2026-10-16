@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <unordered_set>
 
 namespace npcc::edit {
 namespace {
@@ -571,6 +572,135 @@ bool UrlDecode(std::string_view text, std::string& out) {
     }
     out = std::move(decoded);
     return true;
+}
+
+namespace {
+
+bool IsWordStart(char ch) {
+    // 注意：char 在不同平台上是否有符号不一样，先转 unsigned 再比，免得
+    // "ch >= 0x80" 在无符号 char 下永远为假（编译器会直接警告出来）
+    const unsigned char byte = static_cast<unsigned char>(ch);
+    return (byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z') || byte == '_' ||
+           byte >= 0x80;
+}
+
+bool IsWordBody(char ch) {
+    const unsigned char byte = static_cast<unsigned char>(ch);
+    return IsWordStart(ch) || (byte >= '0' && byte <= '9');
+}
+
+char LowerOf(char ch) {
+    return (ch >= 'A' && ch <= 'Z') ? static_cast<char>(ch - 'A' + 'a') : ch;
+}
+
+bool StartsWithIgnoreCase(std::string_view word, std::string_view prefix) {
+    if (word.size() < prefix.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < prefix.size(); ++i) {
+        if (LowerOf(word[i]) != LowerOf(prefix[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+std::vector<std::string> CollectWords(std::string_view text, std::size_t minLength,
+                                      std::size_t limit, std::string_view prefix) {
+    std::vector<std::string> words;
+    if (text.empty() || limit == 0) {
+        return words;
+    }
+    words.reserve(limit);
+    std::unordered_set<std::string> seen;   // 小写化后的键：去重必须 O(1)
+    seen.reserve(limit * 2);
+    std::size_t index = 0;
+    while (index < text.size() && words.size() < limit) {
+        if (!IsWordStart(text[index])) {
+            ++index;
+            continue;
+        }
+        const std::size_t start = index;
+        while (index < text.size() && IsWordBody(text[index])) {
+            ++index;
+        }
+        const std::string_view word = text.substr(start, index - start);
+        if (word.size() < minLength || !StartsWithIgnoreCase(word, prefix)) {
+            continue;
+        }
+        // 去重时忽略大小写（同一个词的几种写法不该在列表里出现多次），保留首次出现的写法
+        if (seen.insert(LowerAscii(word)).second) {
+            words.emplace_back(word);
+        }
+    }
+    std::sort(words.begin(), words.end(),
+              [](const std::string& a, const std::string& b) {
+                  const std::size_t count = std::min(a.size(), b.size());
+                  for (std::size_t i = 0; i < count; ++i) {
+                      if (LowerOf(a[i]) != LowerOf(b[i])) {
+                          return LowerOf(a[i]) < LowerOf(b[i]);
+                      }
+                  }
+                  return a.size() < b.size();
+              });
+    return words;
+}
+
+std::vector<std::string> ParseWordList(std::string_view text) {
+    std::vector<std::string> words;
+    std::size_t index = 0;
+    while (index < text.size()) {
+        // 整行注释：'#' 到行尾跳过
+        if (text[index] == '#') {
+            while (index < text.size() && text[index] != '\n') {
+                ++index;
+            }
+            continue;
+        }
+        if (IsAsciiSpace(text[index])) {
+            ++index;
+            continue;
+        }
+        const std::size_t start = index;
+        while (index < text.size() && !IsAsciiSpace(text[index])) {
+            ++index;
+        }
+        words.emplace_back(text.substr(start, index - start));
+    }
+    return words;
+}
+
+std::vector<std::string> FilterByPrefix(const std::vector<std::string>& words,
+                                        std::string_view prefix, std::size_t limit) {
+    std::vector<std::string> result;
+    if (prefix.empty()) {
+        result = words;
+        if (result.size() > limit) {
+            result.resize(limit);
+        }
+        return result;
+    }
+    for (const std::string& word : words) {
+        if (word.size() < prefix.size()) {
+            continue;
+        }
+        bool matches = true;
+        for (std::size_t i = 0; i < prefix.size(); ++i) {
+            if (LowerOf(word[i]) != LowerOf(prefix[i])) {
+                matches = false;
+                break;
+            }
+        }
+        if (matches) {
+            result.push_back(word);
+            if (result.size() >= limit) {
+                break;
+            }
+        }
+    }
+    return result;
 }
 
 std::string EscapeHtml(std::string_view text) {

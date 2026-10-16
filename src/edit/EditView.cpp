@@ -260,6 +260,52 @@ void EditView::MoveCurrentLineDown() const {
     Send(SCI_MOVESELECTEDLINESDOWN);
 }
 
+void EditView::ShowCompletion(const std::vector<std::string>& words) const {
+    if (words.empty()) {
+        CancelCompletion();
+        return;
+    }
+    std::string list;
+    for (const std::string& word : words) {
+        if (word.empty()) {
+            continue;
+        }
+        if (!list.empty()) {
+            list.push_back(' ');
+        }
+        list += word;
+    }
+    if (list.empty()) {
+        CancelCompletion();
+        return;
+    }
+    // 空格分隔、忽略大小写：用户在 "STR" 后面按补全，也该能看到 "string"
+    Send(SCI_AUTOCSETSEPARATOR, ' ');
+    Send(SCI_AUTOCSETIGNORECASE, 1);
+    Send(SCI_AUTOCSETORDER, SC_ORDER_PERFORMSORT);
+    // 第二个参数是"要被替换掉的前缀长度"：光标前已经输入的那截词
+    const int32_t caret = CaretPosition();
+    const int32_t start = WordStartPosition();
+    const uintptr_t prefixLength =
+        static_cast<uintptr_t>(caret > start ? caret - start : 0);
+    Send(SCI_AUTOCSHOW, prefixLength,
+         reinterpret_cast<intptr_t>(list.c_str()));
+}
+
+int32_t EditView::WordStartPosition() const {
+    const int32_t caret = static_cast<int32_t>(Send(SCI_GETCURRENTPOS));
+    return static_cast<int32_t>(
+        Send(SCI_WORDSTARTPOSITION, static_cast<uintptr_t>(caret), 1));
+}
+
+bool EditView::CompletionActive() const {
+    return Send(SCI_AUTOCACTIVE) != 0;
+}
+
+void EditView::CancelCompletion() const {
+    Send(SCI_AUTOCCANCEL);
+}
+
 std::string EditView::GetAllText() const {
     const intptr_t length = Send(SCI_GETLENGTH);
     if (length <= 0) {

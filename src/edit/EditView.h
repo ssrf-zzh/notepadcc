@@ -257,6 +257,15 @@ public:
     void MoveCurrentLineUp() const;
     void MoveCurrentLineDown() const;
 
+    // ---- 自动完成（设计文档 2.6 第 6 条）----
+    // 候选词由外壳收集（文档内提词 + 语言词库），这里只负责把它交给 Scintilla 显示。
+    // 列表用空格分隔（Scintilla 的约定），所以词里不能带空格——收集时已经保证了。
+    void ShowCompletion(const std::vector<std::string>& words) const;
+    bool CompletionActive() const;
+    void CancelCompletion() const;
+    // 光标处这个词的起点（用于取"已输入的前缀"）
+    int32_t WordStartPosition() const;
+
 private:
     HWND hwnd_ = nullptr;
     mutable const wchar_t* languageName_ = L"普通文本";

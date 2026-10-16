@@ -30,6 +30,8 @@
 #include "core/ShortcutStore.h"
 #include "infra/SingleInstance.h"
 #include "infra/FileAssociation.h"
+#include "infra/Paths.h"
+#include "io/FileReader.h"
 
 namespace npcc::shell {
 namespace {
@@ -125,6 +127,7 @@ enum : npcc::core::CmdId {
     kCmdToolBlockComment    = npcc::core::MakeCmdId(14, 28),
     kCmdToolExportLanguages = npcc::core::MakeCmdId(14, 29),
     kCmdToolStyleConfigurator = npcc::core::MakeCmdId(14, 30),
+    kCmdEditAutoComplete = npcc::core::MakeCmdId(2, 33),
 
     kCmdWindowNext = npcc::core::MakeCmdId(11, 1),
     kCmdWindowPrev = npcc::core::MakeCmdId(11, 2),
@@ -660,6 +663,9 @@ void MainWindow::RegisterCommands() {
     add(kCmdEditToggleOverwrite, CmdCategory::Edit, L"cmd.edit.toggleOverwrite",
         L"插入/改写模式(&V)", needsBuffer,
         [this](const CmdContext&) { CommandToggleOverwrite(); });
+    add(kCmdEditAutoComplete, CmdCategory::Edit, L"cmd.edit.autoComplete",
+        L"自动完成(&A)", needsWritable,
+        [this](const CmdContext&) { CommandAutoComplete(); });
 
     // ---- 搜索 ----
     add(kCmdSearchFind, CmdCategory::Search, L"cmd.search.find", L"查找(&F)...",
@@ -1012,6 +1018,7 @@ void MainWindow::RegisterCommands() {
     registry_.BindShortcut(kCmdToolLowerCase, ctrl, 'U', true);
     registry_.BindShortcut(kCmdToolToggleComment, ctrl, 'Q', true);
     registry_.BindShortcut(kCmdToolBlockComment, ctrlShift, 'Q', true);
+    registry_.BindShortcut(kCmdEditAutoComplete, ctrl, VK_SPACE, true);
 }
 
 void MainWindow::RebuildMenu() {
@@ -2767,6 +2774,58 @@ void MainWindow::CommandToggleComment(bool block) {
             return edit::ToggleLineComment(text, prefix);
         },
         L"注释/取消注释");
+}
+
+void MainWindow::CommandAutoComplete() {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr) {
+        return;
+    }
+    edit::EditView& view = *document->view;
+    if (document->buffer.isReadOnly) {
+        return;   // 只读文档连补全都没意义
+    }
+
+    // 先算"光标前已经输入的前缀"：文档提词只收以它开头的词，这样大文件上也只是
+    // 一遍线性扫描，不必把整篇的词都收下来（5 MB 的文件曾因此卡住界面 54 秒）。
+    const int32_t caret = view.CaretPosition();
+    const int32_t wordStart = view.WordStartPosition();
+    const std::string prefix =
+        wordStart < caret ? view.TextRange(wordStart, caret) : std::string();
+
+    // 来源一：文档内已出现的词（最快，也最贴近用户当前在写什么）
+    std::vector<std::string> words = edit::CollectWords(
+        view.TextRange(0, static_cast<int32_t>(view.ByteLength())), 3, 4000, prefix);
+
+    // 来源二：语言词库文件 <配置目录>\api\<语言>.api —— 一行一个词或几个词都行，
+    // '#' 开头算注释。词库缺失是常态，不报错。
+    const std::wstring language = view.LanguageName();
+    if (!language.empty() && language != L"null") {
+        const std::filesystem::path apiPath =
+            infra::ConfigRoot() / L"api" / (language + L".api");
+        if (::GetFileAttributesW(apiPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            const io::ReadResult read = io::ReadWholeFile(apiPath.wstring(), 8ull * 1024 * 1024);
+            if (read.ok) {
+                const std::vector<std::string> apiWords = edit::ParseWordList(read.bytes);
+                words.insert(words.end(), apiWords.begin(), apiWords.end());
+            } else {
+                infra::LogWarn(L"complete", L"词库读取失败: " + apiPath.wstring());
+            }
+        }
+    }
+    if (words.empty()) {
+        return;
+    }
+
+    // 词库那边的词还没筛过前缀（词库通常很小，筛一遍不值几个钱）
+    const std::vector<std::string> candidates = edit::FilterByPrefix(words, prefix, 300);
+    if (candidates.empty()) {
+        view.CancelCompletion();
+        return;
+    }
+    view.ShowCompletion(candidates);
+    infra::LogInfo(L"complete", L"自动完成：前缀 \"" + std::wstring(prefix.begin(), prefix.end()) +
+                                    L"\" 给出 " + std::to_wstring(candidates.size()) + L" 个候选");
 }
 
 void MainWindow::ApplyStyleSchemeToAllViews() {

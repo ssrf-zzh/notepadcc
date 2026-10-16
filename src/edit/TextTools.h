@@ -67,4 +67,19 @@ bool UrlDecode(std::string_view text, std::string& out);
 std::string EscapeHtml(std::string_view text);
 std::string UnescapeHtml(std::string_view text);
 
+// ---- 自动完成的候选词（设计文档 2.6 第 6 条）----
+// 从文本里扒出"像标识符"的词（字母、下划线或高位字节开头，长度 >= minLength），去重后按
+// 字典序。纯函数：文档内提词是最快的来源，不该为了它去碰窗口或磁盘。
+//
+// prefix 非空时只收以它开头的词（忽略大小写）——**这是给大文件准备的**：一次 Ctrl+Space
+// 要扫完整篇（几十 MB 也就是几十毫秒），但绝不能把整篇的词都收下来再筛（实测 5 MB 文件
+// 会卡住界面 54 秒）。去重走哈希表，收到 limit 个就停。
+std::vector<std::string> CollectWords(std::string_view text, std::size_t minLength,
+                                      std::size_t limit, std::string_view prefix = {});
+// 解析词库文件：按空白分隔，忽略空项与以 '#' 开头的行（方便在文件里写注释）
+std::vector<std::string> ParseWordList(std::string_view text);
+// 按前缀筛候选词（忽略大小写，保留原始大小写），并截到 limit 个
+std::vector<std::string> FilterByPrefix(const std::vector<std::string>& words,
+                                        std::string_view prefix, std::size_t limit);
+
 }  // namespace npcc::edit

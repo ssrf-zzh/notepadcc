@@ -86,8 +86,29 @@ void CheckEqual(const std::string& actual, const std::string& expected, const ch
     }
 }
 
+// 每段报出"本段多少项检查"：文档里那些"这一段占 N 项"的说法才有人能核对，
+// 也不至于总数一涨就变成谁也说不清对不对的旧数字。
+void PrintSection(const char* name, int count) {
+    std::printf("  %s（%d 项）\n", name, count);
+}
+
+const char* g_sectionName = nullptr;
+int g_sectionStart = 0;
+
 void Section(const char* name) {
-    std::printf("  %s\n", name);
+    // 段名在下一段开始（或收尾）时才打印，此时才知道这一段跑了多少项
+    if (g_sectionName != nullptr) {
+        PrintSection(g_sectionName, g_checks - g_sectionStart);
+    }
+    g_sectionName = name;
+    g_sectionStart = g_checks;
+}
+
+void FinishSections() {
+    if (g_sectionName != nullptr) {
+        PrintSection(g_sectionName, g_checks - g_sectionStart);
+        g_sectionName = nullptr;
+    }
 }
 
 std::string ToUtf8(const std::wstring& text) {
@@ -2687,6 +2708,56 @@ int main() {
             Check(EscapeHtml("") == "" && UnescapeHtml("") == "", "空串两头都不出错");
         }
 
+        // 自动完成的候选词：去重、忽略大小写、按前缀筛、词库文件解析
+        Section("自动完成候选词（CollectWords / ParseWordList / FilterByPrefix）");
+        {
+            const std::vector<std::string> words = CollectWords("alpha beta gamma alpha", 3, 100);
+            Check(words.size() == 3, "文档提词去重");
+            Check(words[0] == "alpha" && words[1] == "beta" && words[2] == "gamma",
+                  "文档提词按字典序");
+            Check(CollectWords("ab cd ef", 3, 100).empty(), "短词被过滤掉");
+            Check(CollectWords("123 abc", 3, 100) == std::vector<std::string>{"abc"},
+                  "纯数字不算词");
+            Check(CollectWords("Alpha alpha ALPHA", 3, 100).size() == 1,
+                  "忽略大小写去重（同一个词的三种写法算一个）");
+            Check(CollectWords("Alpha alpha", 3, 100)[0] == "Alpha",
+                  "去重时保留首次出现的写法");
+            Check(CollectWords("_x1 foo", 2, 100).size() == 2, "下划线开头的也算词");
+            Check(CollectWords("aaa bbb ccc", 3, 2).size() == 2, "候选数量受上限约束");
+            Check(CollectWords("中文 测试", 2, 100).size() == 2, "中文也能当词（按字节走）");
+            Check(CollectWords("alpha beta gamma", 3, 100, "al") ==
+                      std::vector<std::string>{"alpha"},
+                  "给了前缀就只收以它开头的词");
+            Check(CollectWords("alpha beta gamma", 3, 100, "AL").size() == 1,
+                  "前缀同样忽略大小写");
+
+            // 大输入：必须"边收边停"，不能把整篇的词收完再截。这里造 2 万个各不相同的词，
+            // 收 100 个就返回；同时前缀命中的词在文末也要找得到（说明确实扫到了末尾）。
+            // 之前那版对同一个输入会跑成 O(词数 × 去重表大小)，5 MB 的文件能卡住界面 54 秒。
+            std::string big;
+            big.reserve(400000);
+            for (int i = 0; i < 20000; ++i) {
+                big += "identifier";
+                big += std::to_string(i);
+                big += " = 0;\n";
+            }
+            const std::vector<std::string> limited = CollectWords(big, 3, 100);
+            Check(limited.size() == 100, "大输入下候选数量仍然受上限约束");
+            Check(CollectWords(big, 3, 100, "identifier19999").size() == 1,
+                  "前缀命中的词在文末也能提到（提词扫到了整篇）");
+
+            const std::vector<std::string> parsed = ParseWordList("a b\n# 注释行\nc\n\n");
+            Check(parsed.size() == 3 && parsed[0] == "a" && parsed[2] == "c",
+                  "词库文件按空白分隔、# 行跳过");
+            Check(ParseWordList("").empty(), "空词库解析出空列表");
+
+            const std::vector<std::string> pool = {"Alpha", "beta", "gamma"};
+            Check(FilterByPrefix(pool, "al", 10) == std::vector<std::string>{"Alpha"},
+                  "按前缀筛选（忽略大小写）");
+            Check(FilterByPrefix(pool, "", 2).size() == 2, "空前缀返回全部并受上限约束");
+            Check(FilterByPrefix(pool, "zz", 10).empty(), "没有匹配返回空");
+        }
+
         // 注释：加与取消要往返，缩进要保留，空行不要被动
         {
             Check(ToggleLineComment("a\nb\n", "//") == "// a\n// b\n", "加行注释");
@@ -3180,6 +3251,7 @@ int main() {
         }
     }
 
+    FinishSections();
     std::printf("\n结果: %d 项检查, %d 项失败\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

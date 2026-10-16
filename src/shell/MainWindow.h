@@ -114,6 +114,7 @@ private:
     void CommandExportLanguageDefs();
     void CommandStyleConfigurator();
     void ApplyStyleSchemeToAllViews();
+    void CommandAutoComplete();
     const edit::LanguageDef* ActiveLanguage() const;
     void WriteConvertBackup(const std::wstring& path) const;
     void CommandRegisterAssociations(bool registerThem);

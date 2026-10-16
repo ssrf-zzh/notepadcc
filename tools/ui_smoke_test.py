@@ -127,6 +127,7 @@ CMD_TOOL_TOGGLE_COMMENT = (14 << 12) | 27
 CMD_TOOL_BLOCK_COMMENT = (14 << 12) | 28
 CMD_TOOL_EXPORT_LANGS = (14 << 12) | 29
 CMD_TOOL_STYLE_CONFIG = (14 << 12) | 30
+CMD_EDIT_AUTOCOMPLETE = (2 << 12) | 33
 
 COLUMN_TEMPLATE_EDIT = 751
 COLUMN_INSERT_BUTTON = 758
@@ -155,6 +156,8 @@ SCI_VISIBLEFROMDOCLINE = 2220
 SCI_GETFOLDLEVEL = 2223
 SCI_GETFOLDEXPANDED = 2230
 SCI_STYLEGETFORE = 2481
+SCI_AUTOCACTIVE = 2102
+SCI_GOTOPOS = 2025
 SC_FOLDLEVELHEADERFLAG = 0x2000
 SCI_GETFIRSTVISIBLELINE = 2152
 SCI_GETMODIFY = 2159
@@ -309,6 +312,20 @@ def wait_for_main_window(title, timeout=45.0):
 def current_line(scinti):
     position = user32.SendMessageW(scinti, SCI_GETCURRENTPOS, 0, 0)
     return user32.SendMessageW(scinti, SCI_LINEFROMPOSITION, position, 0)
+
+
+def wait_until_responsive(hwnd, timeout=15.0):
+    """等 UI 线程腾出手来，返回从调用起到它回话的秒数（一直不回则返回 None）。
+
+    量的是"按下某个键之后窗口多久还能理我"。发的是 WM_NULL——它什么也不做，
+    但必须由 UI 线程亲自取出消息才会回话，所以等待时间就是界面被占住的时长。
+    """
+    start = time.time()
+    while time.time() - start < timeout:
+        if send_bounded(hwnd, WM_NULL, timeout_ms=500) is not None:
+            return time.time() - start
+        time.sleep(0.2)
+    return None
 
 
 def test_bookmarks(main_window):
@@ -681,8 +698,26 @@ def test_large_file(root):
             print(f"  FAIL: 装载长度不符，编辑器 {length} vs 文件 {expected}")
             return False
 
+        # 顺手在大文件上按一次自动完成：这一下**曾经卡住界面 54 秒**（文档内提词的
+        # 去重是线性扫描，而且收完才截断），所以这里既量"多久回话"也核对候选框出来了。
+        user32.SendMessageW(scinti, SCI_GOTOPOS, length, 0)
+        time.sleep(0.3)
+        user32.PostMessageW(window, WM_COMMAND, CMD_EDIT_AUTOCOMPLETE, 0)
+        response = wait_until_responsive(window, timeout=15.0)
+        if response is None:
+            print("  FAIL: 大文件上按自动完成之后窗口一直不回话（界面被卡死）")
+            return False
+        if response > 5.0:
+            print(f"  FAIL: 大文件上自动完成让界面卡了 {response:.1f} 秒（上限 5 秒）")
+            return False
+        if user32.SendMessageW(scinti, SCI_AUTOCACTIVE, 0, 0) == 0:
+            print("  FAIL: 大文件上按自动完成没有候选框")
+            return False
+        user32.PostMessageW(scinti, WM_KEYDOWN, 0x1B, 0)   # Esc 取消，别把候选框留给后面
+        time.sleep(0.3)
+
         print(f"  大文件分档：{size_mb:.1f} MB 文件以{elapsed:.1f} 秒进入大文件模式，"
-              f"装载长度一致")
+              f"装载长度一致，自动完成 {response:.2f} 秒内回话")
         return True
     finally:
         if window:
@@ -929,6 +964,130 @@ def appdata_snapshot():
         for name in names:
             found.append(os.path.relpath(os.path.join(base, name), target))
     return sorted(found)
+
+
+def test_auto_complete(root):
+    """自动完成：文档内提词与语言词库两个来源都要真的能补出词来。
+
+    验证方式是"按下补全键 → 回车"之后**读文档内容**：补全如果只是弹了个框，
+    内容不会变；只有候选与插入真的接上了，才会看到词被替换进去。
+    """
+    work = os.path.join(root, "build", "complete_test")
+    os.makedirs(work, exist_ok=True)
+    path = os.path.join(work, "sample.cpp")
+    # 开头放 "de"（词库里没有 de 开头的词，只有 API 词库里的 delta 能补上），
+    # 结尾放 "be"（文档里有 beta）
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write("de\nalpha\nbeta\ngamma\nbe")
+
+    cfg = os.path.join(root, "build", "bin", "config")
+    apiDir = os.path.join(cfg, "api")
+    os.makedirs(apiDir, exist_ok=True)
+    for name in ("config.xml", "session.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+    apiFile = os.path.join(apiDir, "cpp.api")
+    with open(apiFile, "w", encoding="utf-8", newline="") as handle:
+        handle.write("delta\n# 这行是注释\n")
+
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - sample.cpp")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到可见的编辑控件")
+            return False
+
+        # 1) 语言词库：光标放在开头的 "de" 之后，候选里只可能是词库里的 delta
+        user32.SendMessageW(scinti, SCI_GOTOPOS, 2, 0)
+        time.sleep(0.3)
+        user32.PostMessageW(window, WM_COMMAND, CMD_EDIT_AUTOCOMPLETE, 0)
+        time.sleep(0.8)
+        if user32.SendMessageW(scinti, SCI_AUTOCACTIVE, 0, 0) == 0:
+            print("  FAIL: 按下自动完成之后候选列表没出现")
+            return False
+        user32.PostMessageW(scinti, WM_KEYDOWN, 0x0D, 0)   # 回车选中第一个候选
+        time.sleep(0.8)
+        # 断言整篇内容而不是"开头是不是 delta"：前缀为空的补全会把词插到光标处，
+        # 只查开头会漏掉"插错位置"这类错误。
+        text = scinti_text(scinti)
+        expected = "delta\nalpha\nbeta\ngamma\nbe"
+        if text != expected:
+            print(f"  FAIL: 词库补全该把 de 补成 delta，期望 {expected!r}，实际 {text!r}")
+            return False
+        if user32.SendMessageW(scinti, SCI_GETCURRENTPOS, 0, 0) != 5:
+            print("  FAIL: 补全之后光标该停在插入的词之后")
+            return False
+
+        # 2) 文档内提词：光标移到末尾（"be" 之后），候选是文档里的 beta
+        length = user32.SendMessageW(scinti, SCI_GETLENGTH, 0, 0)
+        if length != len(expected.encode("utf-8")):
+            print(f"  FAIL: 文档长度读取异常，实际 {length}")
+            return False
+        user32.SendMessageW(scinti, SCI_GOTOPOS, length, 0)
+        time.sleep(0.3)
+        user32.PostMessageW(window, WM_COMMAND, CMD_EDIT_AUTOCOMPLETE, 0)
+        time.sleep(0.8)
+        if user32.SendMessageW(scinti, SCI_AUTOCACTIVE, 0, 0) == 0:
+            print("  FAIL: 文档内提词时候选列表没出现")
+            return False
+        user32.PostMessageW(scinti, WM_KEYDOWN, 0x0D, 0)
+        time.sleep(0.8)
+        text = scinti_text(scinti)
+        expected = "delta\nalpha\nbeta\ngamma\nbeta"
+        if text != expected:
+            print(f"  FAIL: 文档提词该把 be 补成 beta，期望 {expected!r}，实际 {text!r}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    # 3) 没有可补的词时不该弹框（短词被过滤掉，也没有对应词库）
+    empty = os.path.join(work, "empty.txt")
+    with open(empty, "w", encoding="utf-8", newline="") as handle:
+        handle.write("qq")
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", empty], cwd=root)
+    window = wait_for_main_window("notepadcc - empty.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到第三个实例的主窗口")
+            return False
+        scinti = visible_scintilla(window)
+        user32.SendMessageW(scinti, SCI_GOTOPOS, 2, 0)
+        user32.PostMessageW(window, WM_COMMAND, CMD_EDIT_AUTOCOMPLETE, 0)
+        time.sleep(0.8)
+        if user32.SendMessageW(scinti, SCI_AUTOCACTIVE, 0, 0) != 0:
+            print("  FAIL: 没有任何候选时不该弹出候选列表")
+            return False
+        if scinti_text(scinti) != "qq":
+            print("  FAIL: 没有候选时内容不该被改动")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        if os.path.exists(apiFile):
+            os.remove(apiFile)
+        for name in ("config.xml", "session.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    print("  自动完成：文档内提词与语言词库都能补出词（回车插入后核对内容），"
+          "没有候选时不弹框")
+    return True
 
 
 def test_style_scheme(root):
@@ -2608,6 +2767,8 @@ def run():
         failed = True
     if not test_style_scheme(root):
         failed = True
+    if not test_auto_complete(root):
+        failed = True
     if not test_associated_commands(root):
         failed = True
     if not test_portable_package(root):
@@ -2618,7 +2779,8 @@ def run():
         return 1
     print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + "
           "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + "
-          "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + 文件关联 + 绿色打包）")
+          "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + 自动完成 + 文件关联 + "
+          "绿色打包）")
     return 0
 
 
