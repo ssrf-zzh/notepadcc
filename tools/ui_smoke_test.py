@@ -129,6 +129,9 @@ CMD_TOOL_EXPORT_LANGS = (14 << 12) | 29
 CMD_TOOL_STYLE_CONFIG = (14 << 12) | 30
 CMD_EDIT_AUTOCOMPLETE = (2 << 12) | 33
 CMD_TOOL_EXPORT_UDL = (14 << 12) | 31
+CMD_TOOL_FORMAT_JSON = (14 << 12) | 32
+CMD_TOOL_MINIFY_JSON = (14 << 12) | 33
+CMD_TOOL_FORMAT_XML = (14 << 12) | 34
 CMD_VIEW_DARK_MODE = (4 << 12) | 14
 CMD_MACRO_RECORD = (8 << 12) | 1
 CMD_MACRO_PLAY = (8 << 12) | 3
@@ -3976,6 +3979,8 @@ def run():
         failed = True
     if not test_plugins(root):
         failed = True
+    if not test_structured_format(root):
+        failed = True
     if not test_auto_complete(root):
         failed = True
     if not test_associated_commands(root):
@@ -3989,9 +3994,158 @@ def run():
     print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + "
           "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + "
           "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + UDL + 暗色模式 + "
-          "宏 + 文件夹工作区 + 函数列表 + 导出与打印 + 插件宿主 + 自动完成 + 文件关联 + "
-          "绿色打包）")
+          "宏 + 文件夹工作区 + 函数列表 + 导出与打印 + 插件宿主 + JSON/XML 格式化 + "
+          "自动完成 + 文件关联 + 绿色打包）")
     return 0
+
+
+def test_structured_format(root):
+    """JSON / XML 格式化：真的排版、非法内容真的被挡下、被挡下时一个字节都没动。
+
+    这一段不满足于"命令发出去了"：每个用例都核对全文。JSON 还额外核对"值一个字节
+    都没变"（\\u4e2d 不被换成真汉字、1.500 不被写成 1.5），XML 核对混合内容
+    `<p>hello <b>w</b></p>` 整段原样——这两条是这一块功能的底线。
+    """
+    work = os.path.join(root, "build", "format_test")
+    os.makedirs(work, exist_ok=True)
+    cfg = os.path.join(root, "build", "bin", "config")
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+
+    def clean_config():
+        for name in ("config.xml", "session.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    def write_case(name, text):
+        path = os.path.join(work, name)
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+        return path, text
+
+    def launch(name, path):
+        clean_config()
+        proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
+        return proc, wait_for_main_window(f"notepadcc - {name}")
+
+    def shutdown(proc, window):
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    # ---- 1. JSON 美化：内容对得上，而且一次撤销就回到原文 ----
+    compact = '{"a":1,"b":[1,2],"c":{"d":true}}'
+    pretty = ('{\n  "a": 1,\n  "b": [\n    1,\n    2\n  ],\n'
+              '  "c": {\n    "d": true\n  }\n}')
+    path, _ = write_case("sample.json", compact)
+    proc, window = launch("sample.json", path)
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口（sample.json）")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti_text(scinti) != compact:
+            print(f"  FAIL: 初始内容不对 {scinti_text(scinti)!r}")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_FORMAT_JSON, 0)
+        time.sleep(0.8)
+        actual = scinti_text(scinti)
+        if actual != pretty:
+            print(f"  FAIL: 格式化 JSON 之后内容不对\n           实际 {actual!r}\n"
+                  f"           期望 {pretty!r}")
+            return False
+        # 原文末尾没有换行，格式化之后也不该凭空多一个（被格式化的正是整篇）
+        if actual.endswith("\n"):
+            print("  FAIL: 原文没有结尾换行，格式化后不该补一个")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_EDIT_UNDO, 0)
+        time.sleep(0.6)
+        if scinti_text(scinti) != compact:
+            print(f"  FAIL: 一次撤销应当回到原文，实际 {scinti_text(scinti)!r}")
+            return False
+    finally:
+        shutdown(proc, window)
+
+    # ---- 2. JSON 压缩：连值一起核对，确认只动了空白 ----
+    spaced = '{ "u" : "\\u4e2d" , "n" : 1.500 }'
+    minified = '{"u":"\\u4e2d","n":1.500}'
+    path, _ = write_case("spaced.json", spaced)
+    proc, window = launch("spaced.json", path)
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口（spaced.json）")
+            return False
+        scinti = visible_scintilla(window)
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_MINIFY_JSON, 0)
+        time.sleep(0.8)
+        actual = scinti_text(scinti)
+        if actual != minified:
+            print(f"  FAIL: 压缩 JSON 之后内容不对\n           实际 {actual!r}\n"
+                  f"           期望 {minified!r}")
+            return False
+    finally:
+        shutdown(proc, window)
+
+    # ---- 3. XML 美化：外层重排、混合内容整段不动 ----
+    xml_source = "<root><p>hello <b>w</b></p><a>1</a></root>\n"
+    xml_pretty = "<root>\n  <p>hello <b>w</b></p>\n  <a>1</a>\n</root>\n"
+    path, _ = write_case("doc.xml", xml_source)
+    proc, window = launch("doc.xml", path)
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口（doc.xml）")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti_text(scinti) != xml_source:
+            print(f"  FAIL: 初始内容不对 {scinti_text(scinti)!r}")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_FORMAT_XML, 0)
+        time.sleep(0.8)
+        actual = scinti_text(scinti)
+        if actual != xml_pretty:
+            print(f"  FAIL: 美化 XML 之后内容不对\n           实际 {actual!r}\n"
+                  f"           期望 {xml_pretty!r}")
+            return False
+        if "<p>hello <b>w</b></p>" not in actual:
+            print("  FAIL: 混合内容被改动了（应当是整段原样搬运）")
+            return False
+    finally:
+        shutdown(proc, window)
+
+    # ---- 4. 非法内容：弹说明、内容一个字节都不动 ----
+    bad_cases = [
+        ("broken.json", '{"a":1,}\n', CMD_TOOL_FORMAT_JSON, "格式化 JSON"),
+        ("broken.xml", "<a><b></a></b>\n", CMD_TOOL_FORMAT_XML, "美化 XML"),
+    ]
+    for name, text, command_id, dialog_title in bad_cases:
+        path, _ = write_case(name, text)
+        proc, window = launch(name, path)
+        try:
+            if not window:
+                print(f"  FAIL: 找不到主窗口（{name}）")
+                return False
+            user32.PostMessageW(window, WM_COMMAND, command_id, 0)
+            if not dismiss_dialog(dialog_title, IDOK, timeout=8.0):
+                print(f"  FAIL: {name} 内容不合法，应当弹出说明而不是静默处理")
+                return False
+            time.sleep(0.5)
+            scinti = visible_scintilla(window)
+            if scinti_text(scinti) != text:
+                print(f"  FAIL: {name} 报错之后内容不该被改动，实际 "
+                      f"{scinti_text(scinti)!r}")
+                return False
+            if user32.SendMessageW(scinti, SCI_GETMODIFY, 0, 0) != 0:
+                print(f"  FAIL: {name} 只是报了错，不该把文档标成已修改")
+                return False
+        finally:
+            shutdown(proc, window)
+
+    print("  JSON/XML 格式化：美化与压缩结果正确（值一个字节没动）、一次撤销回到原文、"
+          "混合内容整段原样、非法内容弹说明且文档未改动")
+    return True
 
 
 if __name__ == "__main__":

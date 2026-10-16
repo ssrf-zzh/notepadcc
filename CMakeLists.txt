@@ -136,6 +136,8 @@ set(NPCC_CORE_SOURCES
     src/core/ShortcutStore.cpp
     src/core/SnapshotStore.cpp
     src/core/JsonFlat.cpp
+    src/core/JsonFormat.cpp
+    src/core/XmlFormat.cpp
     src/edit/ColumnEdit.cpp
     src/edit/ColumnText.cpp
     src/edit/EditView.cpp

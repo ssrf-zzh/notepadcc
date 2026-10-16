@@ -121,6 +121,9 @@ private:
         const wchar_t* description);
     void CommandDecodeText(bool base64);
     void CommandToggleComment(bool block);
+    // JSON / XML 格式化（设计文档 2.13）。这两件事会失败（内容不合法），
+    // 所以不能走 ApplyTextTool 那条"永不失败"的入口：先试一次，失败只弹说明。
+    void CommandFormatStructured(bool json, bool minify);
     void CommandExportLanguageDefs();
     void CommandStyleConfigurator();
     void CommandExportUdlSample();

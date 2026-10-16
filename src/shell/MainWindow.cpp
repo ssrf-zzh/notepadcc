@@ -30,6 +30,8 @@
 #include "shell/MacroDialog.h"
 #include "core/ExportHtml.h"
 #include "core/ExportRtf.h"
+#include "core/JsonFormat.h"
+#include "core/XmlFormat.h"
 #include "core/PrintText.h"
 #include "core/PrintPaging.h"
 #include "shell/PluginAdminDialog.h"
@@ -152,6 +154,9 @@ enum : npcc::core::CmdId {
     kCmdToolExportLanguages = npcc::core::MakeCmdId(14, 29),
     kCmdToolStyleConfigurator = npcc::core::MakeCmdId(14, 30),
     kCmdToolExportUdlSample = npcc::core::MakeCmdId(14, 31),
+    kCmdToolFormatJson      = npcc::core::MakeCmdId(14, 32),
+    kCmdToolMinifyJson      = npcc::core::MakeCmdId(14, 33),
+    kCmdToolFormatXml       = npcc::core::MakeCmdId(14, 34),
     kCmdEditAutoComplete = npcc::core::MakeCmdId(2, 33),
 
     kCmdWindowNext = npcc::core::MakeCmdId(11, 1),
@@ -1048,6 +1053,14 @@ void MainWindow::RegisterCommands() {
     add(kCmdToolExportUdlSample, CmdCategory::Tools, L"cmd.tool.exportUdlSample",
         L"导出 UDL 示例到配置目录", core::kCmdNone,
         [this](const CmdContext&) { CommandExportUdlSample(); });
+
+    addSeparator(L"cmd.tool.sepFormat");
+    add(kCmdToolFormatJson, CmdCategory::Tools, L"cmd.tool.formatJson", L"格式化 JSON(&J)",
+        needsWritable, [this](const CmdContext&) { CommandFormatStructured(true, false); });
+    add(kCmdToolMinifyJson, CmdCategory::Tools, L"cmd.tool.minifyJson", L"压缩 JSON(&M)",
+        needsWritable, [this](const CmdContext&) { CommandFormatStructured(true, true); });
+    add(kCmdToolFormatXml, CmdCategory::Tools, L"cmd.tool.formatXml", L"美化 XML(&X)",
+        needsWritable, [this](const CmdContext&) { CommandFormatStructured(false, false); });
 
     // ---- 窗口 ----
     add(kCmdWindowNext, CmdCategory::Window, L"cmd.window.next", L"下一个标签(&N)",
@@ -3898,6 +3911,64 @@ void MainWindow::CommandDecodeText(bool base64) {
             return std::string(text);   // 上面已经检过一次，这里只是兜底：原样返回等于"没有变化"
         },
         base64 ? L"Base64 解码" : L"URL 解码");
+}
+
+// JSON / XML 格式化（设计文档 2.13）。
+// 与其它文本转换的区别在于"可能失败"：内容不合法时不但不能改文档，
+// 还要把"第几行第几列"讲清楚。所以这里先自己格式化一次当校验，
+// 成功之后才交给 ApplyTextTool 那条统一路径写入（保证一次操作正好一步撤销）。
+void MainWindow::CommandFormatStructured(bool json, bool minify) {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr) {
+        return;
+    }
+    const wchar_t* title = json ? (minify ? L"压缩 JSON" : L"格式化 JSON") : L"美化 XML";
+    if (document->buffer.isReadOnly) {
+        ::MessageBoxW(hwnd_, L"这份文档是只读打开的，无法改内容。", title,
+                      MB_ICONINFORMATION);
+        return;
+    }
+    // 缩进固定 2 空格：本版的样式配置器管的是配色，缩进宽度还没做成可配置项。
+    // 做成"每次都问一遍"的对话框只是把麻烦挪个地方，等首选项里有了这一项再读配置。
+    constexpr int kIndent = 2;
+    const auto format = [json, minify](std::string_view text) {
+        return json ? core::FormatJson(text, kIndent, minify)
+                    : core::FormatXml(text, kIndent);
+    };
+    // 取"选区（无选区则整篇）"，与 ApplyTextTool 的取法保持一致
+    const int32_t selectionStart = document->view->SelectionStart();
+    const int32_t selectionEnd = document->view->SelectionEnd();
+    const int32_t start = selectionStart == selectionEnd
+                              ? 0
+                              : std::min(selectionStart, selectionEnd);
+    const int32_t end = selectionStart == selectionEnd
+                            ? document->view->ByteLength()
+                            : std::max(selectionStart, selectionEnd);
+    const std::string original = document->view->TextRange(start, end);
+
+    const core::FormatResult probe = format(original);
+    if (!probe.ok) {
+        ::MessageBoxW(hwnd_, (probe.error + L"\n文档内容没有改动。").c_str(), title,
+                      MB_ICONWARNING);
+        infra::LogInfo(L"tools", std::wstring(L"格式化失败：") + probe.error);
+        return;
+    }
+    // 格式化器统一以"一个换行"结尾。被格式化的区域本来没有结尾换行时不要凭空添一行——
+    // 用户可能只选了一段对象，后面还紧跟着别的内容。
+    const bool hadTailNewline =
+        !original.empty() && (original.back() == '\n' || original.back() == '\r');
+    ApplyTextTool(
+        [format, hadTailNewline](std::string_view text, std::uint32_t) {
+            core::FormatResult result = format(text);
+            if (!result.ok) {
+                return std::string(text);   // 上面已经检过一次，这里只是兜底：原样返回等于"没有变化"
+            }
+            if (!hadTailNewline && !result.text.empty() && result.text.back() == '\n') {
+                result.text.pop_back();
+            }
+            return result.text;
+        },
+        title);
 }
 
 void MainWindow::CommandRegisterAssociations(bool registerThem) {

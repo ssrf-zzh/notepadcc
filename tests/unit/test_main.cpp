@@ -23,6 +23,8 @@
 #include "core/PrintPaging.h"
 #include "plugin/PluginHost.h"
 #include "core/JsonFlat.h"
+#include "core/JsonFormat.h"
+#include "core/XmlFormat.h"
 #include "shell/FolderPanel.h"
 #include "shell/FunctionListPanel.h"
 #include "core/SnapshotStore.h"
@@ -4880,6 +4882,172 @@ int main() {
             ::DestroyWindow(colourHost);
         } else {
             Check(false, "创建编辑控件失败");
+        }
+    }
+
+    Section("JSON / XML 格式化");
+    {
+        using npcc::core::FormatJson;
+        using npcc::core::FormatXml;
+
+        // ---- JSON：嵌套对象与数组 ----
+        const auto nested = FormatJson("{\"a\":1,\"b\":[1,2],\"c\":{\"d\":true},\"e\":null}");
+        Check(nested.ok, "合法 JSON 应当格式化成功");
+        CheckEqual(nested.text,
+                   "{\n"
+                   "  \"a\": 1,\n"
+                   "  \"b\": [\n"
+                   "    1,\n"
+                   "    2\n"
+                   "  ],\n"
+                   "  \"c\": {\n"
+                   "    \"d\": true\n"
+                   "  },\n"
+                   "  \"e\": null\n"
+                   "}\n",
+                   "嵌套对象/数组按 2 空格缩进");
+        const auto nestedAgain = FormatJson(nested.text);
+        Check(nestedAgain.ok && nestedAgain.text == nested.text, "格式化是幂等的");
+        const auto deep = FormatJson("{\"a\":[1]}", 4);
+        CheckEqual(deep.text, "{\n    \"a\": [\n        1\n    ]\n}\n", "缩进宽度可按参数给");
+        // 顶层标量也是合法 JSON（RFC 8259），别把它当错误
+        const auto scalar = FormatJson("  42  ");
+        Check(scalar.ok, "顶层标量不该被拒");
+        CheckEqual(scalar.text, "42\n", "顶层标量原样输出");
+
+        // ---- JSON：空对象 / 空数组 / 压缩 ----
+        const auto empties = FormatJson("{\"a\":{},\"b\":[]}");
+        CheckEqual(empties.text, "{\n  \"a\": {},\n  \"b\": []\n}\n", "空对象/空数组压成两个字符");
+        const auto minified = FormatJson("{ \"a\" : [1, 2] ,\n  \"b\" : { } }", 2, true);
+        CheckEqual(minified.text, "{\"a\":[1,2],\"b\":{}}\n", "压缩模式去掉结构间空白");
+
+        // ---- JSON：字符串与数字**原样**保留 ----
+        // 这条是刻意的：格式化只该动空白。把 \u4e2d 换成真汉字、把 1e3 算成 1000，
+        // 都是在改用户的数据，不是"美化"。
+        const auto kept = FormatJson(
+            "{\"u\":\"\\u4e2d\\u6587\",\"n\":1.500,\"e\":1e3,\"z\":-0.0,\"q\":\"a\\\"b\\\\c\\/d\\t\"}");
+        Check(kept.ok, "带转义与特殊数字写法的 JSON 应当合法");
+        CheckEqual(kept.text,
+                   "{\n"
+                   "  \"u\": \"\\u4e2d\\u6587\",\n"
+                   "  \"n\": 1.500,\n"
+                   "  \"e\": 1e3,\n"
+                   "  \"z\": -0.0,\n"
+                   "  \"q\": \"a\\\"b\\\\c\\/d\\t\"\n"
+                   "}\n",
+                   "转义写法与数字字面量一个字节都没改");
+        Check(kept.text.find("\\u4e2d") != std::string::npos, "\\uXXXX 没被换成真汉字");
+        Check(kept.text.find("1.500") != std::string::npos, "1.500 没被写成 1.5");
+
+        // ---- JSON：非法输入必须报错，且给得出行与列 ----
+        struct JsonCase {
+            const char*    text;
+            const wchar_t* needle;   // 错误信息里必须出现的片段
+        };
+        const JsonCase jsonBad[] = {
+            {"{\"a\":1,}", L"尾随逗号"},
+            {"{\n  \"a\": [1, 2,]\n}", L"第 2 行第 14 列"},
+            {"{a:1}", L"第 1 行第 2 列"},
+            {"{\"a\": 1.}", L"小数点后面应当是数字"},
+            {"{\"a\": tru}", L"应当是一个值"},
+            {"{\"a\": \"x}", L"引号"},
+            {"{\"a\": \"\\u12\"}", L"\\u 后面必须跟四个十六进制数字"},
+            {"1 2", L"顶层值之后还有内容"},
+            {"{\"a\":1", L"逗号或右花括号"},
+            {"", L"内容为空"},
+            {"   \n  ", L"内容为空"},
+        };
+        for (const JsonCase& bad : jsonBad) {
+            const auto result = FormatJson(bad.text);
+            Check(!result.ok, "非法 JSON 必须报错");
+            Check(result.text.empty(), "失败时不返回半截文本");
+            if (result.error.find(bad.needle) == std::wstring::npos) {
+                std::printf("    [FAIL] JSON 错误信息里没有「%ls」：%s\n", bad.needle,
+                            QuoteForLog(ToUtf8(result.error)).c_str());
+            }
+            Check(result.error.find(bad.needle) != std::wstring::npos, "错误信息对得上");
+        }
+        {
+            // 字符串里夹了裸的控制字符：合法 JSON 必须写成 \t，不能直接放一个制表符
+            const std::string rawTab = std::string("{\"a\":\"x") + '\t' + "y\"}";
+            const auto result = FormatJson(rawTab);
+            Check(!result.ok, "字符串里的裸控制字符应当被拒绝");
+        }
+
+        // ---- XML：嵌套缩进 ----
+        const auto xmlNested = FormatXml("<root><a>1</a><b><c/></b></root>");
+        Check(xmlNested.ok, "合法 XML 应当美化成功");
+        CheckEqual(xmlNested.text, "<root>\n  <a>1</a>\n  <b>\n    <c/>\n  </b>\n</root>\n",
+                   "嵌套元素逐层缩进（叶子元素带文字不影响祖先重排）");
+        const auto xmlAgain = FormatXml(xmlNested.text);
+        Check(xmlAgain.ok && xmlAgain.text == xmlNested.text, "XML 美化是幂等的");
+
+        // ---- XML：混合内容整段不动 ----
+        const auto mixed = FormatXml("<p>hello <b>world</b></p>");
+        CheckEqual(mixed.text, "<p>hello <b>world</b></p>\n",
+                   "混合内容整段原样输出，一个空格都没动");
+        const auto mixedNested = FormatXml("<div><p>a <b>c</b></p></div>");
+        CheckEqual(mixedNested.text, "<div>\n  <p>a <b>c</b></p>\n</div>\n",
+                   "外层纯元素照常缩进，里层混合内容整段搬运");
+
+        // ---- XML：注释 / CDATA / 处理指令 / DOCTYPE 原样 ----
+        const std::string xmlDoc = "<?xml version=\"1.0\"?>\n"
+                                   "<!DOCTYPE note [<!ENTITY x \"y\">]>\n"
+                                   "<!-- head -->\n"
+                                   "<root>\n"
+                                   "<!-- inner -->\n"
+                                   "<a><![CDATA[<raw>]]></a>\n"
+                                   "</root>\n";
+        const auto doc = FormatXml(xmlDoc);
+        Check(doc.ok, "带 DOCTYPE / 注释 / CDATA 的文档应当美化成功");
+        CheckEqual(doc.text,
+                   "<?xml version=\"1.0\"?>\n"
+                   "<!DOCTYPE note [<!ENTITY x \"y\">]>\n"
+                   "<!-- head -->\n"
+                   "<root>\n"
+                   "  <!-- inner -->\n"
+                   "  <a><![CDATA[<raw>]]></a>\n"
+                   "</root>\n",
+                   "DOCTYPE 的内部子集、注释、CDATA 全部原样，缩进只加在元素之间");
+        Check(doc.text.find("<!ENTITY x \"y\">") != std::string::npos,
+              "DOCTYPE 内部子集里的 > 没被当成 DOCTYPE 的结尾");
+        Check(doc.text.find("<a><![CDATA[<raw>]]></a>") != std::string::npos,
+              "带 CDATA 的元素整段搬运（CDATA 里装的是字符数据）");
+
+        // ---- XML：自闭合与真的空元素 ----
+        const auto selfClosing = FormatXml("<a><b/><b /></a>");
+        CheckEqual(selfClosing.text, "<a>\n  <b/>\n  <b />\n</a>\n", "自闭合标签保留原写法");
+        const auto emptyTag = FormatXml("<r><a></a></r>");
+        CheckEqual(emptyTag.text, "<r>\n  <a></a>\n</r>\n", "一对标签之间什么都没有才压成一行");
+        const auto blankContent = FormatXml("<r><a>   </a></r>");
+        CheckEqual(blankContent.text, "<r>\n  <a>\n  </a>\n</r>\n",
+                   "中间的空白是字符数据：换成标准缩进，但不当成空元素压掉");
+
+        // ---- XML：非法输入必须报错，且给得出行与列 ----
+        struct XmlCase {
+            const char*    text;
+            const wchar_t* needle;
+        };
+        const XmlCase xmlBad[] = {
+            {"<a><b></a></b>", L"不匹配"},
+            {"<a>\n<b>\n</c>", L"第 3 行第 1 列"},
+            {"<a><b></b>", L"没有对应的结束标签"},
+            {"</a>", L"多了一个结束标签"},
+            {"<a><b", L"标签没有收尾"},
+            {"<a><!-- x </a>", L"注释没有收尾"},
+            {"<a><![CDATA[x</a>", L"CDATA 没有收尾"},
+            {"", L"内容为空"},
+            {"   \n  ", L"内容为空"},
+        };
+        for (const XmlCase& bad : xmlBad) {
+            const auto result = FormatXml(bad.text);
+            Check(!result.ok, "非法 XML 必须报错");
+            Check(result.text.empty(), "失败时不返回半截文本");
+            if (result.error.find(bad.needle) == std::wstring::npos) {
+                std::printf("    [FAIL] XML 错误信息里没有「%ls」：%s\n", bad.needle,
+                            QuoteForLog(ToUtf8(result.error)).c_str());
+            }
+            Check(result.error.find(bad.needle) != std::wstring::npos, "错误信息对得上");
         }
     }
 

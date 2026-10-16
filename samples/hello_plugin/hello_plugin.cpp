@@ -23,8 +23,6 @@ namespace {
 
 const NpccHostServices* g_host = nullptr;
 
-const wchar_t* kGreeting = L"// 来自 hello 插件\n";
-
 void InsertGreeting(void*) {
     if (g_host == nullptr || g_host->SetEditorText == nullptr) {
         return;
