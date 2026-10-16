@@ -137,6 +137,7 @@ std::vector<LangPack> MakeBuiltin() {
         Entry(L"cmd.tool.minifyJson", L"Minify JSON", L"M"),
         Entry(L"cmd.tool.formatXml", L"Pretty-print XML", L"X"),
         Entry(L"cmd.tool.validateXml", L"Validate XML", L"V"),
+        Entry(L"cmd.tool.xpathQuery", L"XPath Query...", L"P"),
         // ---- 工具：导出到配置目录 ----
         Entry(L"cmd.tool.exportLanguages", L"Export Language Definitions to Config Folder"),
         Entry(L"cmd.tool.exportUdlSample", L"Export UDL Sample to Config Folder"),

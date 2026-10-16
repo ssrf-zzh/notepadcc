@@ -32,6 +32,7 @@
 #include "shell/StyleConfigDialog.h"
 #include "shell/MacroDialog.h"
 #include "shell/RunCommandDialog.h"
+#include "shell/XPathDialog.h"
 #include "shell/Clipboard.h"
 #include "shell/ComparePickDialog.h"
 #include "shell/ToolbarDialog.h"
@@ -192,6 +193,7 @@ enum : npcc::core::CmdId {
     kCmdToolQuotedPrintableEncode = npcc::core::MakeCmdId(14, 38),
     kCmdToolQuotedPrintableDecode = npcc::core::MakeCmdId(14, 39),
     kCmdToolValidateXml     = npcc::core::MakeCmdId(14, 40),
+    kCmdToolXPathQuery      = npcc::core::MakeCmdId(14, 41),
     // 运行类（9）：第 1 号是 F5 那个对话框，第 kRunCommandBase 号起是用户存的命令
     kCmdRunDialog           = npcc::core::MakeCmdId(9, npcc::core::kRunCommandDialogIndex),
     kCmdEditAutoComplete = npcc::core::MakeCmdId(2, 33),
@@ -1324,6 +1326,8 @@ void MainWindow::RegisterCommands() {
         needsWritable, [this](const CmdContext&) { CommandFormatStructured(false, false); });
     add(kCmdToolValidateXml, CmdCategory::Tools, L"cmd.tool.validateXml", L"校验 XML(&V)",
         needsBuffer, [this](const CmdContext&) { CommandValidateXml(); });
+    add(kCmdToolXPathQuery, CmdCategory::Tools, L"cmd.tool.xpathQuery", L"XPath 查询(&P)...",
+        needsBuffer, [this](const CmdContext&) { CommandXPathQuery(); });
 
     // ---- 窗口 ----
     add(kCmdWindowNext, CmdCategory::Window, L"cmd.window.next", L"下一个标签(&N)",
@@ -5568,6 +5572,29 @@ void MainWindow::CommandValidateXml() {
         (result.truncated ? L"（节点太多，只数到显示上限）" : L"");
     statusBar_.SetMessage(summary);
     infra::LogInfo(L"tools", summary);
+}
+
+// XPath 查询（M3 内置 XML 工具的 XPath 一件）：弹出查询对话框，在命中列表里
+// 双击或按"跳转"把光标放到那一行。只读——查询本身不改文档一个字节；每次查询
+// 由对话框自己写日志（连跑几条也逐条对得上），这里只补一条"跳到了哪一行"。
+void MainWindow::CommandXPathQuery() {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr) {
+        return;
+    }
+    const std::string text = document->view->GetAllText();
+    XPathDialogResult result;
+    const bool wantJump = ShowXPathDialog(hwnd_, text, result);
+    if (!wantJump) {
+        return;
+    }
+    const int32_t target = static_cast<int32_t>(document->view->PositionFromLine(result.line - 1));
+    document->view->SetCaretPosition(target);
+    document->view->ScrollToLine(result.line - 1);
+    // 状态栏不放提示：挪光标必然触发编辑控件的通知刷新，"行 N, 列 M"当场把提示
+    // 盖掉，写了也白写；跳转本身的光标反馈就是界面上的提示，这里留一条日志。
+    infra::LogInfo(L"tools",
+                   L"XPath 查询：跳到第 " + std::to_wstring(result.line) + L" 行");
 }
 
 void MainWindow::CommandRegisterAssociations(bool registerThem) {

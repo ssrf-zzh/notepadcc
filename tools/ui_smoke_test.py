@@ -219,6 +219,15 @@ CMD_VIEW_SUMMARY = (4 << 12) | 28
 CMD_VIEW_TOOLBAR = (4 << 12) | 29        # 视图 → 工具栏（勾选）
 CMD_VIEW_EYE_CARE = (4 << 12) | 30       # 视图 → 护眼模式（低蓝光，勾选）
 CMD_VIEW_XML_TREE = (4 << 12) | 31       # 视图 → XML 树视图（勾选，与 JSON 树共用面板）
+CMD_TOOL_XPATH = (14 << 12) | 41         # 工具 → XPath 查询…
+XPATH_DIALOG_CLASS = "notepadccXPathQuery"
+XPATH_EXPR = 1501                        # 表达式输入框
+XPATH_RUN = 1510                         # 查询
+XPATH_GOTO = 1511                        # 跳转
+XPATH_CLOSE = 1512                       # 关闭
+XPATH_RESULTS = 1520                     # 命中的列表
+XPATH_STATUS = 1530                      # 状态行（共 N 个匹配 / 错误：…）
+LBN_DBLCLK = 2
 CMD_SETTINGS_TOOLBAR = (7 << 12) | 6     # 设置 → 自定义工具栏…
 MENU_INDEX_VIEW = 3                   # 文件 / 编辑 / 查找 / 视图 …
 PREF_UI_LANGUAGE_COMBO = 1048
@@ -4474,6 +4483,8 @@ def run():
         failed = True
     if not test_xml_tree(root):
         failed = True
+    if not test_xpath_query(root):
+        failed = True
     if not test_brace_summary_fullscreen(root):
         failed = True
     if not test_toolbar(root):
@@ -4494,7 +4505,7 @@ def run():
           "宏 + 文件夹工作区 + 函数列表 + 导出与打印 + 插件宿主 + JSON/XML 格式化 + "
           "运行命令 + 界面语言 + 十六进制查看 + 复制为富文本 + Markdown 预览 + 对话框文案 + "
           "比较 + JSON 树视图 + 括号匹配与摘要与全屏 + 工具栏 + 自动完成 + 文件关联 + "
-          "文件类型识别与 MIME 工具 + 护眼模式 + XML 树视图与校验 + 绿色打包）")
+          "文件类型识别与 MIME 工具 + 护眼模式 + XML 树视图与校验 + XPath 查询 + 绿色打包）")
     return 0
 
 
@@ -5071,6 +5082,187 @@ def test_xml_tree(root):
     print("  XML 树视图与校验 XML：树按层级逐行核对（元素/属性/文本/折叠摘要）、折叠与展开、"
           "与 JSON 树共用同一块面板、点元素跳到源码行、非法内容说明原因（含行列）、"
           "校验成功在状态栏报规模、失败弹说明且内容不动")
+    return True
+
+
+def test_xpath_query(root):
+    """XPath 查询（M3 XML 工具的最后一件）：对话框里真列命中、跳转真落在那一行、
+    表达式错误真的带列号、查询前后文档一个字节不动。
+
+    对话框是模态的（主窗口会被禁用），脚本跨进程驱动它的控件：填表达式、发"查询"、
+    读状态行、读列表项（LB_GETTEXT 要往目标进程里写指针，见 listbox_item_text）、
+    点"跳转"或发双击通知。列表行格式是固定的"第 N 行  预览"，逐字核对。
+    """
+    work = os.path.join(root, "build", "xpath_test")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    cfg = os.path.join(root, "build", "bin", "config")
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+
+    sample = os.path.join(work, "books.xml")
+    with open(sample, "w", encoding="utf-8", newline="") as handle:
+        handle.write('<?xml version="1.0"?>\n'
+                     '<catalog>\n'
+                     '  <book id="b1" lang="zh"><title>三体</title></book>\n'
+                     '  <book id="b2"><title>球状闪电</title><note>科幻</note></book>\n'
+                     '  <book id="b3" lang="en"><title>Dune</title></book>\n'
+                     '</catalog>\n')
+
+    for name in ("config.xml", "session.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+    log_file = remove_log_with_retry(root)
+
+    def open_query_dialog(window):
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_XPATH, 0)
+        deadline = time.time() + 8.0
+        while time.time() < deadline:
+            dialog = user32.FindWindowW(XPATH_DIALOG_CLASS, None)
+            if dialog:
+                return dialog
+            time.sleep(0.2)
+        return None
+
+    def wait_dialog_gone(timeout=10.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not user32.FindWindowW(XPATH_DIALOG_CLASS, None):
+                return True
+            time.sleep(0.15)
+        return False
+
+    def status_text(dialog):
+        return window_text(user32.GetDlgItem(dialog, XPATH_STATUS))
+
+    def rows(dialog):
+        """读取对话框列出的结果行。
+
+        对话框自己实现了 WM_GETTEXT，把"此刻列着什么"按面板同款规矩回出来
+        （结果行用 \\r\\n 分隔）；标准 ListBox 的 LB_GETTEXT 要跨进程传指针，
+        不可靠，所以不走那条路。
+        """
+        text = window_text(dialog)
+        return text.split("\r\n") if text else []
+
+    def run_query(dialog, expression):
+        set_text(dialog, XPATH_EXPR, expression)
+        send_bounded(dialog, WM_COMMAND, XPATH_RUN, 0)
+        time.sleep(0.2)
+
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", sample], cwd=root)
+    window = wait_for_main_window("notepadcc - books.xml")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        time.sleep(0.8)
+        before = scinti_text(visible_scintilla(window))
+
+        # ---- 1) 命中列表 + 状态行 + 模态 + 跳转 ----
+        dialog = open_query_dialog(window)
+        if not dialog:
+            print("  FAIL: 「XPath 查询…」没弹出对话框")
+            return False
+        if user32.IsWindowEnabled(window):
+            print("  FAIL: 对话框应当是模态的（主窗口该被禁用）")
+            return False
+        if status_text(dialog) != "输入表达式后按“查询”。":
+            print(f"  FAIL: 初始状态行不对：{status_text(dialog)!r}")
+            return False
+        if user32.IsWindowEnabled(user32.GetDlgItem(dialog, XPATH_GOTO)):
+            print("  FAIL: 还没查询时「跳转」应当是灰的")
+            return False
+        run_query(dialog, "/catalog/book[@id='b2']")
+        if status_text(dialog) != "共 1 个匹配":
+            print(f"  FAIL: 命中 1 条时状态行不对：{status_text(dialog)!r}")
+            return False
+        listed = rows(dialog)
+        if listed != ['第 4 行  <book id="b2">']:
+            print(f"  FAIL: 命中行不对：{listed!r}")
+            return False
+        send_bounded(dialog, WM_COMMAND, XPATH_GOTO, 0)
+        if not wait_dialog_gone():
+            print("  FAIL: 点跳转后对话框没关")
+            return False
+        line = current_line(visible_scintilla(window))
+        if line != 3:
+            print(f"  FAIL: 跳转后光标应当在第 4 行（0 基 3），实际 {line}")
+            return False
+        if scinti_text(visible_scintilla(window)) != before:
+            print("  FAIL: 查询与跳转一个字节都不该改文档")
+            return False
+
+        # ---- 2) 表达式错误：带列号、列表为空、文档不动 ----
+        dialog = open_query_dialog(window)
+        if not dialog:
+            print("  FAIL: 第二次没弹出对话框")
+            return False
+        run_query(dialog, "//")
+        status = status_text(dialog)
+        if not status.startswith("错误：") or "表达式第 3 列" not in status:
+            print(f"  FAIL: 表达式错误的说明不对：{status!r}")
+            return False
+        if rows(dialog):
+            print("  FAIL: 表达式错误时列表不该有内容")
+            return False
+        if scinti_text(visible_scintilla(window)) != before:
+            print("  FAIL: 非法表达式不该动文档")
+            return False
+
+        # ---- 3) 文本命中 + 双击列表项跳转（LBN_DBLCLK 那条通知） ----
+        run_query(dialog, "//book[@lang='en']/title/text()")
+        if status_text(dialog) != "共 1 个匹配":
+            print(f"  FAIL: 文本命中状态不对：{status_text(dialog)!r}")
+            return False
+        listed = rows(dialog)
+        if listed != ['第 5 行  #text="Dune"']:
+            print(f"  FAIL: 文本命中行不对：{listed!r}")
+            return False
+        user32.PostMessageW(dialog, WM_COMMAND, (LBN_DBLCLK << 16) | XPATH_RESULTS, 0)
+        if not wait_dialog_gone():
+            print("  FAIL: 双击结果后对话框没关")
+            return False
+        line = current_line(visible_scintilla(window))
+        if line != 4:
+            print(f"  FAIL: 双击跳转后光标应当在第 5 行（0 基 4），实际 {line}")
+            return False
+
+        # ---- 4) 没有命中不是错误；关掉对话框光标不动；日志里有记录 ----
+        dialog = open_query_dialog(window)
+        if not dialog:
+            print("  FAIL: 第三次没弹出对话框")
+            return False
+        run_query(dialog, "/catalog/magazine")
+        if status_text(dialog) != "共 0 个匹配":
+            print(f"  FAIL: 无命中时状态行不对：{status_text(dialog)!r}")
+            return False
+        send_bounded(dialog, WM_COMMAND, XPATH_CLOSE, 0)
+        if not wait_dialog_gone():
+            print("  FAIL: 关闭按钮没关掉对话框")
+            return False
+        line = current_line(visible_scintilla(window))
+        if line != 4:
+            print(f"  FAIL: 直接关掉对话框不该挪光标，实际 {line}")
+            return False
+        time.sleep(0.5)
+        try:
+            with open(log_file, "r", encoding="utf-8", errors="replace") as handle:
+                log = handle.read()
+        except OSError:
+            log = ""
+        if ("XPath 查询" not in log or "跳到第 4 行" not in log or
+                "跳到第 5 行" not in log or "表达式第 3 列" not in log):
+            print("  FAIL: 日志里应当留下查询、两次跳转与那条表达式错误")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            time.sleep(1.0)
+        if proc.poll() is None:
+            proc.kill()
+
+    print("  XPath 查询：命中列表 / 跳转 / 表达式错误（含列号）/ 文档未动 全对")
     return True
 
 

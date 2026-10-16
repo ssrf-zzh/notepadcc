@@ -147,6 +147,7 @@ private:
     // 校验 XML（M3 的内置 XML 工具）：只探一次结构树、不改内容；结果（行数 / 节点数
     // 或者出错的行列）进状态栏与日志
     void CommandValidateXml();
+    void CommandXPathQuery();
     void CommandExportLanguageDefs();
     void CommandStyleConfigurator();
     void CommandExportUdlSample();

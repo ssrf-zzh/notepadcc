@@ -144,6 +144,7 @@ set(NPCC_CORE_SOURCES
     src/core/JsonFormat.cpp
     src/core/XmlFormat.cpp
     src/core/XmlTree.cpp
+    src/core/XPath.cpp
     src/core/RunCommand.cpp
     src/core/ToolbarItems.cpp
     src/edit/ColumnEdit.cpp
@@ -193,6 +194,7 @@ set(NPCC_CORE_SOURCES
     src/shell/MarkdownPreview.cpp
     src/shell/ComparePickDialog.cpp
     src/shell/StructureTreePanel.cpp
+    src/shell/XPathDialog.cpp
     src/shell/FindBar.cpp
     src/shell/ColumnDialog.cpp
     src/shell/PreferencesDialog.cpp

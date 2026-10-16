@@ -31,6 +31,7 @@
 #include "core/JsonFormat.h"
 #include "core/XmlFormat.h"
 #include "core/XmlTree.h"
+#include "core/XPath.h"
 #include "core/Localization.h"
 #include "core/ExportRtf.h"
 #include "shell/FolderPanel.h"
@@ -6832,6 +6833,229 @@ int main() {
         const auto limited = ParseXmlTree(huge);
         Check(limited.ok && limited.truncated, "超过上限的文档合法，只是截断");
         Check(limited.nodeCount == npcc::core::kMaxXmlNodes, "节点数停在上限");
+    }
+
+    Section("XPath 查询（路径 / 谓词 / 表达式错误）");
+    {
+        using npcc::core::XPathMatch;
+        using npcc::core::XPathMatchKind;
+        using npcc::core::XPathQuery;
+        using npcc::core::XPathResult;
+
+        const std::string source =
+            "<?xml version=\"1.0\"?>\n"
+            "<catalog>\n"
+            "  <book id=\"b1\" lang=\"zh\"><title>三体</title><price>23</price></book>\n"
+            "  <book id=\"b2\"><title>球状闪电</title><price>18</price><note>科幻</note></book>\n"
+            "  <!-- 注释 -->\n"
+            "  <book id=\"b3\" lang=\"en\"><title>Dune</title></book>\n"
+            "</catalog>\n";
+
+        // ---- 基本路径：命中数、顺序、行号 ----
+        const XPathResult books = XPathQuery(source, L"/catalog/book");
+        Check(books.ok, "基本路径查询成功");
+        Check(books.error.empty(), "成功时没有错误文本");
+        Check(books.matches.size() == 3, "/catalog/book 命中 3 个");
+        Check(books.matches[0].kind == XPathMatchKind::Element &&
+                  books.matches[0].name == "book",
+              "命中是元素节点，名字是 book");
+        Check(books.matches[0].line == 3 && books.matches[1].line == 4 &&
+                  books.matches[2].line == 6,
+              "命中按文档顺序，行号 3 / 4 / 6");
+        Check(books.matches[0].preview == L"<book id=\"b1\" lang=\"zh\">",
+              "元素预览带全部属性（按源文顺序）");
+        Check(books.matches[1].preview == L"<book id=\"b2\">",
+              "无多余属性时不编造");
+
+        const XPathResult relative = XPathQuery(source, L"catalog/book");
+        Check(relative.ok && relative.matches.size() == 3,
+              "相对写法（不带开头的 /）与绝对写法等价");
+        const XPathResult anyDepth = XPathQuery(source, L"//title");
+        Check(anyDepth.ok && anyDepth.matches.size() == 3, "//title 命中 3 个（任意深度）");
+        Check(anyDepth.matches[0].line == 3 && anyDepth.matches[2].line == 6,
+              "//title 的行号跟着源文走");
+        const XPathResult wildcard = XPathQuery(source, L"/catalog/*");
+        Check(wildcard.ok && wildcard.matches.size() == 3,
+              "* 通配元素：命中 3 个（注释不是元素，不算）");
+        const XPathResult mixedInPath = XPathQuery(source, L"/catalog//price");
+        Check(mixedInPath.ok && mixedInPath.matches.size() == 2,
+              "// 出现在路径中间：catalog 下任意深度的 price 有 2 个");
+        const XPathResult caseSensitive = XPathQuery(source, L"//BOOK");
+        Check(caseSensitive.ok && caseSensitive.matches.empty(),
+              "元素名大小写敏感：//BOOK 不命中 book");
+
+        // ---- 谓词：序号 / 属性 / 子元素 / text() ----
+        const XPathResult second = XPathQuery(source, L"/catalog/book[2]");
+        Check(second.ok && second.matches.size() == 1 && second.matches[0].line == 4,
+              "[2] 取第 2 个（行号 4）");
+        const XPathResult outOfRange = XPathQuery(source, L"/catalog/book[9]");
+        Check(outOfRange.ok && outOfRange.matches.empty(),
+              "序号越界是 0 命中，不是错误");
+        const XPathResult hasLang = XPathQuery(source, L"/catalog/book[@lang]");
+        Check(hasLang.ok && hasLang.matches.size() == 2 && hasLang.matches[1].line == 6,
+              "[@lang] 只看有这个属性的（b1 / b3）");
+        const XPathResult idB2 = XPathQuery(source, L"/catalog/book[@id='b2']");
+        Check(idB2.ok && idB2.matches.size() == 1 && idB2.matches[0].line == 4,
+              "单引号比较值命中 b2");
+        const XPathResult idB2Double = XPathQuery(source, L"/catalog/book[@id=\"b2\"]");
+        Check(idB2Double.ok && idB2Double.matches.size() == 1, "双引号比较值同样命中");
+        const XPathResult notB2 = XPathQuery(source, L"/catalog/book[@id!='b2']");
+        Check(notB2.ok && notB2.matches.size() == 2 && notB2.matches[0].line == 3 &&
+                  notB2.matches[1].line == 6,
+              "!= 命中有属性且不相等的（b1 / b3）");
+        const XPathResult notZh = XPathQuery(source, L"/catalog/book[@lang!='zh']");
+        Check(notZh.ok && notZh.matches.size() == 1 && notZh.matches[0].line == 6,
+              "没有 lang 的 b2 在 != 里不算命中（与 XPath 语义一致）");
+        const XPathResult hasNote = XPathQuery(source, L"/catalog/book[note]");
+        Check(hasNote.ok && hasNote.matches.size() == 1 && hasNote.matches[0].line == 4,
+              "[子元素] 看有没有这个直接子元素");
+        const XPathResult noteSciFi = XPathQuery(source, L"/catalog/book[note='科幻']");
+        Check(noteSciFi.ok && noteSciFi.matches.size() == 1 &&
+                  noteSciFi.matches[0].line == 4,
+              "[子元素='值'] 按子元素的文本比");
+        const XPathResult noteNotSciFi = XPathQuery(source, L"/catalog/book[note!='科幻']");
+        Check(noteNotSciFi.ok && noteNotSciFi.matches.empty(),
+              "没有 note 的被 != 排除");
+        const XPathResult price23 = XPathQuery(source, L"/catalog/book[price='23']");
+        Check(price23.ok && price23.matches.size() == 1 && price23.matches[0].line == 3,
+              "按价格文本找书");
+        const XPathResult titleDune = XPathQuery(source, L"/catalog/book[title='Dune']");
+        Check(titleDune.ok && titleDune.matches.size() == 1 &&
+                  titleDune.matches[0].line == 6,
+              "按标题文本找书（值里有大写）");
+        const XPathResult noSuchChild = XPathQuery(source, L"/catalog/book[notnoteabc='x']");
+        Check(noSuchChild.ok && noSuchChild.matches.empty(), "不存在的子元素名不命中");
+
+        // ---- 属性轴 / text() / 自身 ----
+        const XPathResult ids = XPathQuery(source, L"//@id");
+        Check(ids.ok && ids.matches.size() == 3, "//@id 找全 3 个 id 属性");
+        Check(ids.matches[0].kind == XPathMatchKind::Attribute &&
+                  ids.matches[0].name == "id" && ids.matches[0].value == "b1" &&
+                  ids.matches[0].line == 3,
+              "属性命中带名字、值与行号");
+        Check(ids.matches[0].preview == L"@id=\"b1\"", "属性预览是 @名=值");
+        Check(ids.matches[2].value == "b3" && ids.matches[2].line == 6, "第 3 个 id 是 b3");
+        const XPathResult firstAttrs = XPathQuery(source, L"/catalog/book[1]/@*");
+        Check(firstAttrs.ok && firstAttrs.matches.size() == 2 &&
+                  firstAttrs.matches[0].name == "id" && firstAttrs.matches[1].name == "lang",
+              "@* 取全部属性（按源文顺序 id / lang）");
+        const XPathResult titles = XPathQuery(source, L"//title/text()");
+        Check(titles.ok && titles.matches.size() == 3, "//title/text() 命中 3 段文本");
+        Check(titles.matches[0].kind == XPathMatchKind::Text &&
+                  titles.matches[0].value == "三体" && titles.matches[0].line == 3,
+              "文本命中带原文与行号");
+        Check(titles.matches[0].preview == L"#text=\"三体\"", "文本预览是 #text=原文");
+        Check(titles.matches[2].value == "Dune", "第三段文本是 Dune");
+        const XPathResult allText = XPathQuery(source, L"//text()");
+        Check(allText.ok && allText.matches.size() == 6,
+              "全篇文本节点 6 段（三个标题 + 两个价格 + 一个 note）");
+        const XPathResult self = XPathQuery(source, L"/catalog/book[1]/.");
+        Check(self.ok && self.matches.size() == 1 && self.matches[0].line == 3,
+              ". 取自身（还是那本书）");
+        const XPathResult selfThenChild = XPathQuery(source, L"/catalog/book[1]/./title");
+        Check(selfThenChild.ok && selfThenChild.matches.size() == 1 &&
+                  selfThenChild.matches[0].line == 3,
+              "./ 之后继续往下走");
+        const XPathResult priceText = XPathQuery(source, L"//book[@id='b1']/price/text()");
+        Check(priceText.ok && priceText.matches.size() == 1 &&
+                  priceText.matches[0].value == "23",
+              "先按属性挑书再取价格文本");
+
+        // ---- 空命中不是错误；空白与冒号、连字符名字 ----
+        const XPathResult none = XPathQuery(source, L"/catalog/magazine");
+        Check(none.ok && none.matches.empty() && none.error.empty(),
+              "没有匹配时 ok 为真、错误为空");
+        const XPathResult spaces = XPathQuery(source, L"  /catalog / book [ @id = 'b1' ]  ");
+        Check(spaces.ok && spaces.matches.size() == 1 && spaces.matches[0].line == 3,
+              "空格散在路径与谓词里也能解析");
+        const std::string names = "<?xml version=\"1.0\"?>\n<r><a-b/><ns:c><d_1>x</d_1></ns:c></r>";
+        const XPathResult dashed = XPathQuery(names, L"//a-b");
+        Check(dashed.ok && dashed.matches.size() == 1, "名字里的连字符");
+        const XPathResult colon = XPathQuery(names, L"//ns:c/d_1");
+        Check(colon.ok && colon.matches.size() == 1 && colon.matches[0].preview == L"<d_1>",
+              "名字里的冒号与下划线按字面比（不做命名空间解析）");
+
+        // ---- CDATA 归文本；长内容截断 ----
+        const XPathResult cdata = XPathQuery(
+            "<?xml version=\"1.0\"?>\n<r><d><![CDATA[<x>]]></d></r>", L"/r/d/text()");
+        Check(cdata.ok && cdata.matches.size() == 1 && cdata.matches[0].value == "<x>" &&
+                  cdata.matches[0].preview == L"#text=\"<x>\"",
+              "CDATA 也算文本节点，内容原样");
+        const XPathResult truncatedPreview = XPathQuery(
+            std::string("<?xml version=\"1.0\"?>\n<r><t>") + std::string(70, 'A') +
+                "</t></r>",
+            L"//t/text()");
+        Check(truncatedPreview.ok && truncatedPreview.matches.size() == 1,
+              "长文本能查出来");
+        const std::wstring longPreview = truncatedPreview.matches[0].preview;
+        Check(longPreview.size() == 61 && longPreview.back() == L'…',
+              "预览按 60 个宽字符截断并加省略号");
+        const XPathResult longAttr = XPathQuery(
+            std::string("<?xml version=\"1.0\"?>\n<r><t a=\"") + std::string(70, 'B') +
+                "\"/></r>",
+            L"//t/@a");
+        Check(longAttr.ok && longAttr.matches.size() == 1 &&
+                  longAttr.matches[0].value == std::string(70, 'B'),
+              "属性值字段本身不截断（预览才截）");
+        Check(longAttr.matches[0].preview.size() == 61 &&
+                  longAttr.matches[0].preview.back() == L'…',
+              "长属性值的预览同样截断");
+
+        // ---- 表达式错误：都带"表达式第 N 列"，绝不猜一个结果 ----
+        const XPathResult empty = XPathQuery(source, L"");
+        Check(!empty.ok && empty.error == L"表达式为空", "空表达式报错");
+        const XPathResult loneRoot = XPathQuery(source, L"/");
+        Check(!loneRoot.ok && loneRoot.error.find(L"表达式第 2 列") != std::wstring::npos,
+              "只有 / 时给出列号");
+        const XPathResult doubleSlash = XPathQuery(source, L"//");
+        Check(!doubleSlash.ok &&
+                  doubleSlash.error.find(L"表达式第 3 列") != std::wstring::npos,
+              "// 后面没有节点测试，列号指向末尾");
+        const XPathResult tailSlash = XPathQuery(source, L"/catalog/");
+        Check(!tailSlash.ok && tailSlash.error.find(L"后面要跟一个节点测试") !=
+                                   std::wstring::npos,
+              "尾随斜杠被挡下");
+        const XPathResult openBracket = XPathQuery(source, L"/catalog/book[1");
+        Check(!openBracket.ok && openBracket.error.find(L"谓词缺一个收尾的 ]") !=
+                                      std::wstring::npos,
+              "谓词没收尾");
+        const XPathResult emptyPred = XPathQuery(source, L"/catalog/book[]");
+        Check(!emptyPred.ok && emptyPred.error.find(L"谓词是空的") != std::wstring::npos,
+              "空谓词被挡下");
+        const XPathResult atNoName = XPathQuery(source, L"/catalog/book[@]");
+        Check(!atNoName.ok && atNoName.error.find(L"@ 后面要跟属性名") != std::wstring::npos,
+              "@ 后面没有名字被挡下");
+        const XPathResult quoteOpen = XPathQuery(source, L"/catalog/book[@id='b1]");
+        Check(!quoteOpen.ok && quoteOpen.error.find(L"引号没有闭合") != std::wstring::npos,
+              "比较值引号没闭合被挡下");
+        const XPathResult function = XPathQuery(source, L"/catalog/book[count(*)=1]");
+        Check(!function.ok && function.error.find(L"只支持 [序号]") != std::wstring::npos,
+              "函数谓词给出可支持的写法清单，不做半截解析");
+        const XPathResult unioned = XPathQuery(source, L"/catalog | /r");
+        Check(!unioned.ok && unioned.error.find(L"只支持一条路径") != std::wstring::npos,
+              "| 联合被明确拒绝");
+        const XPathResult twoSteps = XPathQuery(source, L"/catalog //book");
+        Check(twoSteps.ok && twoSteps.matches.size() == 3,
+              "两步之间的空格不影响解析（与 XPath 一致，// 仍是分隔符）");
+
+        // ---- XML 不合法：与其它 XML 工具共用同一条错误 ----
+        const XPathResult badXml = XPathQuery("<a>\n<b>\n</c>", L"//a");
+        Check(!badXml.ok && badXml.matches.empty(), "XML 不合法时不求值");
+        Check(badXml.error.find(L"第 3 行第 1 列") != std::wstring::npos,
+              "错误就是 XmlFormat 那条（含行列）");
+
+        // ---- 上限：命中 5000 截断，树截断也要如实报出来 ----
+        std::string huge = "<r>";
+        for (int index = 0; index < 25000; ++index) {
+            huge += "<i/>";
+        }
+        huge += "</r>";
+        const XPathResult hugeResult = XPathQuery(huge, L"//i");
+        Check(hugeResult.ok && hugeResult.treeTruncated,
+              "文档大到树被截断时，查询结果里标出 treeTruncated");
+        Check(hugeResult.truncated &&
+                  hugeResult.matches.size() == npcc::core::kMaxXPathMatches,
+              "命中停在 5000 并标出 truncated");
     }
 
     FinishSections();
