@@ -27,6 +27,7 @@
 #include "core/JsonFormat.h"
 #include "core/XmlFormat.h"
 #include "core/Localization.h"
+#include "core/ExportRtf.h"
 #include "shell/FolderPanel.h"
 #include "shell/FunctionListPanel.h"
 #include "core/SnapshotStore.h"
@@ -4904,6 +4905,112 @@ int main() {
             ::DestroyWindow(colourHost);
         } else {
             Check(false, "创建编辑控件失败");
+        }
+    }
+
+    Section("复制为富文本（选区样式文本 / 代码页转换 / RTF）");
+    {
+        using npcc::core::ExportOptions;
+        using npcc::core::ExportStyle;
+        using npcc::core::StyledByte;
+
+        // ---- ReadStyledText：读回来的**字节数**必须正好是请求的那一段 ----
+        // 这一条钉的是一个真实缺陷：SCI_GETSTYLEDTEXT 返回的是"写入的字节数"（每位置两个
+        // 字节），按它直接当字符数循环会在每次读取的末尾多出一倍长度的 '\0'。导出 HTML/RTF
+        // 的文件末尾一直拖着这些空字符，只是从来没有人核对过文件尾巴
+        const HWND styledHost = CreateHiddenHost();
+        npcc::edit::EditView view;
+        if (styledHost == nullptr) {
+            Check(false, "创建隐藏宿主窗口失败");
+        } else if (view.Create(styledHost, 941)) {
+            view.ApplyLightTheme();
+            view.SetCodePage(npcc::edit::kCodePageUtf8);
+            const char* source = "// 中文注释\nint value = 42;\n";
+            view.SetText(source);
+            view.ApplyLanguageForPath(L"D:\\t\\a.cpp");
+            {
+                std::string text;
+                std::vector<int> styles;
+                view.ReadStyledText(0, 6, text, styles);
+                Check(text.size() == 6, "读回 6 个字节就是 6 个字节（中文一个字三字节）");
+                CheckEqual(text, "// 中", "读回的正好是请求的那一段（6 个字节到「中」为止）");
+                Check(styles.size() == text.size(), "样式号与字节一一对应");
+            }
+            {
+                const int32_t length = static_cast<int32_t>(view.ByteLength());
+                std::string text;
+                std::vector<int> styles;
+                view.ReadStyledText(0, length, text, styles);
+                Check(text.size() == static_cast<std::size_t>(length),
+                      "整篇读回来的长度与文档长度一致（末尾不多出空字符）");
+                Check(text.find('\0') == std::string::npos, "正文里一个 NUL 都不该有");
+                Check(text.size() > 0 && text.back() == '\n', "最后那个字节就是原文的换行");
+                // 注释与代码的样式号应当不同：不同的话说明样式确实是按字节带回来的
+                bool distinct = false;
+                for (const int style : styles) {
+                    if (style != styles[0]) {
+                        distinct = true;
+                        break;
+                    }
+                }
+                Check(distinct, "注释与代码拿到了不同的样式号");
+            }
+            ::DestroyWindow(styledHost);
+        } else {
+            Check(false, "创建编辑控件失败");
+        }
+
+        // ---- 代码页转换：ANSI（GBK）文档的中文要变成正确的 UTF-8 ----
+        {
+            // "中文" 的 GBK 字节是 D6 D0 CE C4
+            const std::vector<StyledByte> gbk = {
+                {static_cast<char>(0xD6), 2}, {static_cast<char>(0xD0), 2},
+                {static_cast<char>(0xCE), 2}, {static_cast<char>(0xC4), 2}};
+            const std::vector<StyledByte> utf8 = npcc::core::StyledBytesAsUtf8(gbk, 936);
+            Check(utf8.size() == 6, "一个汉字三字节（两个汉字六个字节）");
+            Check(utf8[0].style == 2 && utf8[5].style == 2, "样式号跟着字符走");
+            std::string text;
+            for (const StyledByte& byte : utf8) {
+                text.push_back(byte.ch);
+            }
+            CheckEqual(text, "中文", "GBK 的两个汉字解成了正确的 UTF-8");
+            // 同一个汉字在 UTF-8 下正好也是这三字节，正好用来核对
+            Check(static_cast<unsigned char>(utf8[0].ch) == 0xE4 &&
+                      static_cast<unsigned char>(utf8[2].ch) == 0xAD,
+                  "中 = E4 B8 AD");
+        }
+        {
+            // ASCII 原样；UTF-8 的文档走直通路径
+            const std::vector<StyledByte> ascii = {{'a', 1}, {'b', 1}, {' ', 0}};
+            const std::vector<StyledByte> converted = npcc::core::StyledBytesAsUtf8(ascii, 936);
+            Check(converted.size() == 3 && converted[0].ch == 'a' && converted[2].ch == ' ',
+                  "纯 ASCII 的 ANSI 文档原样不动");
+            const std::vector<StyledByte> direct = npcc::core::StyledBytesAsUtf8(ascii, 65001);
+            Check(direct.size() == ascii.size() && direct[1].ch == 'b',
+                  "UTF-8 的文档直通（不折腾）");
+            Check(npcc::core::StyledBytesAsUtf8({}, 936).empty(), "空输入返回空");
+        }
+        {
+            // 截断的前导字节不能把程序带崩：原样留着，至少不丢内容
+            const std::vector<StyledByte> broken = {{'a', 0}, {static_cast<char>(0xD6), 0}};
+            const std::vector<StyledByte> out = npcc::core::StyledBytesAsUtf8(broken, 936);
+            Check(!out.empty(), "半截的序列不会让结果消失");
+            Check(out[0].ch == 'a', "前面的 ASCII 照常转换");
+        }
+        {
+            // 走完整条链：GBK 的"中文"经过转换之后，RTF 里应当是 \u20013?\u25991?
+            std::vector<StyledByte> bytes = npcc::core::StyledBytesAsUtf8(
+                {{static_cast<char>(0xD6), 1}, {static_cast<char>(0xD0), 1},
+                 {static_cast<char>(0xCE), 1}, {static_cast<char>(0xC4), 1}},
+                936);
+            ExportOptions options;
+            options.lineNumbers = false;
+            const std::vector<ExportStyle> styles = {{1, 0x000000, false, false}};
+            const std::string rtf = npcc::core::BuildRtf(bytes, styles, options);
+            Check(rtf.find("\\u20013?") != std::string::npos,
+                  "GBK 里的「中」在 RTF 里是正确的那个字符");
+            Check(rtf.find("\\u25991?") != std::string::npos, "「文」也一样");
+            Check(rtf.find("\\u0?") == std::string::npos, "RTF 里不该出现 NUL 字符");
         }
     }
 

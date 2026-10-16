@@ -39,6 +39,16 @@ struct StyledRun {
 
 std::vector<StyledRun> GroupStyledBytes(const std::vector<StyledByte>& bytes);
 
+// 把"编辑器缓冲区字节 + 每字节样式号"按 codePage 解成字符、再编成 UTF-8，样式号跟着
+// **字符**走。三个导出器（HTML / RTF / 剪贴板）都要先过这一步。
+//
+// 为什么必须过：编辑器缓冲区里只有 ANSI 文档是原始代码页字节（中文 Windows 上就是 GBK），
+// 其余都是 UTF-8。而导出器一律按 UTF-8 解——不转换的话，ANSI 文档里的中文会变成乱码，
+// 而且是**不报错的**那种（GBK 的字节按 UTF-8 解出来就是一串看不懂的字符）。
+// codePage 传 65001 时原样返回（UTF-8 文档的直通路径）。
+std::vector<StyledByte> StyledBytesAsUtf8(const std::vector<StyledByte>& bytes,
+                                          std::uint32_t codePage);
+
 // 生成一份**独立的** HTML：样式号 → CSS 类，正文放在 <pre> 里，行号可选。
 //
 // 纯函数：给"字节 + 样式号 + 样式外观"，吐出字符串。它不认识 Scintilla、也不碰文件，

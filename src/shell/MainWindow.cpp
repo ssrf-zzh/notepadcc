@@ -32,6 +32,7 @@
 #include "shell/StyleConfigDialog.h"
 #include "shell/MacroDialog.h"
 #include "shell/RunCommandDialog.h"
+#include "shell/Clipboard.h"
 #include "core/ExportHtml.h"
 #include "core/ExportRtf.h"
 #include "core/JsonFormat.h"
@@ -172,6 +173,7 @@ enum : npcc::core::CmdId {
     // 运行类（9）：第 1 号是 F5 那个对话框，第 kRunCommandBase 号起是用户存的命令
     kCmdRunDialog           = npcc::core::MakeCmdId(9, npcc::core::kRunCommandDialogIndex),
     kCmdEditAutoComplete = npcc::core::MakeCmdId(2, 33),
+    kCmdEditCopyAsRtf    = npcc::core::MakeCmdId(2, 34),
 
     kCmdWindowNext = npcc::core::MakeCmdId(11, 1),
     kCmdWindowPrev = npcc::core::MakeCmdId(11, 2),
@@ -800,6 +802,9 @@ void MainWindow::RegisterCommands() {
         needsBuffer, [this](const CmdContext& c) { c.view->Send(kSciCopy); });
     add(kCmdEditPaste, CmdCategory::Edit, L"cmd.edit.paste", L"粘贴(&P)",
         needsWritable, [this](const CmdContext& c) { c.view->Send(kSciPaste); });
+    add(kCmdEditCopyAsRtf, CmdCategory::Edit, L"cmd.edit.copyAsRtf",
+        L"复制为富文本（带颜色）(&R)", needsBuffer,
+        [this](const CmdContext&) { CommandCopyAsRtf(); });
     add(kCmdEditSelectAll, CmdCategory::Edit, L"cmd.edit.selectAll", L"全选(&L)",
         needsBuffer, [this](const CmdContext& c) { c.view->Send(kSciSelectAll); });
     add(kCmdEditColumnEdit, CmdCategory::Edit, L"cmd.edit.columnEdit",
@@ -4002,6 +4007,17 @@ void MainWindow::HandleFunctionNotify(const FunctionNotify& notification) {
 bool MainWindow::CollectStyledDocument(std::vector<core::StyledByte>& bytes,
                                        std::vector<core::ExportStyle>& styles,
                                        core::ExportOptions& options) const {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr) {
+        return false;
+    }
+    return CollectStyledRange(bytes, styles, options, 0, document->view->ByteLength());
+}
+
+bool MainWindow::CollectStyledRange(std::vector<core::StyledByte>& bytes,
+                                    std::vector<core::ExportStyle>& styles,
+                                    core::ExportOptions& options, int32_t start,
+                                    int32_t end) const {
     bytes.clear();
     styles.clear();
     edit::Document* document = ActiveDocument();
@@ -4009,22 +4025,36 @@ bool MainWindow::CollectStyledDocument(std::vector<core::StyledByte>& bytes,
         return false;
     }
     edit::EditView& view = *document->view;
+    if (end < start) {
+        std::swap(start, end);
+    }
+    start = std::max<int32_t>(0, start);
+    end = std::min<int32_t>(static_cast<int32_t>(view.ByteLength()), end);
+    if (end <= start) {
+        return false;   // 空的选区没有可复制的东西
+    }
     std::string text;
     std::vector<int> numbers;
-    const int32_t length = static_cast<int32_t>(view.ByteLength());
-    view.ReadStyledText(0, length, text, numbers);
+    view.ReadStyledText(start, end - start, text, numbers);
     if (text.size() != numbers.size()) {
         // 长度对不上说明读回的过程被打断了（理论上不会），宁可如实报错也不要导出半截
         return false;
     }
-    bytes.reserve(text.size());
+    // 编辑器缓冲区里只有 ANSI 文档是原始代码页字节；导出器一律按 UTF-8 解，
+    // 所以这里先统一成 UTF-8，样式号跟着字符走（不然 ANSI 文档里的中文是乱码）
+    const std::uint32_t codePage = document->buffer.encoding.uniMode == edit::UniMode::Ansi
+                                       ? document->buffer.encoding.codePage
+                                       : edit::kCodePageUtf8;
+    std::vector<core::StyledByte> raw;
+    raw.reserve(text.size());
     std::vector<bool> seen(256, false);
     for (std::size_t index = 0; index < text.size(); ++index) {
-        bytes.push_back(core::StyledByte{text[index], numbers[index]});
+        raw.push_back(core::StyledByte{text[index], numbers[index]});
         if (numbers[index] >= 0 && numbers[index] < 256) {
             seen[static_cast<std::size_t>(numbers[index])] = true;
         }
     }
+    bytes = core::StyledBytesAsUtf8(raw, codePage);
     // 样式外观从**控件**里读，而不是从配色文件里推：这样导出的颜色与屏幕上看到的一致
     // （包括用户在样式配置器里改过的、以及逐样式号的覆盖）
     for (std::size_t index = 0; index < seen.size(); ++index) {
@@ -4102,6 +4132,56 @@ void MainWindow::CommandExportHtml() {
     infra::LogInfo(L"export", L"已导出 HTML: " + std::wstring(file) + L"，" +
                                  std::to_wstring(html.size()) + L" 字节");
     statusBar_.SetMessage(L"已导出 HTML：" + std::wstring(file));
+}
+
+void MainWindow::CommandCopyAsRtf() {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr) {
+        ::MessageBoxW(hwnd_, L"没有打开的文档。", L"复制为富文本", MB_ICONINFORMATION);
+        return;
+    }
+    // 选区（没有选区则整篇）——与其它文本工具同一条约定
+    int32_t start = document->view->SelectionStart();
+    int32_t end = document->view->SelectionEnd();
+    if (start == end) {
+        start = 0;
+        end = static_cast<int32_t>(document->view->ByteLength());
+    }
+    if (end < start) {
+        std::swap(start, end);
+    }
+    std::vector<core::StyledByte> bytes;
+    std::vector<core::ExportStyle> styles;
+    core::ExportOptions options;
+    if (!CollectStyledRange(bytes, styles, options, start, end)) {
+        ::MessageBoxW(hwnd_, L"没有可复制的内容（选中的是空的）。", L"复制为富文本",
+                      MB_ICONINFORMATION);
+        return;
+    }
+    // 行号不进剪贴板：粘到 Word 里那一列数字是噪音（导出为 HTML 时可选带行号，
+    // 那是"存成一份可以看的文件"，与"粘一段代码"是两件事）
+    options.lineNumbers = false;
+    options.title = "notepadcc";
+    const std::string rtf = core::BuildRtf(bytes, styles, options);
+
+    std::string plain;
+    plain.reserve(bytes.size());
+    for (const core::StyledByte& byte : bytes) {
+        plain.push_back(byte.ch);
+    }
+    // 走到这里 bytes 已经是 UTF-8（CollectStyledRange 统一过），直接解成宽字符
+    const std::wstring wide = FromUtf8(plain);
+    if (!CopyRichTextToClipboard(hwnd_, wide, rtf)) {
+        ::MessageBoxW(hwnd_,
+                      L"没能写进剪贴板（可能被别的程序占着）。稍后再试一次。",
+                      L"复制为富文本", MB_ICONWARNING);
+        return;
+    }
+    infra::LogInfo(L"clipboard", L"已复制为富文本: " +
+                                      std::to_wstring(wide.size()) + L" 字符 / RTF " +
+                                      std::to_wstring(rtf.size()) + L" 字节");
+    statusBar_.SetMessage(L"已复制为富文本（" + std::to_wstring(wide.size()) +
+                          L" 字符，粘到 Word 里带颜色）");
 }
 
 void MainWindow::CommandExportRtf() {

@@ -36,6 +36,7 @@ std::vector<LangPack> MakeBuiltin() {
         Entry(L"cmd.edit.redo", L"Redo", L"R"),
         Entry(L"cmd.edit.cut", L"Cut", L"T"),
         Entry(L"cmd.edit.copy", L"Copy", L"C"),
+        Entry(L"cmd.edit.copyAsRtf", L"Copy as Rich Text (RTF)", L"R"),
         Entry(L"cmd.edit.paste", L"Paste", L"P"),
         Entry(L"cmd.edit.selectAll", L"Select All", L"L"),
         Entry(L"cmd.edit.columnEdit", L"Column Editor...", L"C"),

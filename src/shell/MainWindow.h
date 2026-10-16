@@ -207,6 +207,11 @@ private:
     bool CollectStyledDocument(std::vector<core::StyledByte>& bytes,
                                std::vector<core::ExportStyle>& styles,
                                core::ExportOptions& options) const;
+    // 与上者同一套读取，但只取 [start, end) 这一段（"复制为富文本"按选区走）
+    bool CollectStyledRange(std::vector<core::StyledByte>& bytes,
+                            std::vector<core::ExportStyle>& styles,
+                            core::ExportOptions& options, int32_t start, int32_t end) const;
+    void CommandCopyAsRtf();
     void ScheduleFunctionParse();          // 节流之后的解析请求
     void StartFunctionParse();             // 真正提交后台解析（由 WM_TIMER 触发）
     void HandleFunctionNotify(const FunctionNotify& notification);

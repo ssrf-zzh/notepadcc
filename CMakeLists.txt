@@ -184,6 +184,7 @@ set(NPCC_CORE_SOURCES
     src/shell/MacroDialog.cpp
     src/shell/RunCommandDialog.cpp
     src/shell/HexView.cpp
+    src/shell/Clipboard.cpp
     src/shell/FindBar.cpp
     src/shell/ColumnDialog.cpp
     src/shell/PreferencesDialog.cpp

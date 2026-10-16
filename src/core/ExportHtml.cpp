@@ -1,9 +1,13 @@
 #include "core/ExportHtml.h"
 
+#include <windows.h>
+
 #include <algorithm>
 #include <cstdio>
 #include <map>
 #include <set>
+
+#include "edit/Encoding.h"
 
 namespace npcc::core {
 namespace {
@@ -49,6 +53,51 @@ std::vector<StyledRun> GroupStyledBytes(const std::vector<StyledByte>& bytes) {
 
 std::string EscapeHtmlText(std::string_view text) {
     return EscapeInto(text);
+}
+
+std::vector<StyledByte> StyledBytesAsUtf8(const std::vector<StyledByte>& bytes,
+                                          std::uint32_t codePage) {
+    if (bytes.empty() || codePage == edit::kCodePageUtf8) {
+        return bytes;   // UTF-8 的文档直通：绝大多数文件走的都是这条路
+    }
+    std::vector<StyledByte> out;
+    out.reserve(bytes.size());
+    std::size_t index = 0;
+    while (index < bytes.size()) {
+        const unsigned char lead = static_cast<unsigned char>(bytes[index].ch);
+        std::size_t length = 1;
+        // 双字节代码页（GBK / Big5 / Shift-JIS…）的**前导字节要连着后一个字节一起解**，
+        // 否则一个汉字会被拆成两个看不懂的字符。用系统给的那张前导字节表，别自己写范围
+        if (lead >= 0x80 && ::IsDBCSLeadByteEx(codePage, lead) != 0 &&
+            index + 1 < bytes.size()) {
+            length = 2;
+        }
+        // 注意：**不能**把 &bytes[index].ch 当字节序列用。StyledByte 是
+        // {char ch; int style;}，ch 与 style 之间有对齐填充，"紧跟其后的那个字节"是填充
+        // 而不是下一个字符的字节（踩过：GBK 的双字节汉字在这里永远解不出来）。
+        // 老老实实把要解的这几个字节抄进一个小数组
+        char source[2] = {bytes[index].ch, 0};
+        if (length == 2) {
+            source[1] = bytes[index + 1].ch;
+        }
+        wchar_t wide = 0;
+        const int decoded = ::MultiByteToWideChar(codePage, 0, source,
+                                                  static_cast<int>(length), &wide, 1);
+        if (decoded != 1) {
+            // 解不出来（截断的前导字节、非法序列）：原样吐出去，至少不丢内容
+            out.push_back(bytes[index]);
+            ++index;
+            continue;
+        }
+        char utf8[8] = {};
+        const int written = ::WideCharToMultiByte(CP_UTF8, 0, &wide, 1, utf8,
+                                                  static_cast<int>(sizeof(utf8)), nullptr, nullptr);
+        for (int i = 0; i < written; ++i) {
+            out.push_back(StyledByte{utf8[i], bytes[index].style});   // 样式跟着字符走
+        }
+        index += length;
+    }
+    return out;
 }
 
 std::string BuildHtml(const std::vector<StyledByte>& bytes,

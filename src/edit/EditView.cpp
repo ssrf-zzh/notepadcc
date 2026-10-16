@@ -715,7 +715,7 @@ void EditView::ReadStyledText(int32_t start, int32_t length, std::string& text,
     if (length <= 0 || hwnd_ == nullptr) {
         return;
     }
-    // SCI_GETSTYLEDTEXT 一次把"字符 + 样式号"成对取回来（每对两个字节）。
+    // SCI_GETSTYLEDTEXT 一次把"字节 + 样式号"成对取回来（每对两个字节）。
     // 用块的方式取，是为了不为了 60 MB 的文档先要一大块内存；样式号在 Scintilla 里
     // 就是 0~255（STYLE_MAX），所以每对里的第二字节够用，不必逐字节去问（那要几十万次消息）
     constexpr int32_t kChunk = 64 * 1024;
@@ -733,8 +733,12 @@ void EditView::ReadStyledText(int32_t start, int32_t length, std::string& text,
         if (got <= 0) {
             break;
         }
-        // got 是**字符数**（不是字节数）；每对两个字节
-        for (intptr_t index = 0; index < got; ++index) {
+        // got 是**写入的字节数**（每个位置两个字节：一个字节内容 + 一个样式号），
+        // 所以对数 = got / 2。这里曾经按 got 直接循环，于是每读一段就在末尾多出一倍长度的
+        // '\0'——导出 HTML/RTF 的文件末尾一直拖着这些空字符，只是从来没人数过尾巴
+        //（Scintilla 的 GetStyledText 返回的是 iPlace，也就是 2×(cpMax-cpMin)，见附录 B）
+        const intptr_t pairs = got / 2;
+        for (intptr_t index = 0; index < pairs; ++index) {
             const char ch = buffer[static_cast<std::size_t>(index) * 2];
             const auto style = static_cast<unsigned char>(
                 buffer[static_cast<std::size_t>(index) * 2 + 1]);

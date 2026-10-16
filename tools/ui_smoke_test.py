@@ -23,6 +23,20 @@ user32.SendMessageW.restype = ctypes.c_ssize_t
 # 在 x64 上地址会被截断，Scintilla 读到的是野地址。
 user32.SendMessageW.argtypes = [wintypes.HWND, ctypes.c_uint, ctypes.c_size_t,
                                 ctypes.c_ssize_t]
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32.GlobalSize.restype = ctypes.c_size_t
+kernel32.GlobalSize.argtypes = [wintypes.HGLOBAL]
+kernel32.GlobalLock.restype = ctypes.c_void_p
+kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+kernel32.GlobalUnlock.restype = wintypes.BOOL
+user32.OpenClipboard.argtypes = [wintypes.HWND]
+user32.OpenClipboard.restype = wintypes.BOOL
+user32.CloseClipboard.restype = wintypes.BOOL
+user32.GetClipboardData.restype = wintypes.HANDLE
+user32.GetClipboardData.argtypes = [ctypes.c_uint]
+user32.RegisterClipboardFormatW.argtypes = [wintypes.LPCWSTR]
+user32.RegisterClipboardFormatW.restype = ctypes.c_uint
 # SendMessageTimeoutW 带指针参数，同样必须声明签名
 user32.SendMessageTimeoutW.restype = wintypes.LPARAM
 user32.SendMessageTimeoutW.argtypes = [wintypes.HWND, ctypes.c_uint, ctypes.c_size_t,
@@ -138,6 +152,9 @@ LANGUAGE_BASE = (7 << 12) | 128         # 界面语言：第 0 项是简体中�
 CMD_TOOL_EXPORT_LANGPACK = (14 << 12) | 35
 CMD_VIEW_HEX_TOGGLE = (4 << 12) | 21
 CMD_VIEW_HEX_GOTO = (4 << 12) | 22
+CMD_EDIT_COPY_AS_RTF = (2 << 12) | 34
+CF_UNICODETEXT = 13
+SCI_SETSEL = 2160
 HEX_VIEW_CLASS = "notepadccHexView"
 HEX_GOTO_CLASS = "notepadccHexGoto"
 RUN_DIALOG_CLASS = "notepadccRunCommand"
@@ -4003,6 +4020,8 @@ def run():
         failed = True
     if not test_hex_view(root):
         failed = True
+    if not test_copy_as_rtf(root):
+        failed = True
     if not test_auto_complete(root):
         failed = True
     if not test_associated_commands(root):
@@ -4017,7 +4036,8 @@ def run():
           "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + "
           "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + UDL + 暗色模式 + "
           "宏 + 文件夹工作区 + 函数列表 + 导出与打印 + 插件宿主 + JSON/XML 格式化 + "
-          "运行命令 + 界面语言 + 十六进制查看 + 自动完成 + 文件关联 + 绿色打包）")
+          "运行命令 + 界面语言 + 十六进制查看 + 复制为富文本 + 自动完成 + 文件关联 + "
+          "绿色打包）")
     return 0
 
 
@@ -4219,6 +4239,187 @@ def has_cjk(text):
         if "\u3000" <= ch <= "\u9fff" or "\uff00" <= ch <= "\uffef":
             return True
     return False
+
+def read_clipboard(format_id):
+    """读剪贴板里某个格式的**原始字节**（读不到返回 None）。
+
+    刻意不"读到第一个 NUL 就停"：那样会把"末尾多出一堆空字符"这种问题藏起来——
+    本轮就抓到过（导出与剪贴板都拖着这些空字符），所以调用方自己按长度核对。
+    """
+    if not user32.OpenClipboard(None):
+        return None
+    try:
+        handle = user32.GetClipboardData(format_id)
+        if not handle:
+            return None
+        size = kernel32.GlobalSize(handle)
+        pointer = kernel32.GlobalLock(handle)
+        if not pointer:
+            return None
+        raw = ctypes.string_at(pointer, size)
+        kernel32.GlobalUnlock(handle)
+        return raw
+    finally:
+        user32.CloseClipboard()
+
+
+def read_clipboard_rtf():
+    fmt = user32.RegisterClipboardFormatW("Rich Text Format")
+    raw = read_clipboard(fmt)
+    if raw is None:
+        return None
+    return raw.rstrip(b"\x00").decode("ascii", errors="replace")
+
+
+def test_copy_as_rtf(root):
+    """复制为富文本：剪贴板里**同时**有纯文本与 RTF，两边的内容都对得上。
+
+    这一段会占用系统剪贴板（复制本来就是这个行为）。
+    """
+    work = os.path.join(root, "build", "rtf_test")
+    os.makedirs(work, exist_ok=True)
+    cfg = os.path.join(root, "build", "bin", "config")
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+
+    utf8Path = os.path.join(work, "sample.cpp")
+    utf8Source = "// 中文注释\nint value = 42;\n"
+    with open(utf8Path, "w", encoding="utf-8", newline="") as handle:
+        handle.write(utf8Source)
+    # ANSI（GBK）那份：中文按 GBK 写进去，程序会把它识别成 ANSI 文档。
+    # 这一份专门核对"缓冲区字节按代码页解成 UTF-8"那条路（不转换的话粘出来是乱码）
+    gbkPath = os.path.join(work, "gbk.txt")
+    gbkText = "中文注释\n"
+    with open(gbkPath, "wb") as handle:
+        handle.write(gbkText.encode("gbk"))
+
+    def clean_config():
+        for name in ("config.xml", "session.xml"):
+            path = os.path.join(cfg, name)
+            if os.path.exists(path):
+                os.remove(path)
+
+    def find_scintilla(window):
+        for child in children(window):
+            if class_name(child) == "Scintilla" and user32.IsWindowVisible(child):
+                return child
+        return None
+
+    clean_config()
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", utf8Path], cwd=root)
+    window = wait_for_main_window("notepadcc - sample.cpp")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        time.sleep(0.8)
+        scinti = find_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到编辑控件")
+            return False
+
+        # 1) 选中第一行（含中文），复制为富文本
+        selection = "// 中文注释"
+        user32.SendMessageW(scinti, SCI_SETSEL, 0, len(selection.encode("utf-8")))
+        time.sleep(0.3)
+        user32.PostMessageW(window, WM_COMMAND, CMD_EDIT_COPY_AS_RTF, 0)
+        time.sleep(1.2)
+
+        raw = read_clipboard(CF_UNICODETEXT)
+        if raw is None:
+            print("  FAIL: 剪贴板里没有纯文本")
+            return False
+        # 精确长度：多出来的字符（比如一堆 NUL）在这里就会被抓住，而不是靠"读到 NUL 为止"
+        if len(raw) != (len(selection) + 1) * 2:
+            print(f"  FAIL: 剪贴板纯文本的长度不对：{len(raw)} 字节"
+                  f"（期望 {(len(selection) + 1) * 2}）")
+            return False
+        plain = raw.decode("utf-16-le")
+        if plain != selection + "\x00":
+            print(f"  FAIL: 剪贴板纯文本不对 {plain!r}")
+            return False
+
+        rtf = read_clipboard_rtf()
+        if rtf is None:
+            print("  FAIL: 剪贴板里没有 \"Rich Text Format\" 格式")
+            return False
+        if not rtf.startswith("{\\rtf1"):
+            print(f"  FAIL: RTF 开头不对 {rtf[:40]!r}")
+            return False
+        # cpp 的注释样式（内置配色是 #2E7D32）与斜体：证明带的是**语法配色**，不是纯文本
+        if "\\colortbl" not in rtf or "\\red46\\green125\\blue50" not in rtf:
+            print(f"  FAIL: RTF 里没有注释样式的颜色\n{rtf}")
+            return False
+        # 注释样式是斜体：RTF 里应当有 \i（开）与 \i0（关）这一对
+        if "\\i" not in rtf or "\\i0" not in rtf:
+            print(f"  FAIL: RTF 里没有斜体（注释样式是斜体）\n{rtf}")
+            return False
+        if "\\u20013?" not in rtf or "\\u25991?" not in rtf:
+            print(f"  FAIL: RTF 里的中文不对（应当是 \\u20013?\\u25991?…）\n{rtf}")
+            return False
+        if "\\u0?" in rtf:
+            print(f"  FAIL: RTF 里出现了 NUL 字符（读样式文本时多读了空字节）\n{rtf}")
+            return False
+
+        # 2) 没有选区时整篇：纯文本应当正好是整份文件
+        user32.SendMessageW(scinti, SCI_SETSEL, 0, 0)
+        time.sleep(0.3)
+        user32.PostMessageW(window, WM_COMMAND, CMD_EDIT_COPY_AS_RTF, 0)
+        time.sleep(1.2)
+        raw = read_clipboard(CF_UNICODETEXT)
+        if raw is None or raw.decode("utf-16-le").rstrip("\x00") != utf8Source:
+            actual = raw.decode("utf-16-le") if raw else None
+            print(f"  FAIL: 没有选区时应当复制整篇，实际 {actual!r}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    # 3) ANSI（GBK）文档：剪贴板里的中文必须是正确的、RTF 里的字也对
+    clean_config()
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", gbkPath], cwd=root)
+    window = wait_for_main_window("notepadcc - gbk.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到第二个实例的主窗口")
+            return False
+        time.sleep(0.8)
+        scinti = find_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到编辑控件")
+            return False
+        user32.SendMessageW(scinti, SCI_SETSEL, 0, 0)
+        time.sleep(0.3)
+        user32.PostMessageW(window, WM_COMMAND, CMD_EDIT_COPY_AS_RTF, 0)
+        time.sleep(1.2)
+        raw = read_clipboard(CF_UNICODETEXT)
+        if raw is None or raw.decode("utf-16-le").rstrip("\x00") != gbkText:
+            actual = raw.decode("utf-16-le") if raw else None
+            print(f"  FAIL: GBK 文档的纯文本不对：{actual!r}（期望 {gbkText!r}）")
+            return False
+        rtf = read_clipboard_rtf()
+        if rtf is None or "\\u20013?" not in rtf:
+            print(f"  FAIL: GBK 文档的 RTF 里「中」是错的（按代码页解那一步没生效）\n{rtf}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        for name in ("config.xml", "session.xml"):
+            path = os.path.join(cfg, name)
+            if os.path.exists(path):
+                os.remove(path)
+
+    print("  复制为富文本：剪贴板里同时有纯文本与 RTF（纯文本按精确长度核对）、"
+          "RTF 带语法配色与斜体、中文是正确的字符、没有多余的空字符；"
+          "没有选区时复制整篇；ANSI(GBK) 文档也能正确转换")
+    return True
 
 
 def hex_row_text(data, offset, width=8):
