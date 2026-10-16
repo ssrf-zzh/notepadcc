@@ -1,0 +1,8 @@
+{
+  "name": "badabi",
+  "version": "1.0.0",
+  "author": "notepadcc 示例",
+  "description": "故意声明错误的 ABI 版本，用来验证宿主会拒载并说清原因",
+  "dll": "badabi.dll",
+  "loadOrder": 20
+}

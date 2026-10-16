@@ -32,6 +32,7 @@
 #include "core/ExportRtf.h"
 #include "core/PrintText.h"
 #include "core/PrintPaging.h"
+#include "shell/PluginAdminDialog.h"
 #include "core/ShortcutStore.h"
 #include "infra/SingleInstance.h"
 #include "infra/FileAssociation.h"
@@ -160,6 +161,7 @@ enum : npcc::core::CmdId {
     kCmdSettingsShortcuts   = npcc::core::MakeCmdId(7, 2),
     kCmdSettingsRegisterAssoc   = npcc::core::MakeCmdId(7, 3),
     kCmdSettingsUnregisterAssoc = npcc::core::MakeCmdId(7, 4),
+    kCmdSettingsPlugins         = npcc::core::MakeCmdId(7, 5),
 
     kCmdHelpAbout = npcc::core::MakeCmdId(12, 1),
 
@@ -171,6 +173,7 @@ enum : npcc::core::CmdId {
     kSciCopy      = 2178,
     kSciPaste     = 2179,
     kSciGotoLine  = 2024,   // SCI_GOTOLINE（函数列表跳转用）
+    kSciReplaceSel = 2170,  // SCI_REPLACESEL（插件替换选区用）
 };
 
 void CopyTextToClipboard(HWND owner, const std::wstring& text) {
@@ -320,6 +323,8 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             RegisterCommands();
             // 默认方案先留一份（"恢复默认"要用），随后让 shortcuts.xml 覆盖它
             defaultShortcuts_ = registry_.AllBindings();
+            // 插件要在快捷键之前加载：插件命令也要能吃到 shortcuts.xml 里的绑定
+            LoadPlugins();
             std::wstring shortcutError;
             std::vector<std::wstring> shortcutWarnings;
             if (!shortcutStore_.Load(registry_, &shortcutError, &shortcutWarnings)) {
@@ -1063,6 +1068,9 @@ void MainWindow::RegisterCommands() {
     add(kCmdSettingsUnregisterAssoc, CmdCategory::Settings, L"cmd.settings.unregisterAssoc",
         L"从打开方式列表移除(&R)", core::kCmdNone,
         [this](const CmdContext&) { CommandRegisterAssociations(false); });
+    add(kCmdSettingsPlugins, CmdCategory::Settings, L"cmd.settings.plugins",
+        L"插件管理器(&G)...", core::kCmdNone,
+        [this](const CmdContext&) { CommandPluginManager(); });
 
     // ---- 帮助 ----
     add(kCmdHelpAbout, CmdCategory::Help, L"cmd.help.about", L"关于 notepadcc(&A)",
@@ -3693,6 +3701,77 @@ void MainWindow::ApplyFunctionSymbols(std::uint64_t requestId,
     functionListPanel_.SetSymbols(symbols);
     statusBar_.SetMessage(count == 0 ? L"函数列表：没有找到符号"
                                      : L"函数列表：" + std::to_wstring(count) + L" 个符号");
+}
+
+// ---------------------------------------------------------------- 插件宿主（设计文档 2.10）
+
+bool MainWindow::RegisterPluginCommand(const std::wstring& pluginName, const std::wstring& key,
+                                       const std::wstring& name, void (*execute)(void*),
+                                       void* pluginCookie) {
+    if (execute == nullptr) {
+        return false;
+    }
+    // 命令键带上插件名：不同插件可以各自用一个 "insert"，不会互相撞
+    const std::wstring fullKey = pluginName.empty() ? key : pluginName + L"." + key;
+    core::Command command;
+    command.category = core::CmdCategory::Plugin;
+    command.key = L"plugin." + fullKey;
+    command.text = pluginName.empty() ? name : (name + L"（" + pluginName + L"）");
+    // 插件命令**可以进宏**（对标产品也允许录），但插件自己不能再录别人
+    command.flags = core::kCmdRecordable;
+    command.execute = [execute, pluginCookie](const core::CmdContext&) { execute(pluginCookie); };
+    const core::CmdId id = registry_.Register(std::move(command));
+    return id != core::kCmdNone;
+}
+
+std::wstring MainWindow::ConfigPath() const {
+    return infra::ConfigRoot().wstring();
+}
+
+std::string MainWindow::EditorText() const {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr) {
+        return {};
+    }
+    return document->view->GetAllText();
+}
+
+bool MainWindow::ReplaceSelection(std::string_view utf8) {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr || document->buffer.isReadOnly) {
+        return false;
+    }
+    document->view->Send(kSciReplaceSel, 0, reinterpret_cast<intptr_t>(std::string(utf8).c_str()));
+    return true;
+}
+
+void MainWindow::ShowMessage(const std::wstring& text) {
+    ::MessageBoxW(hwnd_, text.c_str(), L"插件", MB_ICONINFORMATION);
+}
+
+void MainWindow::Log(int level, const std::wstring& text) {
+    switch (level) {
+        case 0: infra::LogError(L"plugin", text); break;
+        case 1: infra::LogWarn(L"plugin", text); break;
+        default: infra::LogInfo(L"plugin", text); break;
+    }
+}
+
+void MainWindow::LoadPlugins() {
+    plugins_.LoadAll(*this, &registry_);
+    const std::size_t loaded = plugins_.LoadedCount();
+    if (!plugins_.Plugins().empty()) {
+        infra::LogInfo(L"plugin", L"插件扫描完成：加载 " + std::to_wstring(loaded) + L" 个，共发现 " +
+                                     std::to_wstring(plugins_.Plugins().size()) + L" 个");
+    }
+}
+
+void MainWindow::CommandPluginManager() {
+    if (ShowPluginManager(hwnd_, plugins_)) {
+        // 启用/禁用只写文件，**下次启动生效**（不能安全卸库，见 PluginHost 的说明），
+        // 所以这里只提示一句，不假装立刻生效
+        statusBar_.SetMessage(L"插件启用/禁用已保存，重启程序后生效");
+    }
 }
 
 void MainWindow::CommandToggleDarkMode() {

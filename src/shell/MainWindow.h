@@ -25,6 +25,7 @@
 #include "shell/TabBar.h"
 #include "shell/FolderPanel.h"
 #include "shell/FunctionListPanel.h"
+#include "plugin/PluginHost.h"
 #include "shell/FindBar.h"
 #include "shell/SearchPanel.h"
 #include "search/CrossFileSearch.h"
@@ -33,7 +34,9 @@
 
 namespace npcc::shell {
 
-class MainWindow {
+// MainWindow 实现插件宿主需要的那几个动作（文档、命令、日志都在外壳手里）。
+// 用继承而不是回调函数簇：接口只有六个方法，插件宿主也不认识别的窗口类型
+class MainWindow : public plugin::HostActions {
 public:
     static constexpr const wchar_t* kClassName = L"notepadccMainWindow";
 
@@ -144,6 +147,18 @@ private:
     void CommandPrint();
     void CommandExportHtml();
     void CommandExportRtf();
+    // ---- 插件（设计文档 2.10）----
+    void LoadPlugins();
+    void CommandPluginManager();
+    // plugin::HostActions
+    bool RegisterPluginCommand(const std::wstring& pluginName, const std::wstring& key,
+                               const std::wstring& name, void (*execute)(void*),
+                               void* pluginCookie) override;
+    std::wstring ConfigPath() const override;
+    std::string  EditorText() const override;
+    bool         ReplaceSelection(std::string_view utf8) override;
+    void         ShowMessage(const std::wstring& text) override;
+    void         Log(int level, const std::wstring& text) override;
     // 收集"当前文档的带样式文本 + 各样式的外观"，导出与打印共用
     bool CollectStyledDocument(std::vector<core::StyledByte>& bytes,
                                std::vector<core::ExportStyle>& styles,
@@ -213,6 +228,7 @@ private:
     TabBar                     tabBar_;
     FolderPanel                folderPanel_;
     FunctionListPanel          functionListPanel_;
+    plugin::PluginHost         plugins_;
     std::unique_ptr<infra::ThreadPool> functionPool_;
     std::uint64_t              functionRequestId_ = 0;
     bool                       functionListVisible_ = false;

@@ -21,6 +21,8 @@
 #include "core/ExportRtf.h"
 #include "core/PrintText.h"
 #include "core/PrintPaging.h"
+#include "plugin/PluginHost.h"
+#include "core/JsonFlat.h"
 #include "shell/FolderPanel.h"
 #include "shell/FunctionListPanel.h"
 #include "core/SnapshotStore.h"
@@ -2621,6 +2623,198 @@ int main() {
             Check(bindings.size() == 1 && bindings[0].keyCode == 'K', "快捷键改动也生效了");
             std::filesystem::remove(path, ec);
         }
+    }
+
+    // ---------------------------------------------------------------- 插件宿主
+    // 这一段的重点是"**真的把 DLL 加载起来**"：示例插件在构建树里（CMake 会先把它编译好），
+    // 测试把它拷进配置目录的 plugins/ 下，再让 PluginHost 去发现、校验、加载、注册命令。
+    Section("插件宿主（SDK 校验 / 发现 / 加载 / 拒绝）");
+    {
+        using npcc::plugin::HostActions;
+        using npcc::plugin::PluginHost;
+        using npcc::plugin::PluginStatus;
+
+        npcc::infra::InitializePaths(true);
+        const std::filesystem::path samples = NPCC_SAMPLE_PLUGINS_DIR;
+        const std::filesystem::path root = PluginHost::PluginsRoot();
+        std::error_code ec;
+        std::filesystem::remove_all(root, ec);
+        std::filesystem::remove(PluginHost::StatePath(), ec);
+        std::filesystem::create_directories(root, ec);
+        // 示例插件拷进来（保持目录名与 plugin.json 里声明的 dll 名一致）
+        std::filesystem::copy(samples / L"hello", root / L"hello",
+                              std::filesystem::copy_options::recursive, ec);
+        Check(std::filesystem::exists(root / L"hello" / L"hello.dll"), "示例插件拷进配置目录");
+
+        // 记录外壳被要求做什么（真外壳是 MainWindow，这里只验证宿主有没有正确回调）
+        class Recorder : public HostActions {
+        public:
+            bool RegisterPluginCommand(const std::wstring& pluginName, const std::wstring& key,
+                                       const std::wstring& name, void (*execute)(void*),
+                                       void* pluginCookie) override {
+                ++registered;
+                lastPlugin = pluginName;
+                lastKey = key;
+                lastName = name;
+                lastExecute = execute;
+                lastCookie = pluginCookie;
+                return true;
+            }
+            std::wstring ConfigPath() const override {
+                return npcc::infra::ConfigRoot().wstring();
+            }
+            std::string EditorText() const override { return "0123456789"; }
+            bool ReplaceSelection(std::string_view utf8) override {
+                replaced.assign(utf8.begin(), utf8.end());
+                return true;
+            }
+            void ShowMessage(const std::wstring&) override {}
+            void Log(int, const std::wstring& text) override { logs.push_back(text); }
+
+            int         registered = 0;
+            std::wstring lastPlugin;
+            std::wstring lastKey;
+            std::wstring lastName;
+            void (*lastExecute)(void*) = nullptr;
+            void*        lastCookie = nullptr;
+            std::string  replaced;
+            std::vector<std::wstring> logs;
+        };
+
+        // 1) 正常加载：发现 → 校验 → Init → 注册命令
+        {
+            Recorder recorder;
+            npcc::core::CommandRegistry registry;
+            PluginHost host;
+            host.LoadAll(recorder, &registry);
+            Check(host.Plugins().size() == 1, "发现一个插件");
+            Check(host.Plugins()[0].loaded && host.Plugins()[0].name == L"hello",
+                  "hello 插件加载成功");
+            Check(host.LoadedCount() == 1, "加载计数");
+            Check(recorder.registered == 1, "插件注册了一条命令");
+            Check(recorder.lastPlugin == L"hello" && recorder.lastKey == L"hello.insert",
+                  "宿主把插件名与命令键都传对了");
+            // 执行那条命令：应当回调进插件，插件再调宿主的 SetEditorText
+            Check(recorder.lastExecute != nullptr, "命令回调就绪");
+            if (recorder.lastExecute != nullptr) {
+                recorder.lastExecute(recorder.lastCookie);
+                Check(recorder.replaced == "// 来自 hello 插件\n",
+                      "执行插件命令 → 插件把文本交给了宿主");
+            }
+            // 插件在 Init 里也调了宿主的 Log / GetConfigPath / GetEditorText
+            bool sawInit = false;
+            for (const std::wstring& line : recorder.logs) {
+                if (line.find(L"hello 插件已初始化") != std::wstring::npos) {
+                    sawInit = true;
+                }
+            }
+            Check(sawInit, "插件的 Init 通过宿主服务写了日志");
+            host.ShutdownAll();
+        }
+
+        // 2) 禁用：写进 plugins.xml，重新加载时就跳过（不是错误）
+        {
+            std::wstring error;
+            Check(PluginHost::SetDisabled(L"hello", true, &error), "禁用写盘成功");
+            Check(std::filesystem::exists(PluginHost::StatePath()), "plugins.xml 落盘");
+            Check(PluginHost::IsDisabled(L"hello"), "禁用状态读得回来");
+            Recorder recorder;
+            npcc::core::CommandRegistry registry;
+            PluginHost host;
+            host.LoadAll(recorder, &registry);
+            Check(host.Plugins().size() == 1 && host.Plugins()[0].disabled &&
+                      !host.Plugins()[0].loaded,
+                  "被禁用的插件只登记不加载");
+            Check(recorder.registered == 0, "被禁用时不会注册命令");
+            Check(PluginHost::SetDisabled(L"hello", false, &error), "重新启用写盘成功");
+        }
+
+        // 3) ABI 不匹配：拒载，理由里要写清"插件要几、宿主是几"
+        {
+            std::filesystem::copy(samples / L"badabi", root / L"badabi",
+                                  std::filesystem::copy_options::recursive, ec);
+            Recorder recorder;
+            npcc::core::CommandRegistry registry;
+            PluginHost host;
+            host.LoadAll(recorder, &registry);
+            Check(host.Plugins().size() == 2, "发现两个插件");
+            const PluginStatus* bad = nullptr;
+            for (const PluginStatus& status : host.Plugins()) {
+                if (status.dllPath.filename() == L"badabi.dll") {
+                    bad = &status;
+                }
+            }
+            Check(bad != nullptr && !bad->loaded && !bad->reason.empty(), "ABI 不匹配的被拒载");
+            Check(bad != nullptr && bad->reason.find(L"ABI") != std::wstring::npos,
+                  "理由里说明是 ABI 版本问题");
+            host.ShutdownAll();
+        }
+
+        // 4) 不是 DLL 的文件、缺导出函数的 DLL：都要给出可读原因，而不是崩
+        {
+            const std::filesystem::path junk = root / L"junk" / L"junk.dll";
+            std::filesystem::create_directories(junk.parent_path(), ec);
+            WriteFileDirect(junk.wstring(), "这不是一个 DLL，只是一段文本");
+            Recorder recorder;
+            npcc::core::CommandRegistry registry;
+            PluginHost host;
+            host.LoadAll(recorder, &registry);
+            const PluginStatus* broken = nullptr;
+            for (const PluginStatus& status : host.Plugins()) {
+                if (status.name == L"junk") {
+                    broken = &status;
+                }
+            }
+            Check(broken != nullptr && !broken->loaded, "坏文件不会被当成插件加载");
+            Check(broken != nullptr &&
+                      (broken->reason.find(L"加载 DLL 失败") != std::wstring::npos ||
+                       broken->reason.find(L"不是 x64") != std::wstring::npos),
+                  "理由里说明是加载失败/位数不对");
+            host.ShutdownAll();
+        }
+
+        // 5) 清单解析：缺字段用缺省值、坏 JSON 报错、依赖缺失则拒载
+        {
+            npcc::core::JsonObject object;
+            std::wstring error;
+            Check(npcc::core::ParseJsonObject(
+                      R"({"name":"a","version":"2.1","loadOrder":5,"disabled":true})", object,
+                      &error),
+                  "扁平 JSON 解析成功");
+            Check(object.StringOr("name", "") == "a" &&
+                      object.StringOr("version", "0") == "2.1" && object.NumberOr("loadOrder", 0) == 5 &&
+                      object.BoolOr("disabled", false),
+                  "字符串/数字/布尔都读对了");
+            Check(object.StringOr("author", "缺省") == "缺省", "缺字段用缺省值");
+            Check(!npcc::core::ParseJsonObject(R"({"name": })", object, &error),
+                  "坏 JSON 解析失败");
+            Check(!error.empty(), "失败时给出位置");
+            Check(!npcc::core::ParseJsonObject("[\"array\"]", object, &error),
+                  "只认对象，数组要拒绝");
+
+            // 依赖缺失：写一个依赖 hello 但 hello 被禁用（上面第 2 步用过、这里先启用回来）
+            const std::filesystem::path dep = root / L"needsdep";
+            std::filesystem::create_directories(dep, ec);
+            WriteFileDirect((dep / L"plugin.json").wstring(),
+                            R"({"name":"needsdep","dll":"needsdep.dll","dependencies":"nosuchplugin"})");
+            WriteFileDirect((dep / L"needsdep.dll").wstring(), "MZ");
+            Recorder recorder;
+            npcc::core::CommandRegistry registry;
+            PluginHost host;
+            host.LoadAll(recorder, &registry);
+            bool sawMissingDep = false;
+            for (const PluginStatus& status : host.Plugins()) {
+                if (status.name == L"needsdep" &&
+                    status.reason.find(L"缺少依赖") != std::wstring::npos) {
+                    sawMissingDep = true;
+                }
+            }
+            Check(sawMissingDep, "依赖没满足时拒载并说明缺谁");
+            host.ShutdownAll();
+        }
+
+        std::filesystem::remove_all(root, ec);
+        std::filesystem::remove(PluginHost::StatePath(), ec);
     }
 
     // ---------------------------------------------------------------- 导出与打印

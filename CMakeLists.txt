@@ -135,6 +135,7 @@ set(NPCC_CORE_SOURCES
     src/core/SessionManager.cpp
     src/core/ShortcutStore.cpp
     src/core/SnapshotStore.cpp
+    src/core/JsonFlat.cpp
     src/edit/ColumnEdit.cpp
     src/edit/ColumnText.cpp
     src/edit/EditView.cpp
@@ -158,6 +159,7 @@ set(NPCC_CORE_SOURCES
     src/io/FileWatcher.cpp
     src/io/MappedFile.cpp
     src/io/XmlFile.cpp
+    src/plugin/PluginHost.cpp
     src/search/EscapeSequence.cpp
     src/search/ByteMatcher.cpp
     src/search/CrossFileSearch.cpp
@@ -172,6 +174,7 @@ set(NPCC_CORE_SOURCES
     src/shell/MenuBuilder.cpp
     src/shell/FunctionListPanel.cpp
     src/shell/FolderPanel.cpp
+    src/shell/PluginAdminDialog.cpp
     src/shell/MacroDialog.cpp
     src/shell/FindBar.cpp
     src/shell/ColumnDialog.cpp
@@ -183,7 +186,7 @@ set(NPCC_CORE_SOURCES
     src/shell/TabBar.cpp)
 
 add_library(notepadcc_core STATIC ${NPCC_CORE_SOURCES})
-target_include_directories(notepadcc_core PUBLIC src)
+target_include_directories(notepadcc_core PUBLIC src "${CMAKE_CURRENT_SOURCE_DIR}/plugins-sdk")
 target_link_libraries(notepadcc_core PUBLIC
     scintilla lexilla pcre2-8-static npcc_flags comctl32 comdlg32 shell32)
 
@@ -199,6 +202,39 @@ if (MSVC)
 endif()
 
 # ---------------------------------------------------------------- notepadcc 主程序
+# ---------------------------------------------------------------- 示例插件（只为了让插件宿主有个能真跑的对象）
+# ① hello：正常插件；② hello_badabi：故意声明错误的 ABI 版本，用来验证宿主会拒载并说清原因。
+# 两个都输出到 build/plugins/<名字>/，把 plugin.json 一起拷过去，就是一个可安装的插件目录。
+function(npcc_add_sample_plugin target_name out_name abi_version manifest_name)
+    add_library(${target_name} MODULE samples/hello_plugin/hello_plugin.cpp)
+    # 运行库必须与主程序一致（静态）：否则插件会依赖 libstdc++-6.dll / MSVCP140.dll，
+    # 而主程序是静态链接的，LoadLibrary 会因为找不到依赖直接失败（实测踩过：错误码 126）
+    target_link_libraries(${target_name} PRIVATE npcc_app_options)
+    # 与主程序同一套编译选项：SDK 头里有中文注释，MSVC 不加 /utf-8 会按 936 读，
+    # 先是 C4819 警告，接着就是一片语法错误（踩过）
+    target_link_libraries(${target_name} PRIVATE npcc_flags)
+    target_include_directories(${target_name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/plugins-sdk")
+    target_compile_definitions(${target_name} PRIVATE NPCC_SAMPLE_ABI=${abi_version})
+    set_target_properties(${target_name} PROPERTIES
+        PREFIX "" OUTPUT_NAME "${out_name}"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins/${out_name}"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins/${out_name}")
+    # 多配置生成器（VS）会给每个配置再套一层 Release/ 之类的子目录，
+    # 这里显式抹平——测试要按固定路径去找插件（与 npcc_flat_output 同一个理由）
+    foreach(config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+        set_target_properties(${target_name} PROPERTIES
+            LIBRARY_OUTPUT_DIRECTORY_${config} "${CMAKE_BINARY_DIR}/plugins/${out_name}"
+            RUNTIME_OUTPUT_DIRECTORY_${config} "${CMAKE_BINARY_DIR}/plugins/${out_name}")
+    endforeach()
+    add_custom_command(TARGET ${target_name} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/samples/hello_plugin/${manifest_name}"
+                "$<TARGET_FILE_DIR:${target_name}>/plugin.json")
+endfunction()
+
+npcc_add_sample_plugin(hello_plugin hello 1 plugin.json)
+# 故意声明 ABI 99：验证宿主会拒载并说清"插件要 99、宿主是 1"
+npcc_add_sample_plugin(hello_badabi_plugin badabi 99 plugin_badabi.json)
 add_executable(notepadcc WIN32 src/app/main.cpp)
 target_link_libraries(notepadcc PRIVATE notepadcc_core npcc_app_options)
 
@@ -226,6 +262,11 @@ option(NPCC_BUILD_TESTS "构建单元测试" ON)
 if (NPCC_BUILD_TESTS)
     add_executable(notepadcc_tests tests/unit/test_main.cpp)
     target_link_libraries(notepadcc_tests PRIVATE notepadcc_core npcc_app_options)
+    # 单元测试要能真的加载那两个示例插件（验证"加载成功"与"ABI 不匹配被拒"两条路），
+    # 所以把它们的构建目录告诉测试
+    target_compile_definitions(notepadcc_tests PRIVATE
+        NPCC_SAMPLE_PLUGINS_DIR=L"${CMAKE_BINARY_DIR}/plugins")
+    add_dependencies(notepadcc_tests hello_plugin hello_badabi_plugin)
     npcc_flat_output(notepadcc_tests)
 endif()
 

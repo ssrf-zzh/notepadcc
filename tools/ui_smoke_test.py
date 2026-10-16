@@ -142,6 +142,11 @@ CMD_FUNCTION_JUMP = (4 << 12) | 20
 CMD_FILE_PRINT = (1 << 12) | 8
 CMD_FILE_EXPORT_HTML = (1 << 12) | 9
 CMD_FILE_EXPORT_RTF = (1 << 12) | 10
+CMD_SETTINGS_PLUGINS = (7 << 12) | 5
+PLUGIN_ADMIN_CLASS = "notepadccPluginAdmin"
+PLUGIN_ADMIN_LIST = 1401
+PLUGIN_ADMIN_CANCEL = 1411
+LB_GETCOUNT_ = 0x018B
 TREE_CLASS = "SysTreeView32"
 TVM_GETCOUNT = 0x1105
 
@@ -2003,6 +2008,124 @@ def test_export_and_print(root):
     return True
 
 
+def test_plugins(root):
+    """插件宿主：真加载一个 DLL 插件、它的命令能执行、坏插件被拒载、管理器列得出来。
+
+    示例插件由 CMake 一起构建（build/plugins/hello），测试只把它拷进配置目录——
+    这样"发现 → 校验 → Init → 注册命令 → 执行"整条链都是真的。
+    触发插件命令用的是**快捷键**（shortcuts.xml 里把 plugin.hello.insert 绑到 F9）：
+    自动分配的命令号在测试里不可预测，而按 F9 走的正是用户日常那条路。
+    """
+    import shutil as _shutil
+
+    work = os.path.join(root, "build", "plugin_test")
+    os.makedirs(work, exist_ok=True)
+    source = os.path.join(work, "sample.cpp")
+    with open(source, "w", encoding="utf-8", newline="") as handle:
+        handle.write("int main() {\n    return 0;\n}\n")
+
+    cfg = os.path.join(root, "build", "bin", "config")
+    plugins = os.path.join(cfg, "plugins")
+    _shutil.rmtree(plugins, ignore_errors=True)
+    os.makedirs(plugins, exist_ok=True)
+    built = os.path.join(root, "build", "plugins")
+    for name in ("hello", "badabi"):
+        if not os.path.isdir(os.path.join(built, name)):
+            print(f"  FAIL: 找不到构建出来的示例插件 {name}（先构建 hello_plugin 目标）")
+            return False
+        _shutil.copytree(os.path.join(built, name), os.path.join(plugins, name))
+    for name in ("config.xml", "session.xml", "shortcuts.xml", "plugins.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+    # 把插件命令绑到 F9（不带修饰键也能触发，脚本没法伪造 Ctrl/Alt）
+    with open(os.path.join(cfg, "shortcuts.xml"), "w", encoding="utf-8", newline="") as handle:
+        handle.write('<?xml version="1.0" encoding="UTF-8"?>\n'
+                     '<NotepadPlusCompat schemaVersion="1">\n'
+                     '  <InternalCommands>\n'
+                     '    <Shortcut name="plugin.hello.hello.insert" id="0" Ctrl="no" Alt="no"'
+                     ' Shift="no" Key="120"/>\n'
+                     '  </InternalCommands>\n'
+                     '</NotepadPlusCompat>\n')
+
+    log = os.path.join(cfg, "logs", "notepadcc.log")
+    if os.path.exists(log):
+        os.remove(log)
+
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", source], cwd=root)
+    window = wait_for_main_window("notepadcc - sample.cpp")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口（插件加载把程序带崩了？）")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到可见的编辑控件")
+            return False
+        # 1) 日志：hello 加载成功、badabi 因 ABI 被拒
+        text = ""
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if os.path.exists(log):
+                with open(log, "r", encoding="utf-8", errors="replace") as handle:
+                    text = handle.read()
+            if "已加载插件：hello" in text:
+                break
+            time.sleep(0.2)
+        if "已加载插件：hello" not in text:
+            print(f"  FAIL: 插件没有被加载\n{text[-400:]}")
+            return False
+        if "ABI 版本不匹配" not in text:
+            print(f"  FAIL: 坏插件应当被拒载并说明原因\n{text[-400:]}")
+            return False
+
+        # 2) 按 F9 触发插件命令：插件应当把它的文本插到光标处
+        user32.SendMessageW(scinti, SCI_GOTOPOS, 0, 0)
+        time.sleep(0.3)
+        user32.PostMessageW(window, WM_KEYDOWN, VK_F9, 0)
+        time.sleep(1.0)
+        after = scinti_text(scinti)
+        if not after.startswith("// 来自 hello 插件\n"):
+            print(f"  FAIL: 插件命令没有插进文本，实际 {after[:40]!r}")
+            return False
+
+        # 3) 插件管理器：列得出两个插件（一个已加载、一个被拒）
+        user32.PostMessageW(window, WM_COMMAND, CMD_SETTINGS_PLUGINS, 0)
+        time.sleep(1.0)
+        dialog = user32.FindWindowW(PLUGIN_ADMIN_CLASS, None)
+        if not dialog:
+            print("  FAIL: 插件管理器没有出现")
+            return False
+        count = user32.SendMessageW(user32.GetDlgItem(dialog, PLUGIN_ADMIN_LIST), LB_GETCOUNT_, 0, 0)
+        if count != 2:
+            print(f"  FAIL: 插件管理器应当列出 2 个插件，实际 {count}")
+            return False
+        user32.PostMessageW(dialog, WM_COMMAND, PLUGIN_ADMIN_CANCEL, 0)
+        deadline = time.time() + 5.0
+        while time.time() < deadline and user32.FindWindowW(PLUGIN_ADMIN_CLASS, None):
+            time.sleep(0.1)
+        if user32.FindWindowW(PLUGIN_ADMIN_CLASS, None):
+            print("  FAIL: 插件管理器没有关掉")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        for name in ("config.xml", "session.xml", "shortcuts.xml", "plugins.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+        _shutil.rmtree(plugins, ignore_errors=True)
+
+    print("  插件宿主：示例 DLL 真加载（日志可查）、坏 ABI 被拒载、F9 触发插件命令真的改了文档、"
+          "插件管理器列得出两个插件")
+    return True
+
+
 def test_auto_complete(root):
     """自动完成：文档内提词与语言词库两个来源都要真的能补出词来。
 
@@ -3851,6 +3974,8 @@ def run():
         failed = True
     if not test_export_and_print(root):
         failed = True
+    if not test_plugins(root):
+        failed = True
     if not test_auto_complete(root):
         failed = True
     if not test_associated_commands(root):
@@ -3864,7 +3989,8 @@ def run():
     print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + "
           "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + "
           "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + UDL + 暗色模式 + "
-          "宏 + 文件夹工作区 + 函数列表 + 导出与打印 + 自动完成 + 文件关联 + 绿色打包）")
+          "宏 + 文件夹工作区 + 函数列表 + 导出与打印 + 插件宿主 + 自动完成 + 文件关联 + "
+          "绿色打包）")
     return 0
 
 

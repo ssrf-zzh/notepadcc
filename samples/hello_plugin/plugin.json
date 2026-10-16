@@ -1,0 +1,10 @@
+{
+  "name": "hello",
+  "version": "1.0.0",
+  "author": "notepadcc 示例",
+  "description": "示例插件：注册一条命令，把一段话插到光标处",
+  "dll": "hello.dll",
+  "loadOrder": 10,
+  "minHostVersion": "1.0.0",
+  "dependencies": []
+}
