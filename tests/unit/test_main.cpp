@@ -20,6 +20,7 @@
 #include "core/FunctionList.h"
 #include "core/ExportHtml.h"
 #include "core/ExportRtf.h"
+#include "core/MarkdownRender.h"
 #include "core/PrintText.h"
 #include "core/PrintPaging.h"
 #include "plugin/PluginHost.h"
@@ -4905,6 +4906,159 @@ int main() {
             ::DestroyWindow(colourHost);
         } else {
             Check(false, "创建编辑控件失败");
+        }
+    }
+
+    Section("Markdown 解析与渲染（预览面板与浏览器预览共用）");
+    {
+        using npcc::core::BlockPlainLines;
+        using npcc::core::MarkdownBlock;
+        using npcc::core::MarkdownBlockKind;
+        using npcc::core::MarkdownSpanKind;
+        using npcc::core::MarkdownToHtml;
+        using npcc::core::ParseInline;
+        using npcc::core::ParseMarkdown;
+
+        // ---- 行内 ----
+        {
+            const std::vector<npcc::core::MarkdownSpan> spans = ParseInline("**粗**和*斜*和`码`");
+            Check(spans.size() == 5, "粗体/斜体/行内代码之间被切成五段");
+            Check(spans[0].kind == MarkdownSpanKind::Bold && spans[0].text == "粗", "**粗体**");
+            Check(spans[2].kind == MarkdownSpanKind::Italic && spans[2].text == "斜", "*斜体*");
+            Check(spans[4].kind == MarkdownSpanKind::Code && spans[4].text == "码", "行内代码");
+        }
+        {
+            const std::vector<npcc::core::MarkdownSpan> spans =
+                ParseInline("看[这里](https://example.com/a?b=1)吧");
+            Check(spans.size() == 3, "链接前后各一段普通文本");
+            Check(spans[1].kind == MarkdownSpanKind::Link && spans[1].text == "这里" &&
+                      spans[1].target == "https://example.com/a?b=1",
+                  "链接的文字与地址都取对了");
+        }
+        {
+            const std::vector<npcc::core::MarkdownSpan> spans = ParseInline("\\*不是斜体\\*");
+            Check(spans.size() == 1 && spans[0].kind == MarkdownSpanKind::Text &&
+                      spans[0].text == "*不是斜体*",
+                  "反斜杠转义之后是普通文本");
+        }
+        {
+            // 没有收尾的定界符就当普通字符：不能把整行吞成强调
+            const std::vector<npcc::core::MarkdownSpan> spans = ParseInline("**没有收尾");
+            Check(spans.size() == 1 && spans[0].kind == MarkdownSpanKind::Text,
+                  "没收尾的 ** 是普通文本");
+            const std::vector<npcc::core::MarkdownSpan> empty = ParseInline("");
+            Check(empty.empty(), "空行的行内解析结果是空的");
+        }
+
+        // ---- 块 ----
+        {
+            const std::vector<MarkdownBlock> blocks =
+                ParseMarkdown("# 一级\n\n### 三级 ###\n\n#没有空格\n");
+            Check(blocks.size() == 3, "三个块");
+            Check(blocks[0].kind == MarkdownBlockKind::Heading && blocks[0].level == 1,
+                  "# 是一级标题");
+            Check(blocks[1].kind == MarkdownBlockKind::Heading && blocks[1].level == 3 &&
+                      blocks[1].spans.size() == 1 && blocks[1].spans[0].text == "三级",
+                  "结尾的 # 被去掉");
+            Check(blocks[2].kind == MarkdownBlockKind::Paragraph,
+                  "# 后面没有空格就不是标题");
+        }
+        {
+            const std::vector<MarkdownBlock> blocks = ParseMarkdown("第一行\n第二行\n\n另一端\n");
+            Check(blocks.size() == 2 && blocks[0].kind == MarkdownBlockKind::Paragraph,
+                  "连续两行合成一段");
+            Check(blocks[0].spans.size() == 1 && blocks[0].spans[0].text == "第一行 第二行",
+                  "合并时中间补一个空格");
+        }
+        {
+            const std::vector<MarkdownBlock> blocks =
+                ParseMarkdown("```c\nint main(void) {\n  return 0;\n}\n```\n尾部\n");
+            Check(blocks.size() == 2, "代码块之后还有一段");
+            Check(blocks[0].kind == MarkdownBlockKind::Code, "围栏代码块");
+            Check(blocks[0].code == "int main(void) {\n  return 0;\n}", "代码块内容原样保留");
+            Check(blocks[1].kind == MarkdownBlockKind::Paragraph, "围栏之后的普通段落");
+        }
+        {
+            const std::vector<MarkdownBlock> blocks = ParseMarkdown("~~~\ncode\n~~~\n");
+            Check(blocks.size() == 1 && blocks[0].kind == MarkdownBlockKind::Code,
+                  "波浪线围栏也认");
+            // 没关的围栏：吃到文件结尾，不能丢内容
+            const std::vector<MarkdownBlock> unclosed = ParseMarkdown("```\nabc\n");
+            Check(unclosed.size() == 1 && unclosed[0].kind == MarkdownBlockKind::Code &&
+                      unclosed[0].code == "abc",
+                  "没有收尾的围栏吃到文件尾");
+        }
+        {
+            const std::vector<MarkdownBlock> blocks =
+                ParseMarkdown("- 一\n- 二\n  - 缩进\n1. 甲\n2) 乙\n");
+            Check(blocks.size() == 5, "五个列表项");
+            Check(blocks[0].kind == MarkdownBlockKind::List && !blocks[0].ordered &&
+                      blocks[0].level == 0,
+                  "无序列表");
+            Check(blocks[2].level == 1, "缩进两格算一级");
+            Check(blocks[3].ordered && blocks[3].number == 1, "有序列表的序号");
+            Check(blocks[4].ordered && blocks[4].number == 2, "「2)」这种写法也认");
+        }
+        {
+            const std::vector<MarkdownBlock> blocks = ParseMarkdown("> 引用一\n> 引用二\n");
+            Check(blocks.size() == 2 && blocks[0].kind == MarkdownBlockKind::Quote &&
+                      blocks[0].spans[0].text == "引用一",
+                  "引用块去掉了 > 与前导空格");
+        }
+        {
+            const std::vector<MarkdownBlock> blocks = ParseMarkdown("---\n\n***\n\n___\n\n- - -\n");
+            Check(blocks.size() == 4, "四种写法的分隔线都是分隔线");
+            for (const MarkdownBlock& block : blocks) {
+                Check(block.kind == MarkdownBlockKind::Rule, "分隔线");
+            }
+            const std::vector<MarkdownBlock> notRule = ParseMarkdown("---abc\n");
+            Check(notRule[0].kind == MarkdownBlockKind::Paragraph, "混了别的字符就不是分隔线");
+        }
+        Check(ParseMarkdown("").empty(), "空内容没有块");
+        Check(ParseMarkdown("\n\n   \n").empty(), "只有空白的行不算块");
+
+        // ---- 摊成纯文本（面板显示什么，这里就是什么） ----
+        {
+            const std::vector<MarkdownBlock> blocks = ParseMarkdown("- 项\n\n> 引\n\n`码`\n");
+            Check(BlockPlainLines(blocks[0]).size() == 1 &&
+                      BlockPlainLines(blocks[0])[0] == "\xE2\x80\xA2 项",
+                  "无序列表项带「• 」前缀");
+            Check(BlockPlainLines(blocks[1])[0] == "\xE2\x94\x82 引", "引用带「│ 」前缀");
+            Check(BlockPlainLines(blocks[2])[0] == "码", "段落就是文字本身");
+            const std::vector<MarkdownBlock> ordered = ParseMarkdown("7. 第七\n");
+            Check(BlockPlainLines(ordered[0])[0] == "7. 第七", "有序列表项带序号前缀");
+        }
+
+        // ---- HTML ----
+        {
+            const std::string html = MarkdownToHtml(
+                "# 标题\n\n一段 **粗** 与 `码` 与 [链](https://a.b)。\n\n- 项\n\n> 引一\n> 引二\n\n"
+                "```\n代码\n```\n\n---\n\n<b>原文里的标签</b>\n");
+            Check(html.find("<!DOCTYPE html>") == 0, "是一份独立的 HTML");
+            Check(html.find("<meta charset=\"utf-8\">") != std::string::npos, "声明了 UTF-8");
+            Check(html.find("<h1>标题</h1>") != std::string::npos, "一级标题渲染成 h1");
+            Check(html.find("<strong>粗</strong>") != std::string::npos, "粗体渲染成 strong");
+            Check(html.find("<code>码</code>") != std::string::npos, "行内代码渲染成 code");
+            Check(html.find("<a href=\"https://a.b\">链</a>") != std::string::npos, "链接");
+            Check(html.find("<ul>") != std::string::npos && html.find("<li") != std::string::npos,
+                  "列表");
+            Check(html.find("<pre><code>代码</code></pre>") != std::string::npos, "代码块");
+            Check(html.find("<hr>") != std::string::npos, "分隔线");
+            // 连续的引用合成一个 blockquote：一行一个会渲染成好几条互不相干的引文
+            Check(html.find("<blockquote>") != std::string::npos, "引用");
+            Check(html.find("<blockquote>") == html.rfind("<blockquote>"),
+                  "连续两行引用只出一个 blockquote");
+            Check(html.find("引一<br>") != std::string::npos, "引用内部换行用 <br>");
+            // 正文里的尖括号必须转义，否则用户文档里的标签会被浏览器当标签执行
+            Check(html.find("&lt;b&gt;原文里的标签&lt;/b&gt;") != std::string::npos,
+                  "正文里的 < > 被转义");
+            Check(html.find("<b>原文里的标签</b>") == std::string::npos,
+                  "正文里的标签没有被当成 HTML");
+        }
+        {
+            const std::string html = MarkdownToHtml("");
+            Check(html.find("<body>") != std::string::npos && html.find("</html>") != std::string::npos,
+                  "空文档也是一份完整的 HTML");
         }
     }
 

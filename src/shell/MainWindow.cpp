@@ -58,6 +58,7 @@ constexpr UINT_PTR kTimerAutosave = 1;
 constexpr UINT_PTR kTimerCrashTest = 2;
 constexpr UINT_PTR kTimerFunctionList = 3;   // 函数列表的节流定时器（一次性）
 constexpr UINT_PTR kTimerRunCommand = 4;     // 轮询后台命令有没有跑完（捕获输出时才用）
+constexpr UINT_PTR kTimerMarkdownPreview = 5;   // Markdown 预览的节流定时器（一次性）
 
 enum : npcc::core::CmdId {
     kCmdFileNew     = npcc::core::MakeCmdId(1, 1),
@@ -116,6 +117,8 @@ enum : npcc::core::CmdId {
     // CommandRegistry::Register 里被丢掉（日志里有警告，但菜单上只是"点了没反应"）
     kCmdViewHexToggle        = npcc::core::MakeCmdId(4, 21),
     kCmdViewHexGoTo          = npcc::core::MakeCmdId(4, 22),
+    kCmdViewPreviewBrowser   = npcc::core::MakeCmdId(4, 23),
+    kCmdViewMarkdownPreview  = npcc::core::MakeCmdId(4, 24),
     // 宏（8 类）
     kCmdMacroRecord       = npcc::core::MakeCmdId(8, 1),
     kCmdMacroPlayLast     = npcc::core::MakeCmdId(8, 3),
@@ -302,9 +305,13 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             folderPanel_.Create(hwnd_, 3);
             FunctionListPanel::RegisterWindowClass(::GetModuleHandleW(nullptr));
             functionListPanel_.Create(hwnd_, 4);
+            // 预览面板的内容靠"活动文档 + 节流"驱动，这里只把开关与皮肤接上
             HexView::RegisterWindowClass(::GetModuleHandleW(nullptr));
             hexView_.Create(hwnd_, 5);
             hexView_.SetOffsetCallback([this](std::uint64_t) { UpdateHexStatus(); });
+            MarkdownPreview::RegisterWindowClass(::GetModuleHandleW(nullptr));
+            markdownPreview_.Create(hwnd_, 6);
+            markdownPreview_.SetDark(darkMode_);
             functionPool_ = std::make_unique<infra::ThreadPool>();
             findBar_.Create(hwnd_);
             searchPanel_.Create(hwnd_);
@@ -368,6 +375,9 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             // 函数列表面板：开关记在配置里
             functionListVisible_ = config_.General().functionListVisible;
             functionListPanel_.SetVisible(functionListVisible_);
+            // Markdown 预览面板的开关同样来自配置（打开时整块内容在文档打开之后就有了）
+            markdownPreviewVisible_ = config_.General().markdownPreviewVisible;
+            markdownPreview_.SetVisible(markdownPreviewVisible_);
             // 工作区目录来自配置：目录不在了就当"没有工作区"，配置留着不动
             if (!config_.General().workspaceFolder.empty()) {
                 std::error_code ec;
@@ -654,6 +664,11 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
                 }
                 return 0;
             }
+            if (wParam == kTimerMarkdownPreview) {
+                ::KillTimer(hwnd_, kTimerMarkdownPreview);   // 一次性
+                RefreshMarkdownPreview();
+                return 0;
+            }
             break;
         case WM_DROPFILES: {
             const HDROP drop = reinterpret_cast<HDROP>(wParam);
@@ -924,6 +939,12 @@ void MainWindow::RegisterCommands() {
         core::kCmdCheckable, [this](const CmdContext&) { CommandToggleHexView(); });
     add(kCmdViewHexGoTo, CmdCategory::View, L"cmd.view.hexGoTo", L"跳到偏移(&O)...",
         core::kCmdNone, [this](const CmdContext&) { CommandHexGoTo(); });
+    add(kCmdViewPreviewBrowser, CmdCategory::View, L"cmd.view.previewBrowser",
+        L"在浏览器中打开预览(&B)", needsBuffer,
+        [this](const CmdContext&) { CommandPreviewInBrowser(); });
+    add(kCmdViewMarkdownPreview, CmdCategory::View, L"cmd.view.markdownPreview",
+        L"Markdown 预览面板(&M)", core::kCmdCheckable,
+        [this](const CmdContext&) { CommandToggleMarkdownPreview(); });
 
     // ---- 宏 ----
     add(kCmdMacroRecord, CmdCategory::Macro, L"cmd.macro.record", L"开始/停止录制宏(&R)",
@@ -1179,6 +1200,7 @@ void MainWindow::RegisterCommands() {
     bindChecked(kCmdViewFunctionList, [this] { return functionListVisible_; });
     bindChecked(kCmdViewFunctionJump, [this] { return functionListPanel_.SelectedLine() >= 0; });
     bindChecked(kCmdViewHexToggle, [this] { return hexMode_; });
+    bindChecked(kCmdViewMarkdownPreview, [this] { return markdownPreviewVisible_; });
     // "跳到偏移"只在十六进制视图里才有意义：不在的时候灰掉，而不是点了没反应
     if (core::Command* hexGoTo =
             const_cast<core::Command*>(registry_.Find(kCmdViewHexGoTo));
@@ -1375,30 +1397,41 @@ void MainWindow::LayoutChildren() const {
 void MainWindow::LayoutViews() const {
     const RECT& viewRect = viewRect_;
     dividerRect_ = RECT{0, 0, 0, 0};
+    // Markdown 预览占右边一栏。宽度按比例写死（与左侧固定栏同一个态度：没有真正的
+    // DockHost，拖动分隔条留给那一版），编辑区就是剩下的部分
+    RECT editor = viewRect;
+    if (markdownPreviewVisible_ && viewRect.right - viewRect.left > 320) {
+        const int width = viewRect.right - viewRect.left;
+        const int previewWidth = std::max(160, width * 45 / 100);
+        RECT preview = viewRect;
+        preview.left = viewRect.right - previewWidth;
+        markdownPreview_.Resize(preview);
+        editor.right = preview.left;
+    }
     if (hexMode_) {
-        // 十六进制视图独占整块编辑区（进这一档时已经先关掉分屏，见 CommandToggleHexView）
-        hexView_.Resize(viewRect);
+        // 十六进制视图独占编辑区（进这一档时已经先关掉分屏，见 CommandToggleHexView）
+        hexView_.Resize(editor);
         return;
     }
-    if (splitEnabled_ && documents_->SplitEnabled() && viewRect.right - viewRect.left > 120) {
-        const int width = viewRect.right - viewRect.left;
+    if (splitEnabled_ && documents_->SplitEnabled() && editor.right - editor.left > 120) {
+        const int width = editor.right - editor.left;
         constexpr int kDividerWidth = 5;
         int left = width * splitRatioPercent_ / 100;
         left = std::max(80, std::min(width - 80 - kDividerWidth, left));
 
-        RECT primary = viewRect;
-        primary.right = viewRect.left + left;
-        RECT secondary = viewRect;
+        RECT primary = editor;
+        primary.right = editor.left + left;
+        RECT secondary = editor;
         secondary.left = primary.right + kDividerWidth;
         dividerRect_.left = primary.right;
         dividerRect_.right = secondary.left;
-        dividerRect_.top = viewRect.top;
-        dividerRect_.bottom = viewRect.bottom;
+        dividerRect_.top = editor.top;
+        dividerRect_.bottom = editor.bottom;
 
         documents_->ResizeActive(primary);
         documents_->SplitResize(secondary);
     } else {
-        documents_->ResizeActive(viewRect);
+        documents_->ResizeActive(editor);
     }
 }
 
@@ -1852,6 +1885,10 @@ void MainWindow::ActivateDocument(core::BufferId id) {
         RebuildMenu();
     }
     documents_->Activate(id);
+    // 预览面板跟着活动文档走（要放在 Activate 之后：上面那个 Refresh 读的是活动文档）
+    if (markdownPreviewVisible_) {
+        RefreshMarkdownPreview();
+    }
     if (edit::Document* document = documents_->Active(); document != nullptr && document->view) {
         ApplyViewToggles(*document);
         FocusActivePane();   // 分屏时焦点可能落在另一侧
@@ -2170,6 +2207,7 @@ void MainWindow::HandleEditorNotify(const NMHDR& header) {
             // 文档变了：函数列表要重算（节流 300 ms，见 ScheduleFunctionParse）
             if (document == documents_->Active()) {
                 ScheduleFunctionParse();
+                ScheduleMarkdownPreview();
             }
             // 崩溃抢救只看"有没有未保存的改动"，所以这一刻必须同步刷新槽位：
             // 否则刚打完字就崩，抢救会以为这个文档是干净的，直接跳过。
@@ -3916,6 +3954,107 @@ void MainWindow::LeaveHexView() {
     }
 }
 
+// ---- 预览：在浏览器里打开 + Markdown 面板（设计文档 2.13 第 4 条）----
+
+bool MainWindow::ActiveDocumentIsMarkdown() const {
+    const edit::Document* document = ActiveDocument();
+    if (document == nullptr) {
+        return false;
+    }
+    const std::string extension =
+        edit::LanguageRegistry::ExtensionOfFile(document->buffer.filePath);
+    return extension == "md" || extension == "markdown" || extension == "mkd";
+}
+
+void MainWindow::CommandPreviewInBrowser() {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr) {
+        ::MessageBoxW(hwnd_, L"没有打开的文档。", L"浏览器预览", MB_ICONINFORMATION);
+        return;
+    }
+    const std::string text = document->view->GetAllText();
+    std::wstring target;
+    if (ActiveDocumentIsMarkdown()) {
+        // Markdown 在浏览器里直接打开只会显示源码，所以先生成一份 HTML 落到临时目录。
+        // 临时文件不是"用户文档"，放在 config\tmp 下（便携版承诺不往外写）
+        std::error_code ignored;
+        std::filesystem::create_directories(infra::TempDir(), ignored);
+        const std::filesystem::path path =
+            infra::TempDir() / (L"preview-" + std::to_wstring(::GetCurrentProcessId()) + L"-" +
+                                std::to_wstring(++previewFileCounter_) + L".html");
+        const std::string html = core::MarkdownToHtml(text);
+        const HANDLE file = ::CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                          FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            ::MessageBoxW(hwnd_,
+                          (L"写不了预览用的临时文件（" +
+                           io::DescribeWin32Error(::GetLastError()) + L"）。")
+                              .c_str(),
+                          L"浏览器预览", MB_ICONWARNING);
+            return;
+        }
+        DWORD written = 0;
+        const BOOL ok = ::WriteFile(file, html.data(), static_cast<DWORD>(html.size()), &written,
+                                    nullptr);
+        ::CloseHandle(file);
+        if (ok == FALSE || written != html.size()) {
+            ::MessageBoxW(hwnd_, L"写预览文件失败。", L"浏览器预览", MB_ICONWARNING);
+            return;
+        }
+        target = path.wstring();
+        infra::LogInfo(L"preview", L"Markdown 预览已生成: " + target);
+    } else {
+        if (!document->buffer.HasPath()) {
+            ::MessageBoxW(hwnd_,
+                          L"这份文档还没保存到磁盘。浏览器要打开的是一个**文件**，先保存再来。",
+                          L"浏览器预览", MB_ICONINFORMATION);
+            return;
+        }
+        target = document->buffer.filePath;
+    }
+    const HINSTANCE result = ::ShellExecuteW(hwnd_, L"open", target.c_str(), nullptr, nullptr,
+                                             SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(result) <= 32) {
+        // ShellExecute 的返回值 <= 32 都是错误码（不是 GetLastError 的语义）
+        ::MessageBoxW(hwnd_, (L"叫不起默认程序打开：\n" + target).c_str(), L"浏览器预览",
+                      MB_ICONWARNING);
+        return;
+    }
+    statusBar_.SetMessage(L"已交给默认程序打开：" + target);
+}
+
+void MainWindow::CommandToggleMarkdownPreview() {
+    markdownPreviewVisible_ = !markdownPreviewVisible_;
+    markdownPreview_.SetVisible(markdownPreviewVisible_);
+    config_.General().markdownPreviewVisible = markdownPreviewVisible_;
+    config_.SaveNow();   // 与切语言同一个理由：这是"马上要生效"的状态，别攒着
+    if (markdownPreviewVisible_) {
+        RefreshMarkdownPreview();
+    }
+    LayoutViews();
+    RebuildMenu();
+}
+
+void MainWindow::ScheduleMarkdownPreview() {
+    if (!markdownPreviewVisible_) {
+        return;
+    }
+    // 与函数列表同一套节流：每次改动都重置这个一次性定时器，停手 300 ms 才真的重排
+    ::SetTimer(hwnd_, kTimerMarkdownPreview, 300, nullptr);
+}
+
+void MainWindow::RefreshMarkdownPreview() {
+    if (!markdownPreviewVisible_) {
+        return;
+    }
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr) {
+        markdownPreview_.Clear();
+        return;
+    }
+    markdownPreview_.SetMarkdown(document->view->GetAllText());
+}
+
 bool MainWindow::OpenDocumentPath(const std::wstring& path) {
     const core::OpenOutcome outcome = documents_->Open(path);
     if (outcome.status != core::OpenStatus::Ok &&
@@ -4542,6 +4681,7 @@ void MainWindow::CommandToggleDarkMode() {
     documents_->SetPalette(darkMode_ ? edit::EditorPalette::Dark() : edit::EditorPalette::Light());
     ApplyStyleSchemeToAllViews();
     hexView_.SetDark(darkMode_);   // 十六进制视图的自绘配色也跟着走
+    markdownPreview_.SetDark(darkMode_);
 }
 
 void MainWindow::CommandStyleConfigurator() {

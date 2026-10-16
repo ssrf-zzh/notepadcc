@@ -24,6 +24,8 @@ struct GeneralConfig {
     // 函数列表面板是否显示（设计文档 2.6 第 5 条）。默认关：它占左侧一条，
     // 第一次用的用户不该莫名其妙少一块编辑区
     bool functionListVisible = false;
+    // Markdown 预览面板的开关（与函数列表同一个待遇：面板的可见性记在配置里）
+    bool markdownPreviewVisible = false;
 };
 
 struct EditConfig {

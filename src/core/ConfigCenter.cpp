@@ -189,6 +189,9 @@ bool ConfigCenter::Load(std::wstring* error) {
     general_.workspaceFolder = ReadString(general, L"workspaceFolder", general_.workspaceFolder);
     general_.functionListVisible = ReadBool(general, L"functionList", general_.functionListVisible,
                                             warnings_, L"general");
+    general_.markdownPreviewVisible =
+        ReadBool(general, L"markdownPreview", general_.markdownPreviewVisible, warnings_,
+                 L"general");
 
     const infra::XmlElement* editor = Section(root, L"edit");
     if (editor != nullptr) {
@@ -302,6 +305,7 @@ bool ConfigCenter::Save(bool force, std::wstring* error) {
     general->SetAttribute(L"theme", general_.theme);
     general->SetAttribute(L"workspaceFolder", general_.workspaceFolder);
     general->SetAttributeBool(L"functionList", general_.functionListVisible);
+    general->SetAttributeBool(L"markdownPreview", general_.markdownPreviewVisible);
 
     infra::XmlElementPtr editor = root->AddChild(L"edit");
     editor->SetAttributeBool(L"tabToSpaces", edit_.tabToSpaces);

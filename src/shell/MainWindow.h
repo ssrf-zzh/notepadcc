@@ -27,6 +27,7 @@
 #include "shell/FolderPanel.h"
 #include "shell/FunctionListPanel.h"
 #include "shell/HexView.h"
+#include "shell/MarkdownPreview.h"
 #include "plugin/PluginHost.h"
 #include "shell/FindBar.h"
 #include "shell/SearchPanel.h"
@@ -163,6 +164,10 @@ private:
     HexView      hexView_;
     bool         hexMode_ = false;
     core::BufferId hexDocument_ = 0;   // hexMode_ 为真时正在看哪个文档
+    // Markdown 预览面板（右侧一栏，开关记在配置里）
+    MarkdownPreview markdownPreview_;
+    bool            markdownPreviewVisible_ = false;
+    int             previewFileCounter_ = 0;
     // ---- 界面语言（设计文档 6.6 / 7.7）----
     void RegisterLanguageCommands();
     void CommandSwitchLanguage(const std::wstring& locale);
@@ -178,6 +183,12 @@ private:
     void LeaveHexView();     // 回到文本视图（不碰菜单勾选态：调用方自己重建）
     void LayoutViews() const;   // 按当前模式把视图区摆好（WM_SIZE 与切换时都走它）
     void UpdateHexStatus() const;   // 状态栏第一段显示十六进制偏移
+    // ---- 预览（设计文档 2.13 第 4 条）----
+    void CommandPreviewInBrowser();
+    void CommandToggleMarkdownPreview();
+    void ScheduleMarkdownPreview();     // 内容变了之后节流刷新（300 ms）
+    void RefreshMarkdownPreview();      // 立刻按活动文档重排面板
+    bool ActiveDocumentIsMarkdown() const;
     // ---- 文件夹工作区（设计文档 2.11）----
     void CommandOpenWorkspace();      // 选一个目录当工作区
     void CommandCloseWorkspace();

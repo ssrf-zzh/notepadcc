@@ -153,6 +153,9 @@ CMD_TOOL_EXPORT_LANGPACK = (14 << 12) | 35
 CMD_VIEW_HEX_TOGGLE = (4 << 12) | 21
 CMD_VIEW_HEX_GOTO = (4 << 12) | 22
 CMD_EDIT_COPY_AS_RTF = (2 << 12) | 34
+CMD_VIEW_PREVIEW_BROWSER = (4 << 12) | 23
+CMD_VIEW_MARKDOWN_PREVIEW = (4 << 12) | 24
+MD_PREVIEW_CLASS = "notepadccMarkdownPreview"
 CF_UNICODETEXT = 13
 SCI_SETSEL = 2160
 HEX_VIEW_CLASS = "notepadccHexView"
@@ -4022,6 +4025,8 @@ def run():
         failed = True
     if not test_copy_as_rtf(root):
         failed = True
+    if not test_markdown_preview(root):
+        failed = True
     if not test_auto_complete(root):
         failed = True
     if not test_associated_commands(root):
@@ -4036,8 +4041,8 @@ def run():
           "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + "
           "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + UDL + 暗色模式 + "
           "宏 + 文件夹工作区 + 函数列表 + 导出与打印 + 插件宿主 + JSON/XML 格式化 + "
-          "运行命令 + 界面语言 + 十六进制查看 + 复制为富文本 + 自动完成 + 文件关联 + "
-          "绿色打包）")
+          "运行命令 + 界面语言 + 十六进制查看 + 复制为富文本 + Markdown 预览 + 自动完成 + "
+          "文件关联 + 绿色打包）")
     return 0
 
 
@@ -4239,6 +4244,167 @@ def has_cjk(text):
         if "\u3000" <= ch <= "\u9fff" or "\uff00" <= ch <= "\uffef":
             return True
     return False
+
+def test_markdown_preview(root):
+    """Markdown 预览：面板里渲染出来的**就是**解析结果，而且跟着改动实时更新。
+
+    面板是自绘的，所以"渲染成什么样"靠 WM_GETTEXT 读回来核对（与十六进制视图同一招）。
+    浏览器预览那一步会**真的**叫起默认浏览器打开生成的 HTML——它就是干这个的；
+    脚本随后核对生成的那份 HTML 文件（内容对不对才是重点）。
+    """
+    work = os.path.join(root, "build", "md_test")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    cfg = os.path.join(root, "build", "bin", "config")
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    temp_dir = os.path.join(cfg, "tmp")
+    config_file = os.path.join(cfg, "config.xml")
+
+    target = os.path.join(work, "doc.md")
+    source = ("# 标题一\n\n"
+              "一段 **粗** 与 [链接](https://example.com)。\n\n"
+              "- 第一项\n"
+              "- 第二项\n\n"
+              "1. 有序一\n\n"
+              "> 引用一行\n\n"
+              "```\nint main(void) { return 0; }\n```\n\n"
+              "---\n")
+    with open(target, "w", encoding="utf-8", newline="") as handle:
+        handle.write(source)
+
+    for name in ("config.xml", "session.xml"):
+        path = os.path.join(cfg, name)
+        if os.path.exists(path):
+            os.remove(path)
+    if os.path.isdir(temp_dir):
+        for name in os.listdir(temp_dir):
+            if name.startswith("preview-"):
+                os.remove(os.path.join(temp_dir, name))
+    log_file = remove_log_with_retry(root)
+
+    def panel_lines(window, timeout=8.0):
+        """等面板出现并读回它渲染的那几行。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            panel = find_child(window, MD_PREVIEW_CLASS)
+            if panel and user32.IsWindowVisible(panel):
+                text = window_text(panel)
+                if text:
+                    return panel, text.split("\r\n")
+            time.sleep(0.2)
+        return None, []
+
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", target], cwd=root)
+    window = wait_for_main_window("notepadcc - doc.md")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        time.sleep(0.8)
+
+        # 1) 开面板：核对面板里是**渲染后**的文本，不是 Markdown 源码
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_MARKDOWN_PREVIEW, 0)
+        panel, lines = panel_lines(window)
+        if not panel:
+            print("  FAIL: 打开 Markdown 预览面板之后没看到那个控件")
+            return False
+        rendered = "\n".join(lines)
+        for expected in ("标题一", "一段 粗 与 链接。", "\u2022 第一项", "\u2022 第二项",
+                         "1. 有序一", "\u2502 引用一行",
+                         "int main(void) { return 0; }"):
+            if expected not in rendered:
+                print(f"  FAIL: 面板里没有 {expected!r}\n{rendered}")
+                return False
+        # 源码里的记号不该漏到渲染结果里
+        for unwanted in ("**", "# ", "```", "[链接](", "](https"):
+            if unwanted in rendered:
+                print(f"  FAIL: 面板里漏出了 Markdown 记号 {unwanted!r}\n{rendered}")
+                return False
+        if not lines[0].startswith("标题一"):
+            print(f"  FAIL: 第一行应当是渲染后的标题，实际 {lines[0]!r}")
+            return False
+
+        # 2) 实时：在文档末尾敲一行新的标题，节流到期后面板里应当出现它（不带 #）
+        scinti = visible_scintilla(window)
+        length = user32.SendMessageW(scinti, SCI_GETLENGTH, 0, 0)
+        user32.SendMessageW(scinti, SCI_GOTOPOS, length, 0)
+        for ch in "\n## LiveHeading\n":
+            user32.PostMessageW(scinti, WM_CHAR_INPUT, ord(ch), 0)
+        time.sleep(1.2)   # 节流是 300 ms，这里等宽裕一点
+        _, lines = panel_lines(window)
+        if "LiveHeading" not in "\n".join(lines):
+            print(f"  FAIL: 改了文档之后预览没有跟着更新\n{chr(10).join(lines)}")
+            return False
+        if "## LiveHeading" in "\n".join(lines):
+            print("  FAIL: 新标题应当渲染成不带 # 的标题")
+            return False
+
+        # 3) 浏览器预览：核对生成的那份 HTML（这一步会真的打开浏览器）
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_PREVIEW_BROWSER, 0)
+        deadline = time.time() + 10.0
+        generated = None
+        while time.time() < deadline:
+            if os.path.isdir(temp_dir):
+                candidates = [os.path.join(temp_dir, name) for name in os.listdir(temp_dir)
+                              if name.startswith("preview-") and name.endswith(".html")]
+                if candidates:
+                    generated = max(candidates, key=os.path.getmtime)
+                    break
+            time.sleep(0.3)
+        if not generated:
+            print("  FAIL: 浏览器预览没有生成 HTML 文件")
+            return False
+        with open(generated, "r", encoding="utf-8", errors="replace") as handle:
+            html = handle.read()
+        for expected in ("<!DOCTYPE html>", "<h1>标题一</h1>", "<strong>粗</strong>",
+                         "<a href=\"https://example.com\">链接</a>", "<hr>", "<blockquote>"):
+            if expected not in html:
+                print(f"  FAIL: 生成的 HTML 里没有 {expected!r}\n{html[:400]}")
+                return False
+        if os.path.exists(log_file):
+            with open(log_file, "r", encoding="utf-8", errors="replace") as handle:
+                log = handle.read()
+            if "Markdown 预览已生成" not in log:
+                print("  FAIL: 日志里应当留下生成预览的记录")
+                return False
+
+        # 4) 再按一次收起来，并且开关记进配置（下次启动自己回来）
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_MARKDOWN_PREVIEW, 0)
+        time.sleep(0.8)
+        panel = find_child(window, MD_PREVIEW_CLASS)
+        if panel and user32.IsWindowVisible(panel):
+            print("  FAIL: 再按一次应当把面板收起来")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_MARKDOWN_PREVIEW, 0)
+        time.sleep(0.8)
+        deadline = time.time() + 8.0
+        remembered = False
+        while time.time() < deadline:
+            if os.path.exists(config_file):
+                with open(config_file, "r", encoding="utf-8", errors="replace") as handle:
+                    if 'markdownPreview="yes"' in handle.read():
+                        remembered = True
+                        break
+            time.sleep(0.3)
+        if not remembered:
+            print("  FAIL: 面板的开关应当记进 config.xml（markdownPreview）")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        for name in ("config.xml", "session.xml"):
+            path = os.path.join(cfg, name)
+            if os.path.exists(path):
+                os.remove(path)
+
+    print("  Markdown 预览：面板里是渲染后的文本（标题/列表/引用/代码/链接都不带记号）、"
+          "改了文档实时跟着更新、在浏览器中打开预览生成的 HTML 内容正确、开关记进配置")
+    return True
+
 
 def read_clipboard(format_id):
     """读剪贴板里某个格式的**原始字节**（读不到返回 None）。
