@@ -136,6 +136,10 @@ CMD_RUN_DIALOG = (9 << 12) | 1          # 运行…（F5）
 CMD_RUN_FIRST_SAVED = (9 << 12) | 128   # 存下来的第一条运行命令
 LANGUAGE_BASE = (7 << 12) | 128         # 界面语言：第 0 项是简体中文，第 1 项是内置英文
 CMD_TOOL_EXPORT_LANGPACK = (14 << 12) | 35
+CMD_VIEW_HEX_TOGGLE = (4 << 12) | 21
+CMD_VIEW_HEX_GOTO = (4 << 12) | 22
+HEX_VIEW_CLASS = "notepadccHexView"
+HEX_GOTO_CLASS = "notepadccHexGoto"
 RUN_DIALOG_CLASS = "notepadccRunCommand"
 RUN_COMBO = 1401
 RUN_CAPTURE = 1402
@@ -3997,6 +4001,8 @@ def run():
         failed = True
     if not test_ui_language(root):
         failed = True
+    if not test_hex_view(root):
+        failed = True
     if not test_auto_complete(root):
         failed = True
     if not test_associated_commands(root):
@@ -4011,7 +4017,7 @@ def run():
           "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + "
           "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + UDL + 暗色模式 + "
           "宏 + 文件夹工作区 + 函数列表 + 导出与打印 + 插件宿主 + JSON/XML 格式化 + "
-          "运行命令 + 界面语言 + 自动完成 + 文件关联 + 绿色打包）")
+          "运行命令 + 界面语言 + 十六进制查看 + 自动完成 + 文件关联 + 绿色打包）")
     return 0
 
 
@@ -4215,6 +4221,206 @@ def has_cjk(text):
     return False
 
 
+def hex_row_text(data, offset, width=8):
+    """按界面上那一行该怎么排，算出期望的文本（偏移 → 十六进制 → ASCII）。
+
+    这是**格式的规格**，不是把实现抄一遍：偏移 8 位大写、每字节两位大写、第 8 个字节后
+    多一个空档、不满一行时十六进制列补空格、ASCII 里非可打印一律 '.'。
+    单元测试里已经用手写死的整串钉过排版，这里用它来核对"滚到这一屏时看到的是不是
+    那个偏移上的字节"。
+    """
+    row = data[offset:offset + 16]
+    hex_part = ""
+    for index in range(16):
+        hex_part += f"{row[index]:02X}" if index < len(row) else "  "
+        if index != 15:
+            hex_part += " "
+        if index == 7:
+            hex_part += " "
+    ascii_part = "".join(chr(byte) if 0x20 <= byte <= 0x7E else "." for byte in row)
+    return f"{offset:0{width}X}  " + hex_part + "  " + ascii_part
+
+
+def test_hex_view(root):
+    """十六进制查看：屏幕上那几行**就是**文件里的字节，能滚、能跳。
+
+    读回来的方式是跨进程发 WM_GETTEXT（系统消息会被封送），控件把"此刻渲染的那几行"
+    交出来——所以核对的是屏幕上真正显示的内容，不是"命令发出去了"。
+    """
+    work = os.path.join(root, "build", "hex_test")
+    os.makedirs(work, exist_ok=True)
+    cfg = os.path.join(root, "build", "bin", "config")
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    log_file = os.path.join(cfg, "logs", "notepadcc.log")
+
+    # 造一个 4096 字节的文件：前 32 字节是认得出的图案，其余是可滚动的填充。
+    # 里面故意放上 0x00、0x7F、0x80、0xFF 与可打印字符，好把 ASCII 那一列的规则也测到
+    head = bytes([0x4A, 0x6F, 0x20, 0x62, 0x69, 0x6E, 0x00, 0x00,
+                  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF,
+                  0x7F, 0x80, 0x41, 0x42, 0x43, 0x00, 0x7E, 0x20,
+                  0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])
+    data = head + bytes((index * 7 + 3) & 0xFF for index in range(4096 - len(head)))
+    target = os.path.join(work, "blob.bin")
+    with open(target, "wb") as handle:
+        handle.write(data)
+
+    for name in ("config.xml", "session.xml"):
+        path = os.path.join(cfg, name)
+        if os.path.exists(path):
+            os.remove(path)
+    log_file = remove_log_with_retry(root)
+
+    def read_hex(window, timeout=6.0):
+        """等十六进制视图出现并读回它渲染的那几行。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            view = find_child(window, HEX_VIEW_CLASS)
+            if view and user32.IsWindowVisible(view):
+                text = window_text(view)
+                if text:
+                    return view, text
+            time.sleep(0.2)
+        return None, ""
+
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", target], cwd=root)
+    window = wait_for_main_window("notepadcc - blob.bin")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        time.sleep(0.8)
+
+        # 1) 切到十六进制视图：屏幕上第一行应当**逐字**等于文件开头的 16 个字节
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_HEX_TOGGLE, 0)
+        view, text = read_hex(window)
+        if not view:
+            print("  FAIL: 切到十六进制视图之后没看到那个控件")
+            return False
+        lines = text.split("\r\n")
+        expected_first = hex_row_text(data, 0)
+        if lines[0] != expected_first:
+            print(f"  FAIL: 第一行不对\n           实际 {lines[0]!r}\n"
+                  f"           期望 {expected_first!r}")
+            return False
+        if len(lines) < 2 or lines[1] != hex_row_text(data, 16):
+            print(f"  FAIL: 第二行不对（期望偏移 0x10 上的字节）\n           实际 {lines[1]!r}")
+            return False
+        # 文件里的 0x00/0x7F/0x80 一个都不该原样出现在渲染结果里
+        if "\x00" in text or "\x7f" in text:
+            print("  FAIL: 控制字符被原样渲染出来了")
+            return False
+
+        # 2) 翻页：左边那一列要往后走，而且内容必须是那个偏移上真实存在的字节
+        user32.PostMessageW(view, WM_VSCROLL, SB_PAGEDOWN, 0)
+        time.sleep(0.5)
+        _, after_page = read_hex(window)
+        first_after = after_page.split("\r\n")[0]
+        offset_after = int(first_after.split("  ")[0], 16)
+        if offset_after == 0:
+            print("  FAIL: 翻页之后偏移没动")
+            return False
+        if offset_after % 16 != 0:
+            print(f"  FAIL: 翻页之后偏移不是 16 的整数倍：{offset_after}")
+            return False
+        if first_after != hex_row_text(data, offset_after):
+            print(f"  FAIL: 翻页之后那一行的内容与文件对不上\n           实际 {first_after!r}\n"
+                  f"           期望 {hex_row_text(data, offset_after)!r}")
+            return False
+
+        # 3) 跳到偏移：0x800（2048），同样核对内容
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_HEX_GOTO, 0)
+        time.sleep(0.6)
+        dialog = user32.FindWindowW(HEX_GOTO_CLASS, None)
+        if not dialog:
+            print("  FAIL: 应该弹出「跳到偏移」的输入框")
+            return False
+        set_text(dialog, MACRO_EDIT, "0x800")
+        time.sleep(0.3)
+        if not close_macro_dialog(HEX_GOTO_CLASS):
+            print("  FAIL: 跳到偏移的框点不掉")
+            return False
+        time.sleep(0.6)
+        _, after_jump = read_hex(window)
+        first_jump = after_jump.split("\r\n")[0]
+        if not first_jump.startswith("00000800"):
+            print(f"  FAIL: 跳到 0x800 之后第一行应当是 00000800 开头，实际 {first_jump!r}")
+            return False
+        if first_jump != hex_row_text(data, 0x800):
+            print(f"  FAIL: 跳过去之后那一行的内容与文件对不上\n           实际 {first_jump!r}\n"
+                  f"           期望 {hex_row_text(data, 0x800)!r}")
+            return False
+
+        # 4) 非法输入要被挡下，并且停在原地
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_HEX_GOTO, 0)
+        time.sleep(0.6)
+        dialog = user32.FindWindowW(HEX_GOTO_CLASS, None)
+        if not dialog:
+            print("  FAIL: 第二次跳转没有弹出输入框")
+            return False
+        set_text(dialog, MACRO_EDIT, "这不是偏移")
+        time.sleep(0.3)
+        if not close_macro_dialog(HEX_GOTO_CLASS):
+            print("  FAIL: 输入框点不掉")
+            return False
+        if not dismiss_dialog("跳到偏移", IDOK, timeout=8.0):
+            print("  FAIL: 看不懂的偏移应当给一句说明")
+            return False
+        time.sleep(0.5)
+        _, after_bad = read_hex(window)
+        if not after_bad.split("\r\n")[0].startswith("00000800"):
+            print(f"  FAIL: 非法输入之后不该乱跳，实际 {after_bad.splitlines()[0]!r}")
+            return False
+
+        # 5) 切回文本：十六进制控件收起来，编辑控件回来
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_HEX_TOGGLE, 0)
+        time.sleep(0.8)
+        hex_visible = False
+        for child in children(window):
+            if class_name(child) == HEX_VIEW_CLASS and user32.IsWindowVisible(child):
+                hex_visible = True
+        if hex_visible:
+            print("  FAIL: 切回文本之后十六进制控件应当收起来")
+            return False
+        if visible_scintilla(window) is None:
+            print("  FAIL: 切回文本之后编辑控件应当回来")
+            return False
+
+        # 6) 改过内容（未保存）的文档不给开：它读的是磁盘字节，两边对不上
+        scinti = visible_scintilla(window)
+        user32.PostMessageW(scinti, WM_CHAR_INPUT, ord("x"), 0)
+        time.sleep(0.4)
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_HEX_TOGGLE, 0)
+        if not dismiss_dialog("十六进制查看", IDOK, timeout=8.0):
+            print("  FAIL: 有未保存改动时应当说明为什么不给开")
+            return False
+        time.sleep(0.4)
+        for child in children(window):
+            if class_name(child) == HEX_VIEW_CLASS and user32.IsWindowVisible(child):
+                print("  FAIL: 被拦下之后不该进十六进制视图")
+                return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    with open(log_file, "r", encoding="utf-8", errors="replace") as handle:
+        log = handle.read()
+    if "以十六进制打开" not in log:
+        print("  FAIL: 日志里应当留下打开十六进制视图的记录")
+        return False
+    for name in ("config.xml", "session.xml"):
+        path = os.path.join(cfg, name)
+        if os.path.exists(path):
+            os.remove(path)
+
+    print("  十六进制查看：屏幕上的行逐字等于文件字节（含末行补齐与 ASCII 替换）、"
+          "翻页与跳到偏移后内容仍然对得上、非法偏移被挡下、切回文本正常、改过的文档不开")
+    return True
+
+
 def test_ui_language(root):
     """界面语言：菜单真的换成英文、不重启就生效、记住选择、英文界面里没有中文残留。
 
@@ -4338,6 +4544,13 @@ def test_ui_language(root):
                       if "缺键" in line and "语言包 en-US" in line]
             if missed:
                 print(f"  FAIL: 英文包里缺键：{missed[:4]}")
+                return False
+            # 顺手把启动自检的另一条也读掉：命令 ID 撞车时后来的那条命令会被丢掉，
+            # 表现是"菜单里有这一项、点了没反应"——本轮就踩着过一次（视图类 15/16 号
+            # 早被工作区命令占了），所以这条警告必须有东西盯着
+            duplicated = [line for line in log.splitlines() if "命令 ID 重复" in line]
+            if duplicated:
+                print(f"  FAIL: 启动时有命令 ID 撞车，后来的命令被丢掉了：{duplicated[:4]}")
                 return False
 
         # 5) 再切回中文：不重启也该回来

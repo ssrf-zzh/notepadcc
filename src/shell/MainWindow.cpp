@@ -21,6 +21,7 @@
 #include "edit/ColumnEdit.h"
 #include "edit/ColumnText.h"
 #include "edit/TextTools.h"
+#include "edit/HexModel.h"
 #include "core/CommandText.h"
 #include "search/ByteMatcher.h"
 #include "shell/MenuBuilder.h"
@@ -109,7 +110,11 @@ enum : npcc::core::CmdId {
     kCmdViewWorkspaceOpenSel = npcc::core::MakeCmdId(4, 18),
     kCmdViewFunctionList     = npcc::core::MakeCmdId(4, 19),
     kCmdViewFunctionJump     = npcc::core::MakeCmdId(4, 20),
-
+    // 视图类**已经用到 20 号**（工作区 15~18、函数列表与跳转 19~20）。
+    // 加新的视图命令时从这里往下接，别顺手用 15/16——撞号的后果是后来者在
+    // CommandRegistry::Register 里被丢掉（日志里有警告，但菜单上只是"点了没反应"）
+    kCmdViewHexToggle        = npcc::core::MakeCmdId(4, 21),
+    kCmdViewHexGoTo          = npcc::core::MakeCmdId(4, 22),
     // 宏（8 类）
     kCmdMacroRecord       = npcc::core::MakeCmdId(8, 1),
     kCmdMacroPlayLast     = npcc::core::MakeCmdId(8, 3),
@@ -295,6 +300,9 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             folderPanel_.Create(hwnd_, 3);
             FunctionListPanel::RegisterWindowClass(::GetModuleHandleW(nullptr));
             functionListPanel_.Create(hwnd_, 4);
+            HexView::RegisterWindowClass(::GetModuleHandleW(nullptr));
+            hexView_.Create(hwnd_, 5);
+            hexView_.SetOffsetCallback([this](std::uint64_t) { UpdateHexStatus(); });
             functionPool_ = std::make_unique<infra::ThreadPool>();
             findBar_.Create(hwnd_);
             searchPanel_.Create(hwnd_);
@@ -582,6 +590,14 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
         case core::kMsgFileChanged: {
             std::unique_ptr<std::pair<std::wstring, io::FileChangeKind>> change(
                 reinterpret_cast<std::pair<std::wstring, io::FileChangeKind>*>(lParam));
+            // 正在用十六进制看这个文件时它变了：映射里的字节已经过期，先退出十六进制
+            // 视图（下面照常走"要不要重新加载"那套）。悄悄显示旧字节是最坏的选择
+            if (hexMode_ && infra::NormalizePath(change->first) ==
+                                infra::NormalizePath(hexView_.FilePath())) {
+                infra::LogWarn(L"hex", L"文件变了，已退出十六进制视图: " + change->first);
+                LeaveHexView();
+                RebuildMenu();
+            }
             HandleExternalChange(change->first, change->second);
             return 0;
         }
@@ -899,6 +915,10 @@ void MainWindow::RegisterCommands() {
         });
     add(kCmdViewDarkMode, CmdCategory::View, L"cmd.view.darkMode", L"暗色模式(&D)",
         core::kCmdCheckable, [this](const CmdContext&) { CommandToggleDarkMode(); });
+    add(kCmdViewHexToggle, CmdCategory::View, L"cmd.view.hexToggle", L"十六进制查看（只读）",
+        core::kCmdCheckable, [this](const CmdContext&) { CommandToggleHexView(); });
+    add(kCmdViewHexGoTo, CmdCategory::View, L"cmd.view.hexGoTo", L"跳到偏移(&O)...",
+        core::kCmdNone, [this](const CmdContext&) { CommandHexGoTo(); });
 
     // ---- 宏 ----
     add(kCmdMacroRecord, CmdCategory::Macro, L"cmd.macro.record", L"开始/停止录制宏(&R)",
@@ -1153,6 +1173,13 @@ void MainWindow::RegisterCommands() {
     bindChecked(kCmdViewWorkspaceOpenSel, [this] { return !folderPanel_.SelectedPath().empty(); });
     bindChecked(kCmdViewFunctionList, [this] { return functionListVisible_; });
     bindChecked(kCmdViewFunctionJump, [this] { return functionListPanel_.SelectedLine() >= 0; });
+    bindChecked(kCmdViewHexToggle, [this] { return hexMode_; });
+    // "跳到偏移"只在十六进制视图里才有意义：不在的时候灰掉，而不是点了没反应
+    if (core::Command* hexGoTo =
+            const_cast<core::Command*>(registry_.Find(kCmdViewHexGoTo));
+        hexGoTo != nullptr) {
+        hexGoTo->queryEnabled = [this](const CmdContext&) { return hexMode_; };
+    }
     // 界面语言（设计文档 6.6 / 7.7）：一语言一条命令，勾选态表示当前用的那套。
     // 放在这里而不是做成首选项里的下拉，是因为对话框文本还没进语言包——先让
     // "切换语言不重启"这条链路真能跑通、也能被回归脚本验证。
@@ -1336,7 +1363,18 @@ void MainWindow::LayoutChildren() const {
 
     // 分屏：把视图区域左右切开，中间留一条可拖动的分隔条。
     // 分隔条由主窗口自己画/自己接鼠标——它只是两块之间的空白，不需要额外的子窗口。
+    viewRect_ = viewRect;
+    LayoutViews();
+}
+
+void MainWindow::LayoutViews() const {
+    const RECT& viewRect = viewRect_;
     dividerRect_ = RECT{0, 0, 0, 0};
+    if (hexMode_) {
+        // 十六进制视图独占整块编辑区（进这一档时已经先关掉分屏，见 CommandToggleHexView）
+        hexView_.Resize(viewRect);
+        return;
+    }
     if (splitEnabled_ && documents_->SplitEnabled() && viewRect.right - viewRect.left > 120) {
         const int width = viewRect.right - viewRect.left;
         constexpr int kDividerWidth = 5;
@@ -1767,6 +1805,19 @@ void MainWindow::UpdateStatus() const {
     if (!documents_) {
         return;
     }
+    if (hexMode_) {
+        // 十六进制模式下第一段显示字节偏移（"行/列"在这里没有意义），
+        // 后面两段照旧描述这份文档
+        UpdateHexStatus();
+        if (edit::Document* document = documents_->Active();
+            document != nullptr && document->view != nullptr) {
+            statusBar_.SetDocumentInfo(edit::EncodingName(document->buffer.encoding),
+                                       edit::EolName(document->buffer.eol),
+                                       document->view->CurrentLanguageName(),
+                                       document->buffer.isModified);
+        }
+        return;
+    }
     edit::Document* document = documents_->Active();
     if (document == nullptr || !document->view) {
         statusBar_.SetPosition(0, 0, 0);
@@ -1789,6 +1840,11 @@ void MainWindow::UpdateStatus() const {
 void MainWindow::ActivateDocument(core::BufferId id) {
     if (!documents_) {
         return;
+    }
+    // 十六进制视图只跟着一个文档：切标签、关文档都该退出它（关掉正在看的那个更是）
+    if (hexMode_ && id != hexDocument_) {
+        LeaveHexView();
+        RebuildMenu();
     }
     documents_->Activate(id);
     if (edit::Document* document = documents_->Active(); document != nullptr && document->view) {
@@ -3761,6 +3817,100 @@ void MainWindow::CommandExportLangPack() {
                   L"导出语言包", MB_ICONINFORMATION);
 }
 
+// ---- 十六进制查看（设计文档 2.13 第 5 条）----
+
+void MainWindow::UpdateHexStatus() const {
+    const std::uint64_t offset = hexView_.CurrentOffset();
+    const std::string hex =
+        edit::FormatHexOffset(offset, edit::HexOffsetWidthFor(hexView_.FileSize()));
+    statusBar_.SetMessage(L"十六进制  偏移 0x" + FromUtf8(hex) + L"  |  第 " +
+                          std::to_wstring(offset + 1) + L" 字节，共 " +
+                          std::to_wstring(hexView_.FileSize()) + L" 字节  |  只读");
+}
+
+void MainWindow::CommandToggleHexView() {
+    if (hexMode_) {
+        LeaveHexView();
+        RebuildMenu();
+        UpdateStatus();
+        return;
+    }
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr) {
+        ::MessageBoxW(hwnd_, L"没有打开的文档。", L"十六进制查看", MB_ICONINFORMATION);
+        return;
+    }
+    if (!document->buffer.HasPath()) {
+        ::MessageBoxW(hwnd_,
+                      L"这份文档还没保存到磁盘，没有文件字节可看：先保存，再用十六进制查看。",
+                      L"十六进制查看", MB_ICONINFORMATION);
+        return;
+    }
+    if (document->buffer.isModified) {
+        // 十六进制视图读的是**磁盘上的字节**——这正是它能看到真正文件内容的原因
+        //（编码转换之后的缓冲区已经不是文件里那些字节了）。所以只能要求先保存
+        ::MessageBoxW(hwnd_,
+                      (L"「" + document->buffer.displayName +
+                       L"」有未保存的改动。十六进制视图看的是磁盘上的字节，先保存再来。")
+                          .c_str(),
+                      L"十六进制查看", MB_ICONINFORMATION);
+        return;
+    }
+    // 分屏是把编辑区左右切开的两条文本视图；十六进制视图要独占整块编辑区，
+    // 两件事摆在一起会让人以为"右半边坏了"，所以先关掉分屏（退出时不自动开回来）
+    if (splitEnabled_) {
+        CommandToggleSplit();
+    }
+    std::wstring error;
+    if (!hexView_.OpenFile(document->buffer.filePath, &error)) {
+        ::MessageBoxW(hwnd_, (L"打不开这个文件：\n" + error).c_str(), L"十六进制查看",
+                      MB_ICONWARNING);
+        return;
+    }
+    hexMode_ = true;
+    hexDocument_ = document->buffer.id;
+    documents_->ShowOnly(nullptr);   // 把编辑控件的显示让出来
+    hexView_.SetVisible(true);
+    LayoutViews();
+    // 与文本视图联动：滚到光标所在的字节。光标位置本来就是**字节**下标，正好对得上
+    if (document->view != nullptr) {
+        const int32_t caret = document->view->CaretPosition();
+        hexView_.GoTo(static_cast<std::uint64_t>(caret > 0 ? caret : 0));
+    }
+    hexView_.Focus();
+    RebuildMenu();
+    UpdateStatus();
+    infra::LogInfo(L"hex", L"以十六进制打开: " + document->buffer.filePath + L"（" +
+                               std::to_wstring(hexView_.FileSize()) + L" 字节）");
+}
+
+void MainWindow::CommandHexGoTo() {
+    if (!hexMode_) {
+        ::MessageBoxW(hwnd_, L"先切到十六进制视图（视图菜单里那一条）。", L"跳到偏移",
+                      MB_ICONINFORMATION);
+        return;
+    }
+    hexView_.Focus();
+    // 走控件自己的那条路（与 Ctrl+G 同一个入口），解析与提示都在那里
+    hexView_.PromptJump();
+}
+
+void MainWindow::LeaveHexView() {
+    if (!hexMode_) {
+        return;
+    }
+    hexMode_ = false;
+    hexDocument_ = 0;
+    hexView_.CloseFile();
+    hexView_.SetVisible(false);
+    documents_->ShowOnly(documents_->Active());
+    LayoutViews();
+    if (edit::Document* document = documents_->Active();
+        document != nullptr && document->view != nullptr) {
+        ::SetFocus(document->view->Handle());
+    }
+}
+
 bool MainWindow::OpenDocumentPath(const std::wstring& path) {
     const core::OpenOutcome outcome = documents_->Open(path);
     if (outcome.status != core::OpenStatus::Ok &&
@@ -4311,6 +4461,7 @@ void MainWindow::CommandToggleDarkMode() {
     // 之后新建的标签也要用同一套皮肤（DocumentManager 建视图时会用）
     documents_->SetPalette(darkMode_ ? edit::EditorPalette::Dark() : edit::EditorPalette::Light());
     ApplyStyleSchemeToAllViews();
+    hexView_.SetDark(darkMode_);   // 十六进制视图的自绘配色也跟着走
 }
 
 void MainWindow::CommandStyleConfigurator() {

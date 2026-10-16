@@ -24,4 +24,8 @@ bool AskMacroRunOptions(HWND owner, const std::wstring& macroName, MacroRunOptio
 // 再抄一份没有意义。返回 false = 用户取消。
 bool AskRunCommandName(HWND owner, const std::wstring& suggested, std::wstring& out);
 
+// 十六进制视图里"跳到偏移"（设计文档 2.13 第 5 条）。同理，复用那套小对话框。
+// 这里只负责把用户敲的字原样交回去，**解析留给调用方**（edit::ParseHexJump）。
+bool AskHexOffset(HWND owner, std::wstring& out);
+
 }  // namespace npcc::shell

@@ -10,6 +10,7 @@ namespace {
 
 constexpr const wchar_t* kNameClass = L"notepadccMacroName";
 constexpr const wchar_t* kRunClass = L"notepadccMacroRun";
+constexpr const wchar_t* kHexGotoClass = L"notepadccHexGoto";
 
 enum : int {
     kIdLabel = 1300,
@@ -309,6 +310,22 @@ bool AskMacroName(HWND owner, const std::wstring& suggested, std::wstring& out) 
     if (spec.value.empty()) {
         // 空名字没法在菜单里区分，也不能当标识用
         ::MessageBoxW(owner, L"名字不能是空的。", L"保存宏", MB_ICONWARNING);
+        return false;
+    }
+    out = spec.value;
+    return true;
+}
+
+bool AskHexOffset(HWND owner, std::wstring& out) {
+    DialogSpec spec;
+    spec.windowClass = kHexGotoClass;
+    spec.title = L"跳到偏移";
+    spec.prompt = L"跳到第几个字节（十六进制请带 0x 前缀）：";
+    spec.value = L"0x0";
+    spec.hint = L"例如 0x1F0 是十六进制的 496，496 是不带前缀的十进制写法。";
+    spec.maxLength = 24;
+    SmallDialog dialog;
+    if (!dialog.Show(owner, spec)) {
         return false;
     }
     out = spec.value;

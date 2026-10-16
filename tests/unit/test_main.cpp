@@ -1,6 +1,7 @@
 // notepadcc 单元测试：只覆盖不依赖窗口的纯逻辑（设计文档 9.1 的单元测试层）。
 #include <cstdint>
 #include <cstdio>
+#include <algorithm>
 #include <filesystem>
 #include <chrono>
 #include <memory>
@@ -35,6 +36,7 @@
 #include "edit/ColumnEdit.h"
 #include "edit/ColumnText.h"
 #include "edit/Encoding.h"
+#include "edit/HexModel.h"
 #include "edit/FileTier.h"
 #include "edit/TextTools.h"
 #include "edit/StyleScheme.h"
@@ -4902,6 +4904,127 @@ int main() {
             ::DestroyWindow(colourHost);
         } else {
             Check(false, "创建编辑控件失败");
+        }
+    }
+
+    Section("十六进制视图的排版与解析（HexModel）");
+    {
+        using npcc::edit::HexBlockText;
+        using npcc::edit::HexByteAtColumn;
+        using npcc::edit::HexRowText;
+        using npcc::edit::ParseHexJump;
+
+        // ---- 偏移宽度 ----
+        Check(npcc::edit::HexOffsetWidthFor(1024) == 8, "小文件的偏移是 8 位");
+        Check(npcc::edit::HexOffsetWidthFor(0x100000000ull) == 16, "超过 4 GB 的偏移要 16 位");
+        CheckEqual(npcc::edit::FormatHexOffset(0x1F), "0000001F", "偏移是大写定宽十六进制");
+        CheckEqual(npcc::edit::FormatHexOffset(0x1F, 16), "000000000000001F", "可以指定宽度");
+
+        // ---- 一整行：偏移 + 十六进制 + ASCII ----
+        const std::uint8_t row[16] = {0x4A, 0x6F, 0x20, 0x62, 0x69, 0x6E, 0x00, 0x00,
+                                      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF};
+        const std::string line = HexRowText(row, 16, 0);
+        CheckEqual(line,
+                   "00000000  4A 6F 20 62 69 6E 00 00  00 00 00 00 00 00 00 FF  Jo bin..........",
+                   "整行的排版");
+        Check(line.size() == static_cast<std::size_t>(npcc::edit::kHexRowWidth),
+              "整行的宽度就是 kHexRowWidth");
+
+        // ---- 不满一行：十六进制列要用空格补齐，ASCII 仍然对得齐 ----
+        const std::uint8_t tail[4] = {0x7F, 0x80, 't', 'a'};
+        const std::string partial = HexRowText(tail, 4, 0x20);
+        // 不满一行的行文本比整行短（后面没有多余的空白），但**列**仍然对得齐：
+        // ASCII 一定从 kHexAsciiStart 那一列开始
+        Check(partial.size() == static_cast<std::size_t>(npcc::edit::kHexAsciiStart) + 4,
+              "不满一行时 ASCII 仍然落在同一列上");
+        Check(npcc::edit::kHexRowWidth == npcc::edit::kHexAsciiStart + npcc::edit::kHexBytesPerRow,
+              "整行宽度 = ASCII 起点 + 每行字节数");
+        Check(partial.compare(0, 21, "00000020  7F 80 74 61") == 0, "末行的偏移与字节");
+        CheckEqual(partial.substr(static_cast<std::size_t>(npcc::edit::kHexAsciiStart)), "..ta",
+                   "末行的 ASCII 从头开始，不跟着字节数左移");
+        Check(partial.find('\x7F') == std::string::npos, "0x7F 不原样输出");
+        {
+            const std::uint8_t edges[6] = {0x1F, 0x20, 0x7E, 0x7F, 0x80, 0xFF};
+            const std::string text = HexRowText(edges, 6, 0);
+            CheckEqual(text.substr(static_cast<std::size_t>(npcc::edit::kHexAsciiStart), 6),
+                       ". ~...", "0x20 与 0x7E 是可打印的两端，两侧都替成点");
+        }
+
+        // ---- 多行拼块 ----
+        std::uint8_t many[40] = {};
+        for (int i = 0; i < 40; ++i) {
+            many[i] = static_cast<std::uint8_t>(i + 1);
+        }
+        {
+            const std::string block = HexBlockText(many, sizeof(many), 0, sizeof(many));
+            Check(block.find("\r\n") != std::string::npos, "块里行间用 \\r\\n");
+            const std::size_t lines =
+                static_cast<std::size_t>(std::count(block.begin(), block.end(), '\n')) + 1;
+            Check(lines == 3, "40 字节排成三行");
+            Check(block.compare(0, 8, "00000000") == 0, "第一行从偏移 0 开始");
+        }
+        {
+            // 从中间取一段：左边那一列要写真实偏移，而不是从 0 重新数
+            const std::string block = HexBlockText(many, sizeof(many), 20, 8);
+            Check(block.compare(0, 21, "00000014  15 16 17 18") == 0,
+                  "从第 20 个字节开始（0x14），值是 21..24");
+        }
+        {
+            // 要的比有的多：按实际长度截断，读不到文件尾之外
+            const std::string block = HexBlockText(many, sizeof(many), 32, 1024);
+            Check(block.compare(0, 8, "00000020") == 0, "从 0x20 开始");
+            Check(std::count(block.begin(), block.end(), '\n') == 0, "只剩一行");
+        }
+        Check(HexBlockText(many, sizeof(many), 100, 16).empty(), "起点越界时返回空");
+        Check(HexBlockText(nullptr, 0, 0, 16).empty(), "没有数据时返回空");
+
+        // ---- 跳到偏移的输入 ----
+        {
+            std::uint64_t offset = 999;
+            Check(ParseHexJump(L"0x1F", offset) && offset == 0x1F, "0x1F 是十六进制");
+            Check(ParseHexJump(L"0X1f", offset) && offset == 0x1F, "大小写与 0X 都认");
+            Check(ParseHexJump(L"  0x200  ", offset) && offset == 0x200, "首尾空白忽略");
+            Check(ParseHexJump(L"512", offset) && offset == 512, "不带前缀的按十进制");
+            Check(ParseHexJump(L"0", offset) && offset == 0, "0 合法");
+            offset = 999;
+            Check(!ParseHexJump(L"", offset), "空串不合法");
+            Check(!ParseHexJump(L"   ", offset), "只有空白不合法");
+            Check(!ParseHexJump(L"0x", offset), "只有前缀不合法");
+            Check(!ParseHexJump(L"1F", offset), "不带 0x 的字母不当十六进制（免得「10」靠猜）");
+            Check(!ParseHexJump(L"0x1G", offset), "非法字符不合法");
+            Check(!ParseHexJump(L"12 34", offset), "中间有空格不合法");
+            Check(!ParseHexJump(L"0xFFFFFFFFFFFFFFFFFF", offset), "溢出不合法");
+            Check(offset == 999, "解析失败时不动 out");
+        }
+
+        // ---- 鼠标列 → 本行第几个字节 ----
+        {
+            int index = -1;
+            Check(HexByteAtColumn(npcc::edit::kHexTextStart, 16, &index) && index == 0,
+                  "十六进制区第一列是第 0 个字节");
+            Check(HexByteAtColumn(npcc::edit::kHexTextStart + 13, 16, &index) && index == 4,
+                  "每三个字符一个字节");
+            Check(HexByteAtColumn(npcc::edit::kHexTextStart + 21, 16, &index) && index == 7,
+                  "第 8 个字节");
+            Check(HexByteAtColumn(npcc::edit::kHexTextStart + 25, 16, &index) && index == 8,
+                  "空档之后整体挪了一列，换算要跟着挪");
+            Check(HexByteAtColumn(npcc::edit::kHexTextStart + 46, 16, &index) && index == 15,
+                  "最后一个字节");
+            Check(HexByteAtColumn(npcc::edit::kHexAsciiStart, 16, &index) && index == 0,
+                  "ASCII 区第一列也是第 0 个字节");
+            Check(HexByteAtColumn(npcc::edit::kHexAsciiStart + 15, 16, &index) && index == 15,
+                  "ASCII 区最后一列");
+            Check(!HexByteAtColumn(0, 16, &index), "偏移那一列不是字节");
+            Check(!HexByteAtColumn(npcc::edit::kHexTextStart - 1, 16, &index),
+                  "偏移与十六进制之间的空格不算");
+            Check(!HexByteAtColumn(npcc::edit::kHexAsciiStart + 17, 16, &index), "ASCII 右边不算");
+            Check(HexByteAtColumn(npcc::edit::kHexTextStart + 3, 4, &index) && index == 1,
+                  "末行里真实存在的字节照样能点");
+            Check(!HexByteAtColumn(npcc::edit::kHexTextStart + 16, 4, &index),
+                  "末行补齐的空档点不出字节");
+            Check(!HexByteAtColumn(npcc::edit::kHexAsciiStart + 5, 4, &index),
+                  "末行 ASCII 之后的位置也点不出来");
+            Check(!HexByteAtColumn(npcc::edit::kHexTextStart, 0, &index), "没有字节的行点不出东西");
         }
     }
 

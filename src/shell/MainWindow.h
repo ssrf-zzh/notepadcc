@@ -26,6 +26,7 @@
 #include "shell/TabBar.h"
 #include "shell/FolderPanel.h"
 #include "shell/FunctionListPanel.h"
+#include "shell/HexView.h"
 #include "plugin/PluginHost.h"
 #include "shell/FindBar.h"
 #include "shell/SearchPanel.h"
@@ -158,6 +159,10 @@ private:
     std::wstring lastRunCommand_;   // 下次打开 F5 时预填
     int          runOutputCounter_ = 0;
     int          runTempCounter_ = 0;
+    // 十六进制视图：一次只看一个文件（它读的是磁盘字节，不是缓冲区）
+    HexView      hexView_;
+    bool         hexMode_ = false;
+    core::BufferId hexDocument_ = 0;   // hexMode_ 为真时正在看哪个文档
     // ---- 界面语言（设计文档 6.6 / 7.7）----
     void RegisterLanguageCommands();
     void CommandSwitchLanguage(const std::wstring& locale);
@@ -166,6 +171,13 @@ private:
     void ReportMissingLanguageKeys();
     // 按当前语言重设所有内置命令的显示文本并重建菜单（切换语言时不重启走的就是这条）
     void ApplyUiLanguage();
+    // ---- 十六进制查看（设计文档 2.13 第 5 条）----
+    void CommandToggleHexView();
+    void CommandHexGoTo();
+    bool HexModeActive() const noexcept { return hexMode_; }
+    void LeaveHexView();     // 回到文本视图（不碰菜单勾选态：调用方自己重建）
+    void LayoutViews() const;   // 按当前模式把视图区摆好（WM_SIZE 与切换时都走它）
+    void UpdateHexStatus() const;   // 状态栏第一段显示十六进制偏移
     // ---- 文件夹工作区（设计文档 2.11）----
     void CommandOpenWorkspace();      // 选一个目录当工作区
     void CommandCloseWorkspace();
@@ -294,6 +306,7 @@ private:
     bool          splitFocusSecondary_ = false;
     bool          splitDragging_ = false;
     mutable RECT  dividerRect_ = {};
+    mutable RECT  viewRect_ = {};   // 编辑区（布局时算一次，切换十六进制视图时复用）
 };
 
 }  // namespace npcc::shell

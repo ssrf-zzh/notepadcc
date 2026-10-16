@@ -142,6 +142,7 @@ set(NPCC_CORE_SOURCES
     src/core/XmlFormat.cpp
     src/core/RunCommand.cpp
     src/edit/ColumnEdit.cpp
+    src/edit/HexModel.cpp
     src/edit/ColumnText.cpp
     src/edit/EditView.cpp
     src/edit/Encoding.cpp
@@ -182,6 +183,7 @@ set(NPCC_CORE_SOURCES
     src/shell/PluginAdminDialog.cpp
     src/shell/MacroDialog.cpp
     src/shell/RunCommandDialog.cpp
+    src/shell/HexView.cpp
     src/shell/FindBar.cpp
     src/shell/ColumnDialog.cpp
     src/shell/PreferencesDialog.cpp

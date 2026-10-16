@@ -67,6 +67,8 @@ std::vector<LangPack> MakeBuiltin() {
         Entry(L"cmd.view.cyclePane", L"Switch to Other View", L"W"),
         Entry(L"cmd.view.scrollSync", L"Synchronize Scrolling", L"Y"),
         Entry(L"cmd.view.darkMode", L"Dark Mode", L"D"),
+        Entry(L"cmd.view.hexToggle", L"Hex View (read-only)"),
+        Entry(L"cmd.view.hexGoTo", L"Go to Offset...", L"O"),
         Entry(L"cmd.view.workspaceOpen", L"Open Folder as Workspace...", L"F"),
         Entry(L"cmd.view.workspaceClose", L"Close Workspace", L"C"),
         Entry(L"cmd.view.workspaceRefresh", L"Refresh Workspace", L"R"),
