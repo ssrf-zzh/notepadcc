@@ -2,31 +2,34 @@
 
 #include <windows.h>
 
+#include "core/Localization.h"
+
 namespace npcc::core {
 namespace {
 
 struct CategoryEntry {
     CmdCategory     category;
-    const wchar_t*  text;
+    const wchar_t*  key;      // 语言包键（cat.file）
+    const wchar_t*  text;     // 代码里的默认文本（简体中文）
     wchar_t         mnemonic;
 };
 
 // 唯一的类别名表：菜单顺序与快捷键管理界面的分组顺序都取这张表。
 const CategoryEntry kCategories[] = {
-    {CmdCategory::File,     L"文件",     L'F'},
-    {CmdCategory::Edit,     L"编辑",     L'E'},
-    {CmdCategory::Search,   L"搜索",     L'S'},
-    {CmdCategory::View,     L"视图",     L'V'},
-    {CmdCategory::Format,   L"格式",     L'O'},
-    {CmdCategory::Language, L"语言",     L'L'},
-    {CmdCategory::Settings, L"设置",     L'T'},
-    {CmdCategory::Macro,    L"宏",       L'M'},
-    {CmdCategory::Run,      L"运行",     L'R'},
-    {CmdCategory::Plugin,   L"插件",     L'P'},
-    {CmdCategory::Window,   L"窗口",     L'W'},
-    {CmdCategory::Help,     L"帮助",     L'H'},
-    {CmdCategory::Encoding, L"编码",     L'N'},
-    {CmdCategory::Tools,    L"工具",     L'T'},
+    {CmdCategory::File,     L"cat.file",     L"文件", L'F'},
+    {CmdCategory::Edit,     L"cat.edit",     L"编辑", L'E'},
+    {CmdCategory::Search,   L"cat.search",   L"搜索", L'S'},
+    {CmdCategory::View,     L"cat.view",     L"视图", L'V'},
+    {CmdCategory::Format,   L"cat.format",   L"格式", L'O'},
+    {CmdCategory::Language, L"cat.language", L"语言", L'L'},
+    {CmdCategory::Settings, L"cat.settings", L"设置", L'T'},
+    {CmdCategory::Macro,    L"cat.macro",    L"宏",   L'M'},
+    {CmdCategory::Run,      L"cat.run",      L"运行", L'R'},
+    {CmdCategory::Plugin,   L"cat.plugin",   L"插件", L'P'},
+    {CmdCategory::Window,   L"cat.window",   L"窗口", L'W'},
+    {CmdCategory::Help,     L"cat.help",     L"帮助", L'H'},
+    {CmdCategory::Encoding, L"cat.encoding", L"编码", L'N'},
+    {CmdCategory::Tools,    L"cat.tools",    L"工具", L'T'},
 };
 
 const CategoryEntry* FindCategory(CmdCategory category) {
@@ -70,7 +73,16 @@ std::wstring StripAccelerator(std::wstring_view text) {
 
 std::wstring CategoryText(CmdCategory category) {
     const CategoryEntry* entry = FindCategory(category);
-    return entry != nullptr ? std::wstring(entry->text) : std::wstring(L"其他");
+    if (entry == nullptr) {
+        return L"其他";
+    }
+    // 类别名也走语言包：菜单栏那一排（文件/编辑/…）是英文界面里最先被看到的东西
+    return Tr(entry->key, entry->text);
+}
+
+const wchar_t* CategoryKey(CmdCategory category) {
+    const CategoryEntry* entry = FindCategory(category);
+    return entry != nullptr ? entry->key : L"cat.other";
 }
 
 wchar_t CategoryMnemonic(CmdCategory category) {

@@ -36,6 +36,7 @@
 #include "core/JsonFormat.h"
 #include "core/XmlFormat.h"
 #include "core/RunCommand.h"
+#include "core/Localization.h"
 #include "core/PrintText.h"
 #include "core/PrintPaging.h"
 #include "shell/PluginAdminDialog.h"
@@ -162,6 +163,7 @@ enum : npcc::core::CmdId {
     kCmdToolFormatJson      = npcc::core::MakeCmdId(14, 32),
     kCmdToolMinifyJson      = npcc::core::MakeCmdId(14, 33),
     kCmdToolFormatXml       = npcc::core::MakeCmdId(14, 34),
+    kCmdToolExportLangPack  = npcc::core::MakeCmdId(14, 35),
     // 运行类（9）：第 1 号是 F5 那个对话框，第 kRunCommandBase 号起是用户存的命令
     kCmdRunDialog           = npcc::core::MakeCmdId(9, npcc::core::kRunCommandDialogIndex),
     kCmdEditAutoComplete = npcc::core::MakeCmdId(2, 33),
@@ -174,6 +176,8 @@ enum : npcc::core::CmdId {
     kCmdSettingsRegisterAssoc   = npcc::core::MakeCmdId(7, 3),
     kCmdSettingsUnregisterAssoc = npcc::core::MakeCmdId(7, 4),
     kCmdSettingsPlugins         = npcc::core::MakeCmdId(7, 5),
+    // 界面语言（设置类）：一个语言一条，编号跟着"有哪些语言包"走
+    kLanguageCommandBase        = 128,
 
     kCmdHelpAbout = npcc::core::MakeCmdId(12, 1),
 
@@ -320,6 +324,10 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             }
             documents_->SetStyles(&styles_);
             ApplyConfigToRuntime();
+            // 界面语言要在注册命令之前装好：命令文本是在注册那一刻从语言包取的
+            //（设计文档 6.6）。包文件放在配置目录的 langs 下，同名的盖住内置的
+            core::Localization::Ui().Load(config_.General().uiLanguage,
+                                          infra::ConfigRoot() / L"langs", nullptr);
             crossSearch_ = std::make_unique<search::CrossFileSearch>();
             crossReplace_ = std::make_unique<search::CrossFileReplace>();
             // 外部改动监视：回调在监视线程上，转发回 UI 线程处理
@@ -364,6 +372,9 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             if (menu_ != nullptr) {
                 ::SetMenu(hwnd_, menu_);
             }
+            // 语言包盖不住哪些键，启动时就写进日志：英文界面里冒出中文时，
+            // 这条日志是唯一的线索（设计文档 6.6 第 2 条）
+            ReportMissingLanguageKeys();
             RebuildAccelerators();
 
             ::DragAcceptFiles(hwnd_, TRUE);
@@ -600,6 +611,9 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
         case WM_TIMER:
             if (wParam == kTimerAutosave) {
                 WriteSnapshots();
+                // 顺手把挂着的配置改动落盘：合并窗口只该"推迟"写，不该"攒着不写"。
+                // 没有这一步的话，窗口内那次改动要等到下一次保存或退出才写得出去
+                config_.Flush();
                 return 0;
             }
             if (wParam == kTimerCrashTest) {
@@ -720,7 +734,10 @@ void MainWindow::RegisterCommands() {
         command.id = id;
         command.category = category;
         command.key = key;
-        command.text = text;
+        // 显示文本走语言包；defaultText 留着那份代码里的简体中文，
+        // 切换界面语言时以它为回退（见 Command::defaultText）
+        command.text = core::Tr(key, text);
+        command.defaultText = text;
         command.flags = flags;
         command.execute = std::move(handler);
         registry_.Register(std::move(command));
@@ -1074,6 +1091,9 @@ void MainWindow::RegisterCommands() {
     add(kCmdToolExportUdlSample, CmdCategory::Tools, L"cmd.tool.exportUdlSample",
         L"导出 UDL 示例到配置目录", core::kCmdNone,
         [this](const CmdContext&) { CommandExportUdlSample(); });
+    add(kCmdToolExportLangPack, CmdCategory::Tools, L"cmd.tool.exportLangPack",
+        L"导出语言包模板（英文）", core::kCmdNone,
+        [this](const CmdContext&) { CommandExportLangPack(); });
 
     addSeparator(L"cmd.tool.sepFormat");
     add(kCmdToolFormatJson, CmdCategory::Tools, L"cmd.tool.formatJson", L"格式化 JSON(&J)",
@@ -1105,7 +1125,6 @@ void MainWindow::RegisterCommands() {
     add(kCmdSettingsPlugins, CmdCategory::Settings, L"cmd.settings.plugins",
         L"插件管理器(&G)...", core::kCmdNone,
         [this](const CmdContext&) { CommandPluginManager(); });
-
     // ---- 运行 ----
     // 用户自己存的那些命令由 RegisterRunCommands() 在加载配置之后补上
     add(kCmdRunDialog, CmdCategory::Run, L"cmd.run.dialog", L"运行(&R)...", core::kCmdNone,
@@ -1134,6 +1153,10 @@ void MainWindow::RegisterCommands() {
     bindChecked(kCmdViewWorkspaceOpenSel, [this] { return !folderPanel_.SelectedPath().empty(); });
     bindChecked(kCmdViewFunctionList, [this] { return functionListVisible_; });
     bindChecked(kCmdViewFunctionJump, [this] { return functionListPanel_.SelectedLine() >= 0; });
+    // 界面语言（设计文档 6.6 / 7.7）：一语言一条命令，勾选态表示当前用的那套。
+    // 放在这里而不是做成首选项里的下拉，是因为对话框文本还没进语言包——先让
+    // "切换语言不重启"这条链路真能跑通、也能被回归脚本验证。
+    RegisterLanguageCommands();
 
     // ---- 默认快捷键 ----
     const uint8_t ctrl = core::kModCtrl;
@@ -3585,6 +3608,157 @@ void MainWindow::RegisterRunCommands() {
             registry_.BindShortcut(id, saved[index].modifiers, saved[index].keyCode, true);
         }
     }
+}
+
+// ---- 界面语言（设计文档 6.6 / 7.7）----
+
+void MainWindow::RegisterLanguageCommands() {
+    const std::vector<std::pair<std::wstring, std::wstring>> available =
+        core::Localization::Ui().Available();
+    for (std::size_t index = 0; index < available.size(); ++index) {
+        const std::wstring& locale = available[index].first;
+        core::Command command;
+        command.id = core::MakeCmdId(static_cast<uint8_t>(core::CmdCategory::Settings),
+                                     static_cast<uint16_t>(kLanguageCommandBase + index));
+        command.category = core::CmdCategory::Settings;
+        command.key = L"lang." + locale;
+        // 语言名用**它自己的语言**写（English / 简体中文），故意不进语言包：
+        // 英文界面里把"简体中文"翻成 "Simplified Chinese"，中文用户反而找不到
+        command.text = available[index].second;
+        // kCmdUserDefined：这类命令的编号跟着"有哪些语言包"走，存快捷键会绑错语言
+        command.flags = core::kCmdCheckable | core::kCmdUserDefined;
+        command.execute = [this, locale](const core::CmdContext&) {
+            CommandSwitchLanguage(locale);
+        };
+        if (!registry_.UpdateCommand(command.id, command.text, command.execute)) {
+            registry_.Register(command);
+        }
+        // 勾选态：与 RegisterCommands 里那个 bindChecked 同一套做法（这里拿不到那个局部 lambda）
+        if (core::Command* stored = const_cast<core::Command*>(registry_.Find(command.id));
+            stored != nullptr) {
+            stored->queryChecked = [locale](const core::CmdContext&) {
+                return core::Localization::Ui().Locale() == locale;
+            };
+        }
+    }
+}
+
+void MainWindow::ApplyUiLanguage() {
+    // 先把要改成什么算出来再改：这样不会一边遍历一边改注册表
+    std::vector<std::pair<core::CmdId, std::wstring>> updates;
+    for (const core::Command& command : registry_.All()) {
+        if (command.defaultText.empty()) {
+            continue;   // 动态文本（宏名、运行命令名、插件命令、语言名）：不跟着语言走
+        }
+        updates.emplace_back(command.id, core::Tr(command.key, command.defaultText));
+    }
+    for (const std::pair<core::CmdId, std::wstring>& item : updates) {
+        registry_.SetCommandText(item.first, item.second);
+    }
+    RebuildMenu();
+}
+
+void MainWindow::CommandSwitchLanguage(const std::wstring& locale) {
+    core::Localization& localization = core::Localization::Ui();
+    if (localization.Locale() == locale) {
+        return;
+    }
+    if (!localization.SetLocale(locale)) {
+        ::MessageBoxW(hwnd_, (L"没有可用的界面语言包：" + locale).c_str(), L"界面语言",
+                      MB_ICONWARNING);
+        return;
+    }
+    config_.General().uiLanguage = locale;
+    // 用 SaveNow 而不是 RequestSave：切语言是个"马上要生效"的动作，而 1 秒合并窗口
+    // 只会把它挂起来——后面如果没有别的改动，这次修改就一直不落盘（强杀进程就丢了）
+    config_.SaveNow();
+    ApplyUiLanguage();   // 不重启：重建菜单，下次打开的对话框自然就是新语言
+    ReportMissingLanguageKeys();
+    infra::LogInfo(L"lang", L"界面语言已切换为 " + locale);
+}
+
+void MainWindow::ReportMissingLanguageKeys() {
+    core::Localization& localization = core::Localization::Ui();
+    if (localization.ChineseDefault()) {
+        return;   // 中文那一档就是代码里的默认文本，不存在"缺键"
+    }
+    int missing = 0;
+    for (const core::Command& command : registry_.All()) {
+        // 分隔线也占着一条命令（文本是 "-"），它不是文案，没有"缺键"这回事
+        if (command.defaultText.empty() || command.defaultText == L"-" ||
+            localization.Covers(command.key)) {
+            continue;
+        }
+        ++missing;
+        infra::LogWarn(L"lang", L"语言包 " + localization.Locale() + L" 缺键: " + command.key +
+                                   L"（这一条会显示成简体中文）");
+    }
+    // 类别名也要核：菜单栏那一排是英文界面里最显眼的，缺一个整条菜单就变回中文
+    const core::CmdCategory categories[] = {
+        core::CmdCategory::File,     core::CmdCategory::Edit,    core::CmdCategory::Search,
+        core::CmdCategory::View,     core::CmdCategory::Format,  core::CmdCategory::Language,
+        core::CmdCategory::Settings, core::CmdCategory::Macro,   core::CmdCategory::Run,
+        core::CmdCategory::Plugin,   core::CmdCategory::Window,  core::CmdCategory::Help,
+        core::CmdCategory::Encoding, core::CmdCategory::Tools,
+    };
+    for (const core::CmdCategory kind : categories) {
+        if (registry_.ByCategory(kind).empty()) {
+            continue;   // 这一类还没有命令，菜单里根本不显示
+        }
+        const wchar_t* key = core::CategoryKey(kind);
+        if (!localization.Covers(key)) {
+            ++missing;
+            infra::LogWarn(L"lang", L"语言包 " + localization.Locale() + L" 缺键: " + key);
+        }
+    }
+    if (missing > 0) {
+        infra::LogWarn(L"lang", L"语言包 " + localization.Locale() + L" 一共缺 " +
+                                   std::to_wstring(missing) + L" 个键（界面会中英混排）");
+    }
+}
+
+void MainWindow::CommandExportLangPack() {
+    // 把内置的英文包写出来当模板：翻译的人照着它改一份 <locale>.lang.xml 放进
+    // 配置目录的 langs 下，重启就是一套新语言（与"导出 UDL 示例""导出语言定义"同一套路）
+    const std::vector<core::LangPack>& packs = core::BuiltinLangPacks();
+    if (packs.empty()) {
+        ::MessageBoxW(hwnd_, L"没有内置语言包可导出。", L"导出语言包", MB_ICONINFORMATION);
+        return;
+    }
+    const std::filesystem::path directory = infra::ConfigRoot() / L"langs";
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    const std::filesystem::path target = directory / (packs.front().locale + L".lang.xml");
+    const std::string utf8 = core::LangPackToXml(packs.front());
+
+    const HANDLE file = ::CreateFileW(target.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                      FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        ::MessageBoxW(hwnd_,
+                      (L"写不了语言包文件（" + io::DescribeWin32Error(::GetLastError()) + L"）：\n" +
+                       target.wstring())
+                          .c_str(),
+                      L"导出语言包", MB_ICONWARNING);
+        return;
+    }
+    DWORD written = 0;
+    const BOOL ok = utf8.empty()
+                        ? TRUE
+                        : ::WriteFile(file, utf8.data(), static_cast<DWORD>(utf8.size()), &written,
+                                      nullptr);
+    ::CloseHandle(file);
+    if (ok == FALSE || written != utf8.size()) {
+        ::MessageBoxW(hwnd_, L"写入语言包文件失败。", L"导出语言包", MB_ICONWARNING);
+        return;
+    }
+    infra::LogInfo(L"lang", L"语言包模板已导出: " + target.wstring());
+    ::MessageBoxW(hwnd_,
+                  (L"已导出到：\n" + target.wstring() +
+                   L"\n\n改 value 那一列即可做一套新语言。文件名（去掉 .lang.xml 的部分）"
+                   L"就是 locale，改成本地的名字（例如 ja-JP）放回这个目录，重启后"
+                   L"「设置」菜单里就能选到它。")
+                      .c_str(),
+                  L"导出语言包", MB_ICONINFORMATION);
 }
 
 bool MainWindow::OpenDocumentPath(const std::wstring& path) {

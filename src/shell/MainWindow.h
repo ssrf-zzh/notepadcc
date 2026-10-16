@@ -158,6 +158,14 @@ private:
     std::wstring lastRunCommand_;   // 下次打开 F5 时预填
     int          runOutputCounter_ = 0;
     int          runTempCounter_ = 0;
+    // ---- 界面语言（设计文档 6.6 / 7.7）----
+    void RegisterLanguageCommands();
+    void CommandSwitchLanguage(const std::wstring& locale);
+    void CommandExportLangPack();
+    // 把"当前语言包盖不住哪些键"写进日志（英文界面里冒出中文时，这条日志是唯一线索）
+    void ReportMissingLanguageKeys();
+    // 按当前语言重设所有内置命令的显示文本并重建菜单（切换语言时不重启走的就是这条）
+    void ApplyUiLanguage();
     // ---- 文件夹工作区（设计文档 2.11）----
     void CommandOpenWorkspace();      // 选一个目录当工作区
     void CommandCloseWorkspace();

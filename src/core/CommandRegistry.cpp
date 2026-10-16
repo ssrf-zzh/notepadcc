@@ -44,6 +44,16 @@ bool CommandRegistry::UpdateCommand(CmdId id, std::wstring text,
     return false;
 }
 
+bool CommandRegistry::SetCommandText(CmdId id, std::wstring text) {
+    for (Command& command : commands_) {
+        if (command.id == id) {
+            command.text = std::move(text);
+            return true;
+        }
+    }
+    return false;
+}
+
 const Command* CommandRegistry::Find(CmdId id) const {
     const auto it = std::find_if(commands_.begin(), commands_.end(),
                                  [id](const Command& c) { return c.id == id; });

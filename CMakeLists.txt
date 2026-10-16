@@ -123,6 +123,8 @@ add_subdirectory("${NPCC_PCRE2}" "${CMAKE_BINARY_DIR}/pcre2" EXCLUDE_FROM_ALL)
 set(NPCC_CORE_SOURCES
     src/core/CommandRegistry.cpp
     src/core/CommandText.cpp
+    src/core/Localization.cpp
+    src/core/BuiltinLangPacks.cpp
     src/core/ConfigCenter.cpp
     src/core/DocumentManager.cpp
     src/core/FolderTree.cpp

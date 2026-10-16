@@ -361,4 +361,9 @@ void ConfigCenter::Flush() {
     }
 }
 
+void ConfigCenter::SaveNow() {
+    dirty_ = true;
+    Save(true, nullptr);
+}
+
 }  // namespace npcc::core

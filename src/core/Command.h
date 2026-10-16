@@ -63,7 +63,11 @@ struct Command {
     CmdId        id       = 0;
     CmdCategory  category = CmdCategory::Edit;
     std::wstring key;                       // 语言包键，如 cmd.file.save
-    std::wstring text;                      // 当前显示文本（M0 直接用，M1 接入语言包）
+    std::wstring text;                      // 当前显示文本（语言包命中时是语言包里的）
+    // 代码里写下的那份文本（简体中文）。切换界面语言时以它为回退，
+    // 也是"这条命令该不该跟着语言走"的判据：**动态文本**（宏名、运行命令名、
+    // 插件注册的命令）这份是空的，切换语言时不碰它们（见 Design 6.6 与 7.7）。
+    std::wstring defaultText;
     uint32_t     flags    = kCmdNone;
 
     std::function<void(const CmdContext&)> execute;

@@ -87,6 +87,10 @@ public:
     void RequestSave();
     // 强制落盘。退出、系统关机前必须调用。
     void Flush();
+    // 立刻落盘（无视 1 秒合并窗口）。用在"用户刚做的、应当马上生效"的改动上：
+    // 合并窗口的本意是"把连着来的小改动攒一攒再写"，不是"把改动攒着不写"——
+    // 窗口内的那次改动如果没人再触发一次保存，就会一直挂在内存里（进程被强杀就丢了）。
+    void SaveNow();
 
     bool IsDirty() const noexcept { return dirty_; }
     static std::filesystem::path Path();

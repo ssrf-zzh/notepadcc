@@ -134,6 +134,8 @@ CMD_TOOL_MINIFY_JSON = (14 << 12) | 33
 CMD_TOOL_FORMAT_XML = (14 << 12) | 34
 CMD_RUN_DIALOG = (9 << 12) | 1          # 运行…（F5）
 CMD_RUN_FIRST_SAVED = (9 << 12) | 128   # 存下来的第一条运行命令
+LANGUAGE_BASE = (7 << 12) | 128         # 界面语言：第 0 项是简体中文，第 1 项是内置英文
+CMD_TOOL_EXPORT_LANGPACK = (14 << 12) | 35
 RUN_DIALOG_CLASS = "notepadccRunCommand"
 RUN_COMBO = 1401
 RUN_CAPTURE = 1402
@@ -141,7 +143,6 @@ RUN_GO = 1410
 RUN_SAVE = 1411
 RUN_CANCEL = 1412
 VK_F5 = 0x74
-BM_SETCHECK = 0x00F1
 CMD_VIEW_DARK_MODE = (4 << 12) | 14
 CMD_MACRO_RECORD = (8 << 12) | 1
 CMD_MACRO_PLAY = (8 << 12) | 3
@@ -234,6 +235,7 @@ WM_MOUSEMOVE = 0x0200
 TCM_GETITEMCOUNT = 0x1304            # TCM_FIRST + 4
 BM_SETCHECK = 0x00F1
 BST_UNCHECKED = 0
+MF_BYPOSITION = 0x00000400            # 菜单项按位置而不是按命令号来找
 
 IDYES = 6
 IDNO = 7
@@ -3993,6 +3995,8 @@ def run():
         failed = True
     if not test_run_command(root):
         failed = True
+    if not test_ui_language(root):
+        failed = True
     if not test_auto_complete(root):
         failed = True
     if not test_associated_commands(root):
@@ -4007,7 +4011,7 @@ def run():
           "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + "
           "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + UDL + 暗色模式 + "
           "宏 + 文件夹工作区 + 函数列表 + 导出与打印 + 插件宿主 + JSON/XML 格式化 + "
-          "运行命令 + 自动完成 + 文件关联 + 绿色打包）")
+          "运行命令 + 界面语言 + 自动完成 + 文件关联 + 绿色打包）")
     return 0
 
 
@@ -4157,6 +4161,239 @@ def test_structured_format(root):
 
     print("  JSON/XML 格式化：美化与压缩结果正确（值一个字节没动）、一次撤销回到原文、"
           "混合内容整段原样、非法内容弹说明且文档未改动")
+    return True
+
+
+def menu_texts(window):
+    """把主菜单每个弹出菜单的**第一项**文本读回来（"首个可见项"是各菜单的代表）。
+
+    跨进程读菜单文本是可行的：菜单对象在系统内核里，GetMenuStringW 由内核按调用
+    线程的上下文把字符串拷进我们的缓冲区，不涉及"指针参数封送"那类问题。
+    读的是**真正挂在窗口上的菜单**，所以它反映的是程序此刻的界面语言，
+    而不是配置文件里写了什么——这一点是这一段的核心。
+    """
+    menu = user32.GetMenu(window)
+    count = user32.GetMenuItemCount(menu)
+    out = []
+    for index in range(count):
+        popup = user32.GetSubMenu(menu, index)
+        buffer = ctypes.create_unicode_buffer(256)
+        user32.GetMenuStringW(popup, 0, buffer, 256, MF_BYPOSITION)
+        out.append(buffer.value)
+    return out
+
+
+def menu_bar_titles(window):
+    menu = user32.GetMenu(window)
+    count = user32.GetMenuItemCount(menu)
+    out = []
+    for index in range(count):
+        buffer = ctypes.create_unicode_buffer(256)
+        user32.GetMenuStringW(menu, index, buffer, 256, MF_BYPOSITION)
+        out.append(buffer.value)
+    return out
+
+
+def menu_items(window, index):
+    """某个弹出菜单里的全部可见项文本（分隔线读出来是空串）。"""
+    menu = user32.GetMenu(window)
+    popup = user32.GetSubMenu(menu, index)
+    count = user32.GetMenuItemCount(popup)
+    out = []
+    for position in range(count):
+        buffer = ctypes.create_unicode_buffer(512)
+        user32.GetMenuStringW(popup, position, buffer, 512, MF_BYPOSITION)
+        out.append(buffer.value)
+    return out
+
+
+def has_cjk(text):
+    """有没有中日韩文字或全角标点。用来核对"英文界面里不该冒出中文"。"""
+    for ch in text:
+        if "\u3000" <= ch <= "\u9fff" or "\uff00" <= ch <= "\uffef":
+            return True
+    return False
+
+
+def test_ui_language(root):
+    """界面语言：菜单真的换成英文、不重启就生效、记住选择、英文界面里没有中文残留。
+
+    核对的是**挂在窗口上的菜单文本**（跨进程读得回来，见 menu_texts 的说明），
+    不是配置文件里写了什么——"配置写对了但界面没换"正是这一类功能最容易出的问题。
+    """
+    work = os.path.join(root, "build", "lang_test")
+    os.makedirs(work, exist_ok=True)
+    cfg = os.path.join(root, "build", "bin", "config")
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    config_file = os.path.join(cfg, "config.xml")
+    exported = os.path.join(cfg, "langs", "en-US.lang.xml")
+
+    def clean_config():
+        for name in ("config.xml", "session.xml", "shortcuts.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+        if os.path.exists(exported):
+            os.remove(exported)
+
+    def read_config():
+        if not os.path.exists(config_file):
+            return ""
+        with open(config_file, "r", encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+
+    def wait_menu_first(window, expected, timeout=6.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            texts = menu_texts(window)
+            if texts and texts[0].startswith(expected):
+                return True
+            time.sleep(0.2)
+        return False
+
+    def wait_config(needle, timeout=8.0):
+        """等配置落盘。配置是**合并写盘**的（1 秒窗口内的改动合成一次），所以
+        切完语言立刻读文件可能还是旧值——这里等条件成立，不睡固定时间。
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if needle in read_config():
+                return True
+            time.sleep(0.25)
+        return False
+
+    target = os.path.join(work, "sample.txt")
+    with open(target, "w", encoding="utf-8", newline="") as handle:
+        handle.write("hello\n")
+
+    clean_config()
+    # 日志里会留下**以前那些次**运行的记录（比如修好之前跑出来的"缺键"），
+    # 所以这一段开头先把它删干净，只看这一次的
+    log_file = remove_log_with_retry(root)
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", target], cwd=root)
+    window = wait_for_main_window("notepadcc - sample.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        time.sleep(0.6)
+        first = menu_texts(window)
+        if not first[0].startswith("新建"):
+            print(f"  FAIL: 默认界面语言应当是简体中文，实际第一项 {first[0]!r}")
+            return False
+        titles = menu_bar_titles(window)
+        if not titles or not titles[0].startswith("文件"):
+            print(f"  FAIL: 菜单栏第一项应当是「文件」，实际 {titles[:3]!r}")
+            return False
+
+        # 1) 先触发"导出语言包模板"：配置文件不落盘也能拿到一份可改的模板
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_EXPORT_LANGPACK, 0)
+        if not dismiss_dialog("导出语言包", IDOK, timeout=8.0):
+            print("  FAIL: 导出语言包模板之后应当弹出说明")
+            return False
+        if not os.path.exists(exported):
+            print(f"  FAIL: 没有导出语言包模板 {exported}")
+            return False
+        with open(exported, "r", encoding="utf-8", errors="replace") as handle:
+            template = handle.read()
+        if '<LangPack locale="en-US"' not in template or "<Entry key=" not in template:
+            print(f"  FAIL: 导出的模板内容不对\n{template[:300]}")
+            return False
+
+        # 2) 切成英文：不重启，菜单当场就该换
+        user32.PostMessageW(window, WM_COMMAND, LANGUAGE_BASE + 1, 0)
+        if not wait_menu_first(window, "New"):
+            print(f"  FAIL: 切到英文之后菜单第一项还是 {menu_texts(window)[0]!r}")
+            return False
+        english = menu_texts(window)
+        if not english[2].startswith("Find"):
+            print(f"  FAIL: 英文菜单里搜索那一项应当是 Find...，实际 {english[2]!r}")
+            return False
+        titles = menu_bar_titles(window)
+        if not titles or not titles[0].startswith("File"):
+            print(f"  FAIL: 英文界面的菜单栏第一项应当是 File，实际 {titles[:3]!r}")
+            return False
+
+        # 3) 内置的那几类菜单里一个字的中文都不该有（宏/运行/插件里是用户数据，跳过）。
+        #    唯一的例外是语言自己的名字：英文界面里的那一条就叫「简体中文」——
+        #    语言名要用它自己的语言写，用户才找得到（这是刻意的，不是漏翻）
+        leftovers = []
+        for index in (0, 1, 2, 3, 4, 5, 6, 7, 8, 12):
+            for item in menu_items(window, index):
+                if item and has_cjk(item) and item != "简体中文":
+                    leftovers.append(item)
+        if leftovers:
+            print(f"  FAIL: 英文界面里还有中文菜单项：{leftovers[:6]}")
+            return False
+
+        # 4) 配置里记下了选择，日志里没有"缺键"（缺键会中英混排，前面那条断言也会抓到，
+        #    但日志能直接指出是哪一个键）
+        if not wait_config('uiLanguage="en-US"'):
+            print(f"  FAIL: config.xml 里没有记下 uiLanguage=\"en-US\"\n{read_config()[:400]}")
+            return False
+        if os.path.exists(log_file):
+            with open(log_file, "r", encoding="utf-8", errors="replace") as handle:
+                log = handle.read()
+            missed = [line for line in log.splitlines()
+                      if "缺键" in line and "语言包 en-US" in line]
+            if missed:
+                print(f"  FAIL: 英文包里缺键：{missed[:4]}")
+                return False
+
+        # 5) 再切回中文：不重启也该回来
+        user32.PostMessageW(window, WM_COMMAND, LANGUAGE_BASE + 0, 0)
+        if not wait_menu_first(window, "新建"):
+            print(f"  FAIL: 切回中文之后菜单第一项还是 {menu_texts(window)[0]!r}")
+            return False
+        if not wait_config('uiLanguage="zh-CN"'):
+            print("  FAIL: 切回中文之后配置里应当写回 zh-CN")
+            return False
+        # 最后再切回英文，留给"重启后仍然记得"那一步
+        user32.PostMessageW(window, WM_COMMAND, LANGUAGE_BASE + 1, 0)
+        if not wait_menu_first(window, "New"):
+            print("  FAIL: 第二次切英文失败")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    # 6) 重启：语言选择记在配置里，而且这一次配置目录里躺着一份"外置英文包"
+    #    （上一步导出的模板）——顺带验证外置包能被读进来
+    session = os.path.join(cfg, "session.xml")
+    if os.path.exists(session):
+        os.remove(session)
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", target], cwd=root)
+    window = wait_for_main_window("notepadcc - sample.txt")
+    try:
+        if not window:
+            print("  FAIL: 重启后找不到主窗口")
+            return False
+        if not wait_menu_first(window, "New"):
+            print(f"  FAIL: 重启后界面语言应当还是英文，实际 {menu_texts(window)[0]!r}")
+            return False
+        with open(log_file, "r", encoding="utf-8", errors="replace") as handle:
+            log = handle.read()
+        if "语言包 en-US.lang.xml 读不了" in log:
+            print("  FAIL: 导出的模板应当能被当作外置语言包读回来")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        for name in ("config.xml", "session.xml"):
+            path = os.path.join(cfg, name)
+            if os.path.exists(path):
+                os.remove(path)
+
+    print("  界面语言：菜单真的换成英文（菜单栏与菜单项逐条核对、英文界面里没有中文残留）、"
+          "不重启即生效、选择记进 config.xml 且重启后保持、导出的模板能当外置包读回来")
     return True
 
 

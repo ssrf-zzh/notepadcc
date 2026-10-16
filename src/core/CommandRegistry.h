@@ -16,6 +16,9 @@ public:
     // 只放开这两样：类别、flags、快捷键都不该被外部随手改。返回 false = 没这条命令。
     bool UpdateCommand(CmdId id, std::wstring text, std::function<void(const CmdContext&)> execute);
 
+    // 只换显示文本（切换界面语言时用）。返回 false = 没这条命令。
+    bool SetCommandText(CmdId id, std::wstring text);
+
     const Command* Find(CmdId id) const;
     const std::vector<Command>& All() const noexcept { return commands_; }
     std::vector<CmdId> ByCategory(CmdCategory category) const;

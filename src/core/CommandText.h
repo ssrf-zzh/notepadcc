@@ -17,7 +17,11 @@ namespace npcc::core {
 std::wstring StripAccelerator(std::wstring_view text);
 
 // 类别名（不带助记符）。菜单与快捷键管理界面共用同一张表。
+// 名字走语言包（键是 cat.*）；包缺这一条时用代码里的简体中文默认文本。
 std::wstring CategoryText(CmdCategory category);
+
+// 类别的语言包键（cat.file 这类）。给"缺键自检"用。
+const wchar_t* CategoryKey(CmdCategory category);
 
 // 菜单里类别的助记符字母。
 wchar_t CategoryMnemonic(CmdCategory category);

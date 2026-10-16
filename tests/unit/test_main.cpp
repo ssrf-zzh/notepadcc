@@ -25,6 +25,7 @@
 #include "core/JsonFlat.h"
 #include "core/JsonFormat.h"
 #include "core/XmlFormat.h"
+#include "core/Localization.h"
 #include "shell/FolderPanel.h"
 #include "shell/FunctionListPanel.h"
 #include "core/SnapshotStore.h"
@@ -968,6 +969,25 @@ int main() {
             npcc::core::ConfigCenter reloaded;
             reloaded.Load(nullptr);
             Check(reloaded.Edit().tabWidth == 8, "延后的那次改动没有丢");
+        }
+        {
+            // SaveNow：无视合并窗口立刻落盘。切界面语言这类"马上要生效"的动作走它——
+            // 光靠 RequestSave 的话，那次改动会一直挂到下一次保存或退出（强杀就丢）
+            std::filesystem::remove(path, ec);
+            npcc::core::ConfigCenter config;
+            config.Load(nullptr);
+            config.General().uiLanguage = L"en-US";
+            config.RequestSave();          // 第一次落盘（同时开始计时）
+            Check(!config.IsDirty(), "第一次请求落盘了");
+            config.General().uiLanguage = L"zh-CN";
+            config.RequestSave();
+            Check(config.IsDirty(), "窗口内的第二次请求被延后");
+            config.SaveNow();
+            Check(!config.IsDirty(), "SaveNow 立刻落盘");
+            npcc::core::ConfigCenter reloaded;
+            reloaded.Load(nullptr);
+            Check(reloaded.General().uiLanguage == L"zh-CN",
+                  "SaveNow 写下去的是最后那个值");
         }
 
         std::filesystem::remove(path, ec);
@@ -4883,6 +4903,221 @@ int main() {
         } else {
             Check(false, "创建编辑控件失败");
         }
+    }
+
+    Section("界面语言（语言包加载 / 回退链 / 覆盖自检）");
+    {
+        using npcc::core::LangEntry;
+        using npcc::core::LangPack;
+        using npcc::core::Localization;
+        using npcc::core::ParseLangPack;
+
+        // ---- 内置英文包：内容自检 ----
+        {
+            const std::vector<LangPack>& packs = npcc::core::BuiltinLangPacks();
+            Check(!packs.empty(), "至少有一套内置语言包");
+            Check(packs[0].locale == L"en-US", "内置的第一套是 en-US");
+            Check(packs[0].entries.size() > 100, "内置英文包覆盖了上百条键");
+            bool unique = true;
+            bool wellFormed = true;
+            for (std::size_t i = 0; i < packs[0].entries.size(); ++i) {
+                const LangEntry& entry = packs[0].entries[i];
+                if (entry.key.empty() || entry.value.empty()) {
+                    wellFormed = false;
+                }
+                // 键一律是 cmd.* / cat.* 两种前缀：写错前缀的键永远不会被查到
+                if (entry.key.compare(0, 4, L"cmd.") != 0 && entry.key.compare(0, 4, L"cat.") != 0) {
+                    wellFormed = false;
+                }
+                for (std::size_t j = i + 1; j < packs[0].entries.size(); ++j) {
+                    if (packs[0].entries[j].key == entry.key) {
+                        unique = false;
+                    }
+                }
+            }
+            Check(wellFormed, "内置英文包每条都有键有值、键前缀合法");
+            Check(unique, "内置英文包没有重复键");
+            // 助记符要么空、要么就是一个字母
+            bool accelOk = true;
+            for (const LangEntry& entry : packs[0].entries) {
+                if (!entry.accel.empty() && entry.accel.size() != 1) {
+                    accelOk = false;
+                }
+            }
+            Check(accelOk, "助记符要么空要么一个字母");
+        }
+
+        // ---- 解析与容错 ----
+        {
+            npcc::infra::XmlDocument document;
+            std::wstring error;
+            const std::string xml =
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<LangPack locale=\"xx-XX\" name=\"测试语言\">\n"
+                "  <Entry key=\"cmd.file.save\" value=\"Guardar\" accel=\"G\"/>\n"
+                "  <Entry key=\"cmd.file.open\" value=\"Abrir\"/>\n"
+                "  <Entry value=\"没有键\"/>\n"
+                "  <Entry key=\"cmd.file.new\"/>\n"
+                "  <Entry key=\"cmd.file.save\" value=\"Guardar2\"/>\n"
+                "</LangPack>\n";
+            Check(npcc::infra::XmlDocument::Parse(xml, document, &error), "解析语言包 XML");
+            LangPack pack;
+            std::vector<std::wstring> warnings;
+            Check(ParseLangPack(*document.Root(), pack, &warnings), "解析语言包内容");
+            Check(pack.locale == L"xx-XX" && pack.name == L"测试语言", "locale 与显示名读对了");
+            Check(pack.entries.size() == 2, "缺键或缺值的条目被跳过");
+            // 两条坏条目（缺键、缺值）各一条，再加"同一个键出现两次"那条，共三条
+            Check(warnings.size() == 3, "坏条目与重复键各给一条警告");
+            Check(pack.Find(L"cmd.file.new") == nullptr, "缺 value 的条目没有进包");
+            if (const LangEntry* entry = pack.Find(L"cmd.file.save"); entry != nullptr) {
+                CheckWide(entry->value, L"Guardar2", "同一个键出现多次以最后一条为准");
+            } else {
+                Check(false, "cmd.file.save 应当在包里");
+            }
+        }
+        {
+            // 根元素不对要返回失败，而不是一个空包
+            npcc::infra::XmlDocument document;
+            std::wstring error;
+            Check(npcc::infra::XmlDocument::Parse("<NotLangPack/>", document, &error),
+                  "解析测试 XML");
+            LangPack pack;
+            Check(!ParseLangPack(*document.Root(), pack, nullptr), "根元素不是 LangPack 时失败");
+        }
+        {
+            // 往返：值里有引号、&、尖括号、中文，写出去再读回来必须一字不差
+            LangPack pack;
+            pack.locale = L"xx-XX";
+            pack.name = L"往返测试";
+            pack.entries = {{L"cmd.tool.sortAsc", L"Sort <A> & \"B\"", L"A"},
+                            {L"cat.tools", L"工具 & Tools", L""}};
+            const std::string xml = npcc::core::LangPackToXml(pack);
+            npcc::infra::XmlDocument document;
+            std::wstring error;
+            Check(npcc::infra::XmlDocument::Parse(xml, document, &error), "导出的 XML 能被解析");
+            LangPack back;
+            std::vector<std::wstring> warnings;
+            Check(ParseLangPack(*document.Root(), back, &warnings), "导出再读回来");
+            Check(warnings.empty(), "往返不产生警告");
+            Check(back.entries.size() == 2, "条目数一致");
+            if (back.entries.size() == 2) {
+                CheckWide(back.entries[0].value, L"Sort <A> & \"B\"", "带转义的值往返一致");
+                CheckWide(back.entries[0].accel, L"A", "助记符往返一致");
+                CheckWide(back.entries[1].value, L"工具 & Tools", "中文与 & 往返一致");
+            }
+        }
+
+        // ---- 回退链与助记符拼装（用 Localization 真正装一次包） ----
+        {
+            Localization& ui = Localization::Ui();
+            ui.Load(L"zh-CN", {}, nullptr);
+            Check(ui.ChineseDefault(), "默认用代码里的简体中文");
+            Check(!ui.Covers(L"cmd.file.save"), "中文这一档没有包，所以什么都不算被覆盖");
+            Check(ui.ActivePack() == nullptr, "中文这一档没有活动包");
+            CheckWide(ui.Tr(L"cmd.file.save", L"保存(&S)"), L"保存(&S)",
+                      "包缺失时用代码里的默认文本");
+            CheckWide(ui.Tr(L"msg.unknown", L""), L"msg.unknown",
+                      "既没有包也没有默认文本时显示键本身");
+
+            ui.Load(L"en-US", {}, nullptr);
+            Check(ui.Locale() == L"en-US", "选中 en-US");
+            CheckWide(ui.Tr(L"cmd.file.save", L"保存(&S)"), L"Save(&S)",
+                      "包命中：值 + 助记符");
+            CheckWide(ui.Tr(L"cmd.file.open", L"打开(&O)..."), L"Open(&O)...",
+                      "助记符插在省略号前面");
+            CheckWide(ui.Tr(L"cmd.format.eolCrlf", L"转为 Windows 行尾（CRLF）"),
+                      L"Convert to Windows EOL (CRLF)", "没有助记符的条目只换文本");
+            Check(ui.Covers(L"cmd.file.save"), "包里的键算被覆盖");
+            Check(!ui.Covers(L"cmd.nonexistent"), "包外的键不算被覆盖");
+            Check(!ui.ChineseDefault(), "en-US 不是中文默认");
+            // 类别名也走这里（菜单栏那一排）
+            CheckWide(npcc::core::CategoryText(npcc::core::CmdCategory::File), L"File",
+                      "en-US 下类别名是英文");
+            Check(npcc::core::CategoryMnemonic(npcc::core::CmdCategory::File) == L'F',
+                  "类别助记符不随语言变（本来就是拉丁字母）");
+            ui.Load(L"zh-CN", {}, nullptr);
+            CheckWide(npcc::core::CategoryText(npcc::core::CmdCategory::File), L"文件",
+                      "切回中文之后类别名回到中文");
+        }
+
+        // ---- 外置语言包：覆盖内置、认不出来就回退 ----
+        npcc::infra::InitializePaths(true);
+        const std::filesystem::path langDir = npcc::infra::TempDir() / L"lang_test";
+        std::error_code langEc;
+        std::filesystem::create_directories(langDir, langEc);
+        std::filesystem::remove(langDir / L"xx-XX.lang.xml", langEc);
+        std::filesystem::remove(langDir / L"en-US.lang.xml", langEc);
+        {
+            const std::string custom =
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<LangPack locale=\"xx-XX\" name=\"Esperanto\">\n"
+                "  <Entry key=\"cmd.file.save\" value=\"Konservi\" accel=\"K\"/>\n"
+                "  <Entry key=\"cat.file\" value=\"Dosiero\"/>\n"
+                "</LangPack>\n";
+            Check(WriteFileDirect(langDir / L"xx-XX.lang.xml", custom), "写入外置语言包");
+            Localization& ui = Localization::Ui();
+            std::vector<std::wstring> warnings;
+            ui.Load(L"xx-XX", langDir, &warnings);
+            Check(ui.Locale() == L"xx-XX", "选中外置语言包的语言");
+            CheckWide(ui.Tr(L"cmd.file.save", L"保存(&S)"), L"Konservi(&K)", "外置包生效");
+            CheckWide(ui.Tr(L"cmd.file.new", L"新建(&N)"), L"新建(&N)",
+                      "外置包没写的键回退到简体中文");
+            const auto available = ui.Available();
+            Check(available.size() >= 3, "可选语言里有中文、内置英文与外置的这一套");
+            Check(available[0].first == L"zh-CN", "第一项固定是简体中文");
+            bool hasBuiltin = false;
+            bool hasCustom = false;
+            for (const auto& item : available) {
+                if (item.first == L"en-US") {
+                    hasBuiltin = true;
+                }
+                if (item.first == L"xx-XX" && item.second == L"Esperanto") {
+                    hasCustom = true;
+                }
+            }
+            Check(hasBuiltin, "内置英文在可选语言里");
+            Check(hasCustom, "外置语言的显示名来自它自己的 name 属性");
+        }
+        {
+            // 同 locale 的外置包覆盖内置包
+            const std::string custom =
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<LangPack locale=\"en-US\" name=\"English (mine)\">\n"
+                "  <Entry key=\"cmd.file.save\" value=\"Store\"/>\n"
+                "</LangPack>\n";
+            Check(WriteFileDirect(langDir / L"en-US.lang.xml", custom), "写入覆盖 en-US 的包");
+            Localization& ui = Localization::Ui();
+            ui.Load(L"en-US", langDir, nullptr);
+            CheckWide(ui.Tr(L"cmd.file.save", L"保存(&S)"), L"Store", "外置的同名包盖住了内置那套");
+            CheckWide(ui.Tr(L"cmd.file.open", L"打开(&O)..."), L"打开(&O)...",
+                      "盖住的是整套包：内置那条键也没有了");
+            std::filesystem::remove(langDir / L"en-US.lang.xml", langEc);
+        }
+        {
+            // 配置里的语言认不出来：回退中文并给警告
+            Localization& ui = Localization::Ui();
+            std::vector<std::wstring> warnings;
+            ui.Load(L"ja-JP", langDir, &warnings);
+            Check(ui.Locale() == L"zh-CN", "认不出来的语言回退简体中文");
+            Check(!warnings.empty(), "回退时给一条警告");
+            CheckWide(ui.Tr(L"cmd.file.save", L"保存(&S)"), L"保存(&S)", "回退后用的是默认文本");
+        }
+        {
+            // 坏文件只跳过它自己
+            Check(WriteFileDirect(langDir / L"broken.lang.xml", "这不是 XML"),
+                  "写入损坏的语言包");
+            Localization& ui = Localization::Ui();
+            std::vector<std::wstring> warnings;
+            ui.Load(L"xx-XX", langDir, &warnings);
+            Check(ui.Locale() == L"xx-XX", "坏文件不影响别的包");
+            Check(!warnings.empty(), "坏文件给一条警告");
+            std::filesystem::remove(langDir / L"broken.lang.xml", langEc);
+        }
+        std::filesystem::remove(langDir / L"xx-XX.lang.xml", langEc);
+        // 这一段动过全局的语言设置，收尾时必须还原：后面的段落（比如"快捷键"里那几条
+        // 类别名断言）看到的应当是简体中文
+        Localization::Ui().Load(L"zh-CN", {}, nullptr);
+        Check(Localization::Ui().ChineseDefault(), "收尾：语言设置还原成简体中文");
     }
 
     Section("运行命令（变量展开 / UserDefinedCommands 持久化）");
