@@ -135,6 +135,9 @@ set(NPCC_CORE_SOURCES
     src/edit/LanguageRegistry.cpp
     src/edit/StyleScheme.cpp
     src/edit/TextTools.cpp
+    src/edit/UdlDefinition.cpp
+    src/edit/UdlLexer.cpp
+    src/edit/UdlStyles.cpp
     src/infra/Log.cpp
     src/infra/Paths.cpp
     src/infra/SingleInstance.cpp

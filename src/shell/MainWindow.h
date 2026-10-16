@@ -113,6 +113,7 @@ private:
     void CommandToggleComment(bool block);
     void CommandExportLanguageDefs();
     void CommandStyleConfigurator();
+    void CommandExportUdlSample();
     void ApplyStyleSchemeToAllViews();
     void CommandAutoComplete();
     const edit::LanguageDef* ActiveLanguage() const;

@@ -90,7 +90,7 @@ std::wstring StyleConfigurator::CurrentLanguage() const {
         languageIndex_ >= static_cast<int>(languages_->All().size())) {
         return L"null";
     }
-    return languages_->All()[static_cast<std::size_t>(languageIndex_)].languageName;
+    return languages_->All()[static_cast<std::size_t>(languageIndex_)]->languageName;
 }
 
 void StyleConfigurator::LoadForLanguage(int comboIndex) {
@@ -258,9 +258,9 @@ bool StyleConfigurator::Show(HWND owner, const npcc::edit::LanguageRegistry& lan
     HWND combo = Make(WC_COMBOBOXW, L"", WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
                       kStyleLanguageCombo);
     if (combo != nullptr) {
-        for (const npcc::edit::LanguageDef& language : languages_->All()) {
+        for (const npcc::edit::LanguageDef* language : languages_->All()) {
             ::SendMessageW(combo, CB_ADDSTRING, 0,
-                           reinterpret_cast<LPARAM>(language.displayName.c_str()));
+                           reinterpret_cast<LPARAM>(language->displayName.c_str()));
         }
         ::SendMessageW(combo, CB_SETCURSEL, 0, 0);
     }

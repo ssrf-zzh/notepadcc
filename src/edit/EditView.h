@@ -236,6 +236,8 @@ public:
     // 是"让颜色真的看得见"的那一步（词法器本身只标样式号，不设颜色）。
     void ApplySyntaxColours(const char* lexerName) const;
     void ApplySyntaxColours(const LanguageDef& language, const StyleScheme& scheme) const;
+    // UDL 的样式号是自研词法器定的一组（UdlStyles.h），配色表也得自己写一份
+    void ApplyUdlColours(const LanguageDef& language, const StyleScheme& scheme) const;
     // 套用方案里的前景/背景/字体/字号（会先把默认样式扩散到全部样式）
     void ApplySchemeDefaults(const StyleScheme& scheme) const;
 

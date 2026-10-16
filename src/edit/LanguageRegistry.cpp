@@ -264,37 +264,44 @@ void ApplyOverride(std::vector<LanguageDef>& target, const LanguageDef& override
 
 bool LanguageRegistry::Load(std::wstring* error, std::vector<std::wstring>* warnings) {
     languages_ = Defaults();
+    udlLanguages_.clear();
     std::vector<std::wstring> localWarnings;
     std::vector<std::wstring>& sink = warnings != nullptr ? *warnings : localWarnings;
 
+    // langs.xml 与 userlangs.xml 互不依赖：一个坏了不影响另一个。
+    // 这里先把两份都读进来，最后统一记警告再返回状态。
+    bool ok = true;
     const std::filesystem::path path = Path();
-    if (::GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        return true;   // 没有文件 = 全用内置表
-    }
     infra::XmlDocument document;
-    std::wstring parseError;
-    if (!io::LoadXmlFile(path.wstring(), document, &parseError)) {
+    const infra::XmlElement* root = nullptr;
+    if (::GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        // 没有文件 = 全用内置表，这不是错误
+    } else if (std::wstring parseError;
+               !io::LoadXmlFile(path.wstring(), document, &parseError)) {
         if (error != nullptr) {
             *error = parseError;
         }
-        infra::LogWarn(L"langs", L"语言定义加载失败，改用内置表: " + parseError);
-        return false;
-    }
-    const infra::XmlElement* root = document.Root();
-    if (root == nullptr || root->name != kRootName) {
+        sink.push_back(L"langs.xml 加载失败，改用内置表：" + parseError);
+        ok = false;
+    } else if ((root = document.Root()) == nullptr || root->name != kRootName) {
         if (error != nullptr) {
             *error = L"langs.xml 的根元素不是 " + std::wstring(kRootName);
         }
-        return false;
-    }
-    if (root->AttributeInt(L"schemaVersion", 0) > kSchemaVersion) {
+        sink.push_back(L"langs.xml 的根元素不对，改用内置表");
+        ok = false;
+    } else if (root->AttributeInt(L"schemaVersion", 0) > kSchemaVersion) {
         if (error != nullptr) {
             *error = L"langs.xml 来自更新的版本，已忽略";
         }
-        return false;
+        sink.push_back(L"langs.xml 来自更新的版本，已忽略");
+        ok = false;
     }
 
-    for (const infra::XmlElement* node : root->Children(L"Language")) {
+    std::vector<const infra::XmlElement*> nodes;
+    if (ok && root != nullptr) {
+        nodes = root->Children(L"Language");
+    }
+    for (const infra::XmlElement* node : nodes) {
         if (node == nullptr) {
             continue;
         }
@@ -333,10 +340,54 @@ bool LanguageRegistry::Load(std::wstring* error, std::vector<std::wstring>* warn
         ApplyOverride(languages_, def);
     }
 
+    LoadUserDefined(&sink);
+
     for (const std::wstring& warning : sink) {
         infra::LogWarn(L"langs", L"语言定义: " + warning);
     }
-    return true;
+    return ok;
+}
+
+void LanguageRegistry::LoadUserDefined(std::vector<std::wstring>* warnings) {
+    std::vector<UdlDefinition> definitions;
+    std::wstring error;
+    std::vector<std::wstring> localWarnings;
+    std::vector<std::wstring>& sink = warnings != nullptr ? *warnings : localWarnings;
+    if (!UdlLoader::Load(definitions, &error, &sink)) {
+        // UDL 读坏了不该让内置语言一起失效：记一条警告，继续用内置表
+        sink.push_back(L"userlangs.xml 加载失败，UDL 全部停用：" + error);
+        return;
+    }
+    for (const UdlDefinition& definition : definitions) {
+        LanguageDef def;
+        def.languageName = definition.name;
+        def.displayName = definition.displayName;
+        // lexer 字段留成 "udl"：它只是给人看的标识，真正装上去的是自研词法器
+        // （EditView 看到 udl 非空就不会去叫 CreateLexer）
+        def.lexer = "udl";
+        def.foldable = definition.foldable;
+        def.extensions = definition.extensions;
+        def.keywords = definition.keywordGroups;
+        def.lineComment = definition.lineComment;
+        def.blockCommentStart = definition.blockCommentStart;
+        def.blockCommentEnd = definition.blockCommentEnd;
+
+        // 扩展名撞车要说清楚：UDL 优先（用户自己写的东西应当能盖过内置归属），
+        // 但内置语言如果已经被别处引用，这个扩展名会"看起来没生效"，得留一条线索。
+        for (const std::string& extension : def.extensions) {
+            for (const LanguageDef& builtin : languages_) {
+                if (std::find(builtin.extensions.begin(), builtin.extensions.end(), extension) !=
+                    builtin.extensions.end()) {
+                    sink.push_back(def.languageName + L"：扩展名 " +
+                                   std::wstring(extension.begin(), extension.end()) +
+                                   L" 与内置语言 " + builtin.languageName +
+                                   L" 重叠，UDL 优先");
+                }
+            }
+        }
+        def.udl = std::make_shared<const UdlDefinition>(definition);
+        udlLanguages_.push_back(std::move(def));
+    }
 }
 
 bool LanguageRegistry::Save(std::wstring* error) const {
@@ -381,6 +432,13 @@ const LanguageDef* LanguageRegistry::FindByExtension(std::string_view extension)
     for (char& ch : lower) {
         ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
     }
+    // UDL 优先：用户自己写的定义能盖过内置的扩展名归属（撞车时 Load 会记一条警告）
+    for (const LanguageDef& def : udlLanguages_) {
+        if (std::find(def.extensions.begin(), def.extensions.end(), lower) !=
+            def.extensions.end()) {
+            return &def;
+        }
+    }
     for (const LanguageDef& def : languages_) {
         if (std::find(def.extensions.begin(), def.extensions.end(), lower) !=
             def.extensions.end()) {
@@ -412,12 +470,29 @@ std::string LanguageRegistry::ExtensionOfFile(const std::wstring& path) {
 }
 
 const LanguageDef* LanguageRegistry::Find(std::wstring_view languageName) const {
+    for (const LanguageDef& def : udlLanguages_) {
+        if (def.languageName == languageName) {
+            return &def;
+        }
+    }
     for (const LanguageDef& def : languages_) {
         if (def.languageName == languageName) {
             return &def;
         }
     }
     return nullptr;
+}
+
+std::vector<const LanguageDef*> LanguageRegistry::All() const {
+    std::vector<const LanguageDef*> all;
+    all.reserve(languages_.size() + udlLanguages_.size());
+    for (const LanguageDef& def : languages_) {
+        all.push_back(&def);
+    }
+    for (const LanguageDef& def : udlLanguages_) {
+        all.push_back(&def);
+    }
+    return all;
 }
 
 }  // namespace npcc::edit

@@ -128,6 +128,7 @@ CMD_TOOL_BLOCK_COMMENT = (14 << 12) | 28
 CMD_TOOL_EXPORT_LANGS = (14 << 12) | 29
 CMD_TOOL_STYLE_CONFIG = (14 << 12) | 30
 CMD_EDIT_AUTOCOMPLETE = (2 << 12) | 33
+CMD_TOOL_EXPORT_UDL = (14 << 12) | 31
 
 COLUMN_TEMPLATE_EDIT = 751
 COLUMN_INSERT_BUTTON = 758
@@ -162,6 +163,7 @@ SC_FOLDLEVELHEADERFLAG = 0x2000
 SCI_GETFIRSTVISIBLELINE = 2152
 SCI_GETMODIFY = 2159
 SCI_GETCODEPAGE = 2137
+SCI_GETSTYLEAT = 2010
 
 WM_VSCROLL = 0x0115
 SB_PAGEDOWN = 3
@@ -964,6 +966,218 @@ def appdata_snapshot():
         for name in names:
             found.append(os.path.relpath(os.path.join(base, name), target))
     return sorted(found)
+
+
+def test_udl(root):
+    """UDL 用户自定义语言：自己写一份语言定义，重进程序后它真的接管了着色、注释与折叠。
+
+    UDL 的词法器是本程序自己写的（锁定的 Lexilla 里没有 container 词法器可复用），
+    所以这一段是它唯一的端到端证明：定义落到 userlangs.xml → 注册表按扩展名认领 →
+    自研词法器把样式号打到 token 上 → 颜色真的与默认色不同；注释命令用的是 UDL 里写的
+    注释符（这一段故意用 #，与任何内置语言都不撞）；折叠词真的产生了折叠层级。
+    """
+    work = os.path.join(root, "build", "udl_test")
+    os.makedirs(work, exist_ok=True)
+    sample = os.path.join(work, "sample.npccudl")
+    with open(sample, "w", encoding="utf-8", newline="") as handle:
+        handle.write('let x = 42\n(* 注释 let *)\ns = "文本 let"\nend\n')
+
+    cfg = os.path.join(root, "build", "bin", "config")
+    udl = os.path.join(cfg, "userlangs.xml")
+    for name in ("config.xml", "session.xml", "langs.xml", "stylers.xml", "userlangs.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    # 1) 导出示例：菜单里的那一条要能落下一份能用的模板
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", sample], cwd=root)
+    window = wait_for_main_window("notepadcc - sample.npccudl")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_EXPORT_UDL, 0)
+        if not dismiss_dialog("UDL 示例", IDOK, timeout=8.0):
+            print("  FAIL: 导出 UDL 示例之后应当给出说明")
+            return False
+        time.sleep(0.5)
+        if not os.path.exists(udl):
+            print(f"  FAIL: 没有导出 {udl}")
+            return False
+        with open(udl, "r", encoding="utf-8", errors="replace") as handle:
+            exported = handle.read()
+        if "<UserLangs" not in exported or '<UserLang name=' not in exported:
+            print(f"  FAIL: 导出的 UDL 示例内容不对\n{exported[:300]}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    # 1b) 导出的那份示例要能被自己读回来并且真的生效——"写出去的文件自己能解析"
+    #     这件事只有真跑一遍才算证明（属性里的引号、转义、中文注释都可能写坏）
+    template = os.path.join(work, "template.mydsl")
+    with open(template, "w", encoding="utf-8", newline="") as handle:
+        handle.write("let x = 42\n")
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", template], cwd=root)
+    window = wait_for_main_window("notepadcc - template.mydsl")
+    try:
+        if not window:
+            print("  FAIL: 找不到打开了示例语言文件的窗口")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到可见的编辑控件")
+            return False
+        if user32.SendMessageW(scinti, SCI_GETSTYLEAT, 0, 0) != 10:
+            print("  FAIL: 导出的示例语言没能接管 .mydsl 文件（示例本身读不回来？）")
+            return False
+        default_fore = user32.SendMessageW(scinti, SCI_STYLEGETFORE, 0, 0)
+        if user32.SendMessageW(scinti, SCI_STYLEGETFORE, 10, 0) == default_fore:
+            print("  FAIL: 示例语言的关键字没有配色")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    # 2) 换成自己写的语言定义，重进程序：注释符故意用 #，与内置语言都不撞
+    definition = (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<UserLangs schemaVersion="1">\n'
+        '  <UserLang name="npccudl" displayName="测试 DSL" ext="npccudl" caseSensitive="yes">\n'
+        '    <LineComment prefix="#"/>\n'
+        '    <BlockComment start="(*" end="*)"/>\n'
+        '    <Keywords group="0">let fun match with end</Keywords>\n'
+        '    <StringDelim start="&quot;" end="&quot;" escape="\\"/>\n'
+        '    <Operators>+ - * / = &lt; &gt;</Operators>\n'
+        '    <Fold openTokens="let fun match" closeTokens="end"/>\n'
+        '  </UserLang>\n'
+        '</UserLangs>\n'
+    )
+    with open(udl, "w", encoding="utf-8", newline="") as handle:
+        handle.write(definition)
+    for name in ("config.xml", "session.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+
+    with open(sample, "w", encoding="utf-8", newline="") as handle:
+        handle.write('let x = 42\n(* 注释 let *)\ns = "文本 let"\nend\n')
+
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", sample], cwd=root)
+    window = wait_for_main_window("notepadcc - sample.npccudl")
+    try:
+        if not window:
+            print("  FAIL: 重新启动后找不到主窗口")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到可见的编辑控件")
+            return False
+
+        # 2a) 着色：token 的样式号必须是自研词法器定下的那几个，且颜色与默认色不同
+        default_fore = user32.SendMessageW(scinti, SCI_STYLEGETFORE, 0, 0)
+        text = scinti_text(scinti)
+
+        def byte_offset(needle):
+            """把"第几个字符"换成"第几个字节"。
+
+            SCI_GETSTYLEAT 收的是**字节**下标，而 scinti_text 给的是解码后的字符串——
+            文件里有中文时两者不相等（注释"注释"两个字占 6 个字节），
+            直接拿字符下标去查样式会查到旁边那个 token 上（实测踩过）。
+            """
+            index = text.find(needle)
+            return -1 if index < 0 else len(text[:index].encode("utf-8"))
+
+        checks = [
+            ("(*", 2, "块注释"),            # UdlStyles: 2 = 块注释
+            ("let", 10, "关键字（第 0 组）"),  # 10 = 关键字组 0
+            ("42", 20, "数字"),             # 20 = 数字
+            ('"文本', 21, "字符串"),        # 21 = 字符串
+            ("=", 22, "运算符"),            # 22 = 运算符
+        ]
+        for needle, want_style, what in checks:
+            pos = byte_offset(needle)
+            if pos < 0:
+                print(f"  FAIL: 样例文本里找不到 {needle!r}")
+                return False
+            style = user32.SendMessageW(scinti, SCI_GETSTYLEAT, pos, 0)
+            if style != want_style:
+                print(f"  FAIL: {what} 的样式号应当是 {want_style}，实际 {style}")
+                return False
+            colour = user32.SendMessageW(scinti, SCI_STYLEGETFORE, style, 0)
+            if colour == default_fore:
+                print(f"  FAIL: {what} 的样式号对了但没有配色（还是默认前景色）")
+                return False
+
+        # 2b) 注释与字符串里的关键字词不算关键字
+        inside = byte_offset("let *")
+        if user32.SendMessageW(scinti, SCI_GETSTYLEAT, inside, 0) != 2:
+            print("  FAIL: 块注释里的 let 被当成了关键字")
+            return False
+
+        # 2c) 注释命令用的是 UDL 里写的注释符（# 而不是内置语言的 //）
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_TOGGLE_COMMENT, 0)
+        time.sleep(0.6)
+        commented = scinti_text(scinti)
+        if not commented.startswith("# let x = 42\n"):
+            print(f"  FAIL: 行注释该用 UDL 的 #，实际 {commented[:30]!r}")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_TOGGLE_COMMENT, 0)
+        time.sleep(0.6)
+        restored = scinti_text(scinti)
+        if restored != text:
+            print(f"  FAIL: 再按一次注释应当回到原文\n"
+                  f"        期望 {text!r}\n        实际 {restored!r}")
+            return False
+
+        # 2d) 折叠：折叠边距在、折叠头在、折叠全部真的把行收起来了
+        if user32.SendMessageW(scinti, SCI_GETMARGINWIDTHN, 2, 0) <= 0:
+            print("  FAIL: UDL 语言没有折叠边距")
+            return False
+        level0 = user32.SendMessageW(scinti, SCI_GETFOLDLEVEL, 0, 0)
+        level1 = user32.SendMessageW(scinti, SCI_GETFOLDLEVEL, 1, 0)
+        if not level0 & SC_FOLDLEVELHEADERFLAG:
+            print(f"  FAIL: 第 1 行（let）应当是折叠头，层级 0x{level0:04X}")
+            return False
+        if (level1 & 0xFFF) <= (level0 & 0xFFF):
+            print(f"  FAIL: 块内那一行的层级该比折叠头高（0x{level1:04X} vs 0x{level0:04X}）")
+            return False
+        lines = user32.SendMessageW(scinti, SCI_GETLINECOUNT, 0, 0)
+        user32.PostMessageW(window, WM_COMMAND, CMD_FOLD_ALL, 0)
+        time.sleep(0.6)
+        visible = user32.SendMessageW(scinti, SCI_VISIBLEFROMDOCLINE, lines - 1, 0)
+        if visible >= lines:
+            print(f"  FAIL: 折叠全部之后屏幕上的行没有变少（{visible} / {lines}）")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_UNFOLD_ALL, 0)
+        time.sleep(0.6)
+        if user32.SendMessageW(scinti, SCI_VISIBLEFROMDOCLINE, lines - 1, 0) != lines - 1:
+            print("  FAIL: 展开全部之后应当回到原样")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        for name in ("config.xml", "session.xml", "userlangs.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    print("  UDL：导出的示例能被自己读回来并生效；自写的语言定义重进后接管着色"
+          "（样式号与配色都核对）、注释符用 # 、折叠词生效")
+    return True
 
 
 def test_auto_complete(root):
@@ -2767,6 +2981,8 @@ def run():
         failed = True
     if not test_style_scheme(root):
         failed = True
+    if not test_udl(root):
+        failed = True
     if not test_auto_complete(root):
         failed = True
     if not test_associated_commands(root):
@@ -2779,8 +2995,8 @@ def run():
         return 1
     print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + "
           "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + "
-          "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + 自动完成 + 文件关联 + "
-          "绿色打包）")
+          "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + UDL + 自动完成 + "
+          "文件关联 + 绿色打包）")
     return 0
 
 

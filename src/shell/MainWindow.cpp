@@ -31,6 +31,7 @@
 #include "infra/SingleInstance.h"
 #include "infra/FileAssociation.h"
 #include "infra/Paths.h"
+#include "io/AtomicFile.h"
 #include "io/FileReader.h"
 
 namespace npcc::shell {
@@ -127,6 +128,7 @@ enum : npcc::core::CmdId {
     kCmdToolBlockComment    = npcc::core::MakeCmdId(14, 28),
     kCmdToolExportLanguages = npcc::core::MakeCmdId(14, 29),
     kCmdToolStyleConfigurator = npcc::core::MakeCmdId(14, 30),
+    kCmdToolExportUdlSample = npcc::core::MakeCmdId(14, 31),
     kCmdEditAutoComplete = npcc::core::MakeCmdId(2, 33),
 
     kCmdWindowNext = npcc::core::MakeCmdId(11, 1),
@@ -926,6 +928,9 @@ void MainWindow::RegisterCommands() {
     add(kCmdToolStyleConfigurator, CmdCategory::Tools, L"cmd.tool.styleConfigurator",
         L"样式配置器（配色）(&S)...", core::kCmdNone,
         [this](const CmdContext&) { CommandStyleConfigurator(); });
+    add(kCmdToolExportUdlSample, CmdCategory::Tools, L"cmd.tool.exportUdlSample",
+        L"导出 UDL 示例到配置目录", core::kCmdNone,
+        [this](const CmdContext&) { CommandExportUdlSample(); });
 
     // ---- 窗口 ----
     add(kCmdWindowNext, CmdCategory::Window, L"cmd.window.next", L"下一个标签(&N)",
@@ -2885,6 +2890,36 @@ void MainWindow::CommandExportLanguageDefs() {
                    L"语言，没出现的仍用内置值。改完重启生效。")
                       .c_str(),
                   L"导出语言定义", MB_ICONINFORMATION);
+}
+
+void MainWindow::CommandExportUdlSample() {
+    const std::filesystem::path path = edit::UdlLoader::Path();
+    const bool exists = ::GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+    if (exists) {
+        const int answer = ::MessageBoxW(
+            hwnd_,
+            (L"配置目录里已经有 userlangs.xml：\n" + path.wstring() +
+             L"\n\n覆盖它会丢掉你自己写的语言定义。要用示例覆盖吗？")
+                .c_str(),
+            L"UDL 示例", MB_ICONWARNING | MB_YESNO);
+        if (answer != IDYES) {
+            return;
+        }
+    }
+    const io::WriteResult written = io::WriteFileAtomic(path.wstring(), edit::UdlLoader::SampleXml());
+    if (!written.ok) {
+        ::MessageBoxW(hwnd_, (L"写入失败：\n" + written.message).c_str(), L"UDL 示例",
+                      MB_ICONWARNING);
+        return;
+    }
+    ::MessageBoxW(
+        hwnd_,
+        (L"UDL 示例已写到：\n" + path.wstring() +
+         L"\n\n把它改成你自己的语言：name 是稳定标识，ext 是认领的扩展名，"
+         L"<Keywords>/<LineComment>/<StringDelim>/<Fold> 各管一件事。"
+         L"改完重启生效——用这个扩展名打开文件就能看到效果。")
+            .c_str(),
+        L"UDL 示例", MB_ICONINFORMATION);
 }
 
 void MainWindow::CommandDecodeText(bool base64) {

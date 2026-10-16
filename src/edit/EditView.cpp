@@ -12,6 +12,10 @@
 #include <string>
 #include <vector>
 
+#include "edit/UdlLexer.h"
+#include "edit/UdlStyles.h"
+#include "infra/Log.h"
+
 // 把 EditView 对外暴露的查找标志钉死在 Scintilla 的取值上：
 // 将来升级 Scintilla 若改了数值，编译期就会报错，而不是静默搜错。
 static_assert(npcc::edit::EditView::kSearchFlagWholeWord == SCFIND_WHOLEWORD,
@@ -810,6 +814,10 @@ void EditView::ApplySchemeDefaults(const StyleScheme& scheme) const {
 }
 
 void EditView::ApplySyntaxColours(const LanguageDef& language, const StyleScheme& scheme) const {
+    if (language.udl != nullptr) {
+        ApplyUdlColours(language, scheme);
+        return;
+    }
     const SyntaxStyleMap* map = FindSyntaxMap(language.lexer.c_str());
     if (map == nullptr) {
         return;   // 没有配色表的语言用默认色，不强求
@@ -836,6 +844,39 @@ void EditView::ApplySyntaxColours(const LanguageDef& language, const StyleScheme
     }
 }
 
+// UDL 的样式号是我们自己定的一组（见 UdlStyles.h），所以配色表也自己写一份。
+// 9 组关键字按 0/1/2 循环映射到三个角色：组 0/3/6 是"关键字"，1/4/7 是"强调项"，
+// 2/5/8 是"次要项"——每组的颜色因此能看出区别，但做不到 9 组各不相同（那要等
+// 样式配置器支持"按样式号逐项调整"，设计文档 2.6 第 4 条的后半段）。
+void EditView::ApplyUdlColours(const LanguageDef& language, const StyleScheme& scheme) const {
+    struct Slot {
+        int       style;
+        StyleRole role;
+    };
+    std::vector<Slot> slots = {
+        {udl::kStyleCommentLine, StyleRole::Comment},
+        {udl::kStyleCommentBlock, StyleRole::Comment},
+        {udl::kStyleNumber, StyleRole::Number},
+        {udl::kStyleString, StyleRole::String},
+        {udl::kStyleOperator, StyleRole::Highlight},
+        {udl::kStyleIdentifier, StyleRole::Extra},
+    };
+    for (int group = 0; group < udl::kKeywordGroupCount; ++group) {
+        const int roleIndex = group % 3;
+        const StyleRole role = roleIndex == 0   ? StyleRole::Keyword
+                               : roleIndex == 1 ? StyleRole::Highlight
+                                                : StyleRole::Extra;
+        slots.push_back({udl::KeywordStyleOf(group), role});
+    }
+    for (const Slot& slot : slots) {
+        const RoleStyle value = scheme.Role(language.languageName, slot.role);
+        Send(SCI_STYLESETFORE, static_cast<uintptr_t>(slot.style),
+             static_cast<intptr_t>(value.fore));
+        Send(SCI_STYLESETBOLD, static_cast<uintptr_t>(slot.style), value.bold ? 1 : 0);
+        Send(SCI_STYLESETITALIC, static_cast<uintptr_t>(slot.style), value.italic ? 1 : 0);
+    }
+}
+
 void EditView::ApplySyntaxColours(const char* lexerName) const {
     // 兼容路径：只有 lexer 名、没有语言定义，用内置默认配色
     const StyleScheme scheme = StyleScheme::Defaults();
@@ -845,11 +886,25 @@ void EditView::ApplySyntaxColours(const char* lexerName) const {
 }
 
 void EditView::ApplyLanguage(const LanguageDef& language, const StyleScheme* scheme) const {
+    if (!Valid()) {
+        return;   // 控件还没建好（或已经销毁）：词法器造出来就没人接管了
+    }
     languageName_ = language.displayName.c_str();
     languageKey_ = language.languageName;
     const StyleScheme& active = scheme != nullptr ? *scheme : StyleScheme::Defaults();
     ApplySchemeDefaults(active);
-    Scintilla::ILexer5* lexer = CreateLexer(language.lexer.c_str());
+    // UDL 用自研词法器；内置语言走 Lexilla 的按名查找。
+    Scintilla::ILexer5* lexer = language.udl != nullptr
+                                    ? CreateUdlLexer(*language.udl)
+                                    : CreateLexer(language.lexer.c_str());
+    if (lexer == nullptr) {
+        // 拿不到词法器时 Scintilla 会**静默**把词法器清掉（等于没有着色也没有折叠）。
+        // 这种"写错了但不报错"的事踩过（langs.xml 里 js 指向不存在的词法器），
+        // 所以在交接的地方留一条日志。
+        infra::LogWarn(L"langs", L"找不到词法器 \"" +
+                                     std::wstring(language.lexer.begin(), language.lexer.end()) +
+                                     L"\"，语言 " + language.languageName + L" 将没有着色");
+    }
     Send(SCI_SETILEXER, 0, reinterpret_cast<intptr_t>(lexer));
     // 每一个组都要显式设一次：词法器的关键词表是"粘在控件上"的，新语言没定义的组
     // 如果跳过不设，就会**留着上一个语言的词表**——切换文件之后会出现"这批处理里

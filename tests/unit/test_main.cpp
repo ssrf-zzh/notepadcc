@@ -25,6 +25,9 @@
 #include "edit/TextTools.h"
 #include "edit/StyleScheme.h"
 #include "edit/EditView.h"
+#include "edit/LanguageRegistry.h"
+#include "edit/UdlDefinition.h"
+#include "edit/UdlStyles.h"
 #include "io/AtomicFile.h"
 #include "io/FileReader.h"
 #include "io/FileWatcher.h"
@@ -2979,7 +2982,9 @@ int main() {
 
             LanguageRegistry reloaded;
             Check(reloaded.Load(&error), "重新加载导出的语言定义成功");
-            Check(reloaded.All().size() == exported.All().size(), "语言条数往返一致");
+            // 比内置表：All() 里还可能有 UDL（来自 userlangs.xml），而这里考的是
+            // langs.xml 的往返，别把它跟另一份文件混在一起算
+            Check(reloaded.Builtins().size() == exported.Builtins().size(), "语言条数往返一致");
             const npcc::edit::LanguageDef* cpp = reloaded.FindByExtension("cpp");
             Check(cpp != nullptr && cpp->lineComment == "//" && !cpp->keywords.empty(),
                   "往返后 cpp 的定义完整（含注释符与关键字）");
@@ -3039,6 +3044,265 @@ int main() {
             Check(!futureRegistry.Load(&error), "高版本 langs.xml 被拒绝");
 
             std::error_code ec;
+            std::filesystem::remove(path, ec);
+        }
+    }
+
+    // ---------------------------------------------------------------- UDL（用户自定义语言）
+    // UDL 的词法器是我们自己写的（锁定的 Lexilla 里没有 container 词法器可复用，
+    // 见设计说明书 7.6 末尾的改判），所以这一段既要测"定义解析得对"，也要测
+    // "这份定义**真的**改变了着色、注释与折叠"——只测解析等于没测词法器。
+    Section("UDL 用户自定义语言（userlangs.xml + 自研词法器）");
+    {
+        using npcc::edit::LanguageDef;
+        using npcc::edit::LanguageRegistry;
+        using npcc::edit::UdlDefinition;
+        using npcc::edit::UdlLoader;
+
+        npcc::infra::InitializePaths(true);
+
+        const std::string sampleXml =
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<UserLangs schemaVersion=\"1\">\n"
+            "  <UserLang name=\"mydsl\" displayName=\"My DSL\" ext=\"mydsl MDL\"\n"
+            "            caseSensitive=\"yes\">\n"
+            "    <LineComment prefix=\"//\"/>\n"
+            "    <BlockComment start=\"(*\" end=\"*)\"/>\n"
+            "    <Keywords group=\"0\">let fun match with type module end</Keywords>\n"
+            "    <Keywords group=\"1\">true false null</Keywords>\n"
+            "    <StringDelim start=\"&quot;\" end=\"&quot;\" escape=\"\\\"/>\n"
+            "    <StringDelim start=\"'\"/>\n"
+            "    <Operators>+ - * / = &lt; &gt; |</Operators>\n"
+            "    <Fold openTokens=\"let fun match\" closeTokens=\"end\"/>\n"
+            "  </UserLang>\n"
+            "</UserLangs>\n";
+
+        // 1) 解析：属性、扩展名、注释符、关键字分组、字符串、运算符、折叠词
+        {
+            std::vector<UdlDefinition> definitions;
+            std::wstring error;
+            std::vector<std::wstring> warnings;
+            Check(UdlLoader::Parse(sampleXml, definitions, &error, &warnings), "解析 UDL 成功");
+            Check(definitions.size() == 1 && warnings.empty(), "解析出一条定义且没有警告");
+            if (!definitions.empty()) {
+                const UdlDefinition& def = definitions[0];
+                Check(def.name == L"mydsl" && def.displayName == L"My DSL", "name / displayName");
+                Check(def.extensions == std::vector<std::string>{"mydsl", "mdl"},
+                      "扩展名按空白切分并统一转小写");
+                Check(def.caseSensitive, "caseSensitive=yes 生效");
+                Check(def.lineComment == "//" && def.blockCommentStart == "(*" &&
+                          def.blockCommentEnd == "*)",
+                      "行注释与块注释符");
+                Check(def.keywordGroups.size() == 2 &&
+                          def.keywordGroups[0].find("let") != std::string::npos &&
+                          def.keywordGroups[1] == "true false null",
+                      "关键字分组按 group 归位");
+                Check(def.strings.size() == 2, "两对字符串界定符");
+                Check(!def.strings.empty() && def.strings[0].escape == "\\", "转义字符");
+                Check(def.strings.size() > 1 && def.strings[1].end == "'",
+                      "只写 start 时 end 缺省等于 start");
+                Check(def.operators.find('+') != std::string::npos &&
+                          def.operators.find('|') != std::string::npos,
+                      "运算符按字符收");
+                Check(def.operators.find(' ') == std::string::npos &&
+                          def.operators.find('\t') == std::string::npos,
+                      "运算符列表里的空格是分隔符，不算运算符字符");
+                Check(def.foldable && def.foldOpenTokens.size() == 3 &&
+                          def.foldCloseTokens.size() == 1,
+                      "折叠词分开与收起两组");
+            }
+        }
+
+        // 2) 坏输入：一条写坏不该把别的定义或内置语言带坏
+        {
+            std::vector<UdlDefinition> definitions;
+            std::wstring error;
+            std::vector<std::wstring> warnings;
+            Check(!UdlLoader::Parse("<UserLangs><UserLang", definitions, &error, &warnings),
+                  "XML 不闭合要报错");
+            Check(!error.empty(), "报错带原因");
+            Check(!UdlLoader::Parse("<Nope/>", definitions, &error, &warnings),
+                  "根元素不认识要报错");
+
+            const std::string messy =
+                "<UserLangs>"
+                "<UserLang ext=\"aaa\"/>"                                   // 没 name
+                "<UserLang name=\"noext\"/>"                                // 没 ext
+                "<UserLang name=\"badgroup\" ext=\"bbb\">"
+                "<Keywords group=\"17\">x</Keywords></UserLang>"            // 组号越界
+                "<UserLang name=\"halfblock\" ext=\"ccc\">"
+                "<BlockComment start=\"(*\"/></UserLang>"                   // 块注释只写一半
+                "<UserLang name=\"ok\" ext=\"ddd\"><LineComment prefix=\"#\"/>"
+                "</UserLang>"
+                "</UserLangs>";
+            warnings.clear();
+            Check(UdlLoader::Parse(messy, definitions, &error, &warnings),
+                  "个别条目有问题不影响整份文件");
+            Check(definitions.size() == 3, "三条能用的留下来（没 name 与没 ext 的被丢掉）");
+            Check(warnings.size() >= 3, "每条问题都留了警告");
+            for (const UdlDefinition& def : definitions) {
+                if (def.name == L"halfblock") {
+                    Check(def.blockCommentStart.empty() && def.blockCommentEnd.empty(),
+                          "块注释只写一半时整对丢掉，而不是留下半个");
+                }
+                if (def.name == L"ok") {
+                    Check(def.lineComment == "#", "正常那条照常解析");
+                }
+            }
+        }
+
+        // 3) 接上语言表：写成 userlangs.xml，注册表按扩展名认领，UDL 优先于内置
+        {
+            const std::filesystem::path path = UdlLoader::Path();
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+
+            LanguageRegistry registry;
+            std::wstring error;
+            std::vector<std::wstring> warnings;
+            Check(registry.Load(&error, &warnings), "没有 userlangs.xml 时加载照样成功");
+            Check(registry.UserDefined().empty(), "没有文件时没有 UDL");
+            Check(registry.FindByExtension("mydsl") == nullptr, "没定义的扩展名找不到语言");
+
+            // 故意让第二条抢内置的 cpp 扩展名：UDL 应当赢，并且留下一条警告
+            std::string withCpp = sampleXml;
+            const std::size_t insertAt = withCpp.rfind("</UserLangs>");
+            Check(insertAt != std::string::npos, "样例 XML 有闭合标签");
+            withCpp.insert(insertAt,
+                           "  <UserLang name=\"fakecpp\" ext=\"cpp\">"
+                           "<LineComment prefix=\"#\"/></UserLang>\n");
+            Check(WriteFileDirect(path, withCpp), "写入 userlangs.xml");
+            LanguageRegistry loaded;
+            warnings.clear();
+            Check(loaded.Load(&error, &warnings), "带 UDL 的语言表加载成功");
+            Check(loaded.UserDefined().size() == 2, "两条 UDL 都在");
+            Check(loaded.Builtins().size() >= 13, "内置语言一条没少");
+            Check(loaded.All().size() == loaded.Builtins().size() + loaded.UserDefined().size(),
+                  "All() 是内置 + UDL");
+            const LanguageDef* mine = loaded.FindByExtension("mydsl");
+            Check(mine != nullptr && mine->udl != nullptr, "按扩展名认领到 UDL");
+            Check(mine != nullptr && mine->lexer == "udl", "UDL 的语言定义标着自研词法器");
+            Check(mine != nullptr && mine->lineComment == "//", "注释符来自 UDL 定义");
+            Check(mine != nullptr && mine->foldable, "有折叠词就算可折叠");
+            const LanguageDef* cpp = loaded.FindByExtension("cpp");
+            Check(cpp != nullptr && cpp->languageName == L"fakecpp",
+                  "扩展名撞车时 UDL 优先");
+            bool sawClash = false;
+            for (const std::wstring& warning : warnings) {
+                if (warning.find(L"重叠") != std::wstring::npos) {
+                    sawClash = true;
+                }
+            }
+            Check(sawClash, "撞车留下警告（不然用户会以为定义没生效）");
+            Check(loaded.Find(L"mydsl") != nullptr, "按名字也找得到");
+
+            // 4)~6) 真的装上控件：着色、注释符、折叠
+            const HWND host = CreateHiddenHost();
+            npcc::edit::EditView view;
+            if (host == nullptr) {
+                Check(false, "创建隐藏宿主窗口失败");
+            } else if (view.Create(host, 941)) {
+                view.ApplyLightTheme();
+                view.SetCodePage(npcc::edit::kCodePageUtf8);
+                const std::string text =
+                    "// 行注释\n"
+                    "(* 块注释 let *)\n"
+                    "let answer = 42\n"
+                    "fun f x = \"字符串里的 let\"\n"
+                    "let s = 'a' | 'b'\n"
+                    "end\n";
+                view.SetText(text);
+                view.ApplyLanguageForPath(L"D:\\t\\a.mydsl", &loaded);
+
+                // 4) 着色：每个 token 都要拿到"不是默认色"的前景色
+                const int32_t defaultFore = view.DefaultForeColor();
+                struct Needle {
+                    const char* text;
+                    const char* what;
+                };
+                const Needle needles[] = {
+                    {"// 行注释", "行注释"},
+                    {"(* ", "块注释"},
+                    {"let ", "关键字（第 0 组）"},
+                    {"answer", "标识符"},
+                    {"42", "数字"},
+                    {"\"字符串", "字符串（双引号）"},
+                    {"'a'", "字符串（单引号）"},
+                    {"= ", "运算符"},
+                };
+                for (const Needle& needle : needles) {
+                    const std::size_t pos = text.find(needle.text);
+                    if (pos == std::string::npos) {
+                        Check(false, "测试文本里找不到要检查的 token");
+                        continue;
+                    }
+                    const int32_t style = view.StyleAt(static_cast<int32_t>(pos));
+                    const bool coloured =
+                        style != 0 && view.StyleForeColor(style) != defaultFore;
+                    if (!coloured) {
+                        std::printf("    [FAIL] UDL 的 %s 没有拿到配色（样式号 %d）\n",
+                                    needle.what, style);
+                    }
+                    Check(coloured, "UDL 的 token 拿到了与默认色不同的前景色");
+                }
+                // 注释里的 let 不该被当成关键字（样式必须是注释那个号）
+                const std::size_t inComment = text.find("(* 块注释 let *)");
+                Check(inComment != std::string::npos &&
+                          view.StyleAt(static_cast<int32_t>(inComment + 10)) ==
+                              npcc::edit::udl::kStyleCommentBlock,
+                      "块注释里的关键字词不算关键字");
+                // 第二组关键字（true/false/null）走的是另一组样式号
+                view.SetText("true false let\n");
+                view.ApplyLanguageForPath(L"D:\\t\\a.mydsl", &loaded);
+                Check(view.StyleAt(0) == npcc::edit::udl::KeywordStyleOf(1),
+                      "第 1 组关键字用的是第 1 组的样式号");
+                Check(view.StyleAt(11) == npcc::edit::udl::KeywordStyleOf(0),
+                      "第 0 组关键字用的是第 0 组的样式号");
+                // 词与词之间的空格不该被染色（运算符列表里写了空格的那个 bug 就在这里）
+                Check(view.StyleAt(4) == npcc::edit::udl::kStyleDefault,
+                      "空格不算运算符");
+
+                // 5) 注释/取消注释走 UDL 自己的注释符
+                view.SetText("a\nb\n");
+                view.ApplyLanguageForPath(L"D:\\t\\a.mydsl", &loaded);
+                // LanguageName() 是稳定标识（给配置与注释用），显示名走 CurrentLanguageName()
+                Check(view.LanguageName() == L"mydsl", "语言标识用的是 UDL 的 name");
+                const wchar_t* shown = view.CurrentLanguageName();
+                Check(shown != nullptr && std::wstring(shown) == L"My DSL",
+                      "界面显示名来自 UDL 定义");
+                const std::string commented =
+                    npcc::edit::ToggleLineComment("a\nb\n", mine->lineComment);
+                Check(commented == "// a\n// b\n", "Ctrl+Q 用的是 UDL 的行注释符");
+
+                // 6) 折叠：折叠层级真的算出来了、折叠头也对
+                const std::string folding =
+                    "let f x =\n"
+                    "  match x with\n"
+                    "  | 1 -> 1\n"
+                    "  | _ -> 0\n"
+                    "end\n"
+                    "z = 1\n";
+                view.SetText(folding);
+                view.ApplyLanguageForPath(L"D:\\t\\a.mydsl", &loaded);
+                Check(view.FoldingEnabled(), "有折叠词的 UDL 会给折叠边距");
+                Check(view.LineIsFoldHeader(0), "第 1 行（let）是折叠头");
+                // FoldLevelOf 带着 SC_FOLDLEVELHEADERFLAG 一起返回，比大小要掩掉标志位
+                Check((view.FoldLevelOf(1) & 0xFFF) > (view.FoldLevelOf(0) & 0xFFF),
+                      "块内那一行的层级比折叠头高");
+                Check(!view.LineIsFoldHeader(5), "块外的行不是折叠头");
+                view.FoldAll();
+                Check(view.VisibleLineCount() < view.LineCount(), "折叠全部之后屏幕上的行少了");
+                view.UnfoldAll();
+                Check(view.VisibleLineCount() == view.LineCount(), "展开回来一样多");
+                // 注释里的折叠词不算折叠词
+                view.SetText("// let 假折叠\nx\n");
+                view.ApplyLanguageForPath(L"D:\\t\\a.mydsl", &loaded);
+                Check(!view.LineIsFoldHeader(0), "注释里的折叠词不算折叠头");
+                ::DestroyWindow(host);
+            } else {
+                Check(false, "创建编辑控件失败");
+            }
+
             std::filesystem::remove(path, ec);
         }
     }
