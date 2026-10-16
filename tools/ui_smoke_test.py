@@ -215,6 +215,7 @@ CMD_VIEW_FULL_SCREEN = (4 << 12) | 26
 CMD_VIEW_GOTO_MATCH_BRACE = (4 << 12) | 27
 CMD_VIEW_SUMMARY = (4 << 12) | 28
 CMD_VIEW_TOOLBAR = (4 << 12) | 29        # 视图 → 工具栏（勾选）
+CMD_VIEW_EYE_CARE = (4 << 12) | 30       # 视图 → 护眼模式（低蓝光，勾选）
 CMD_SETTINGS_TOOLBAR = (7 << 12) | 6     # 设置 → 自定义工具栏…
 MENU_INDEX_VIEW = 3                   # 文件 / 编辑 / 查找 / 视图 …
 PREF_UI_LANGUAGE_COMBO = 1048
@@ -3001,6 +3002,125 @@ def test_mime_binary(root):
     return True
 
 
+def test_eye_care(root):
+    """护眼模式（低蓝光）：编辑区默认前后景换成暖色、写进配置、重启保持、关掉恢复。
+
+    读的是控件真正拿去绘制的颜色（SCI_STYLEGETFORE/BACK 的 COLORREF），不是配置文件
+    里的值——"配置写对了而界面没换"正是这类功能最容易出的问题。
+    """
+    work = os.path.join(root, "build", "eyecare_test")
+    os.makedirs(work, exist_ok=True)
+    path = os.path.join(work, "paper.txt")
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write("护眼模式回归\n第二行\n")
+
+    cfg = os.path.join(root, "build", "bin", "config")
+    config = os.path.join(cfg, "config.xml")
+    for name in ("config.xml", "session.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+
+    def read_config():
+        if not os.path.exists(config):
+            return ""
+        with open(config, "r", encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+
+    def wait_config(marker):
+        deadline = time.time() + 5.0
+        saved = ""
+        while time.time() < deadline:
+            saved = read_config()
+            if marker in saved:
+                return saved
+            time.sleep(0.2)
+        return saved
+
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - paper.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到可见的编辑控件")
+            return False
+        # 基线：浅色主题的默认前景/背景（后面关掉护眼时要回到这两个值）
+        base_fore = user32.SendMessageW(scinti, SCI_STYLEGETFORE, STYLE_DEFAULT, 0)
+        base_back = user32.SendMessageW(scinti, SCI_STYLEGETBACK, STYLE_DEFAULT, 0)
+        if base_back != to_colorref(0xFFFFFF):
+            print(f"  FAIL: 浅色主题的默认背景应当是白的，实际 0x{base_back:06X}")
+            return False
+
+        # 1) 开护眼：默认背景变米色、前景变暖深灰，行号边距的底色也换
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_EYE_CARE, 0)
+        time.sleep(0.8)
+        got_back = user32.SendMessageW(scinti, SCI_STYLEGETBACK, STYLE_DEFAULT, 0)
+        if got_back != to_colorref(0xF4E8D4):
+            print(f"  FAIL: 护眼模式下背景应当是米色 #F4E8D4，实际 0x{got_back:06X}")
+            return False
+        if user32.SendMessageW(scinti, SCI_STYLEGETFORE, STYLE_DEFAULT, 0) != to_colorref(0x3B362C):
+            print("  FAIL: 护眼模式下默认前景应当是暖深灰 #3B362C")
+            return False
+        if user32.SendMessageW(scinti, SCI_STYLEGETBACK, STYLE_LINENUMBER, 0) != to_colorref(0xEADBBD):
+            print("  FAIL: 行号边距的底色也要跟着换暖")
+            return False
+        saved = wait_config('eyeCare="yes"')
+        if 'eyeCare="yes"' not in saved:
+            print(f"  FAIL: config.xml 里没有 eyeCare=\"yes\"\n{saved[:300]}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    # 2) 重启：还记着（配置只记"要不要"，色值跟着主题走）
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - paper.txt")
+    try:
+        if not window:
+            print("  FAIL: 重启后找不到主窗口")
+            return False
+        scinti = visible_scintilla(window)
+        if user32.SendMessageW(scinti, SCI_STYLEGETBACK, STYLE_DEFAULT, 0) != to_colorref(0xF4E8D4):
+            print("  FAIL: 重启之后护眼配色没有保持")
+            return False
+
+        # 3) 关掉：回到原色，config.xml 写回 no
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_EYE_CARE, 0)
+        time.sleep(0.8)
+        if user32.SendMessageW(scinti, SCI_STYLEGETBACK, STYLE_DEFAULT, 0) != base_back:
+            print("  FAIL: 关掉护眼之后没有回到原来的背景色")
+            return False
+        if user32.SendMessageW(scinti, SCI_STYLEGETFORE, STYLE_DEFAULT, 0) != base_fore:
+            print("  FAIL: 关掉护眼之后没有回到原来的前景色")
+            return False
+        saved = wait_config('eyeCare="no"')
+        if 'eyeCare="no"' not in saved:
+            print(f"  FAIL: 关掉之后 config.xml 没写回 eyeCare=\"no\"\n{saved[:300]}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        for name in ("config.xml", "session.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    print("  护眼模式：编辑区与行号换暖色、写进 config.xml、重启保持、关掉恢复原值")
+    return True
+
+
 def test_portable_package(root):
     """绿色发行：打包 → 解压 → 直接运行，核对"解压即用"与"只写程序目录"。
 
@@ -4311,6 +4431,8 @@ def run():
         failed = True
     if not test_mime_binary(root):
         failed = True
+    if not test_eye_care(root):
+        failed = True
     if not test_language_defs(root):
         failed = True
     if not test_style_scheme(root):
@@ -4367,7 +4489,7 @@ def run():
           "宏 + 文件夹工作区 + 函数列表 + 导出与打印 + 插件宿主 + JSON/XML 格式化 + "
           "运行命令 + 界面语言 + 十六进制查看 + 复制为富文本 + Markdown 预览 + 对话框文案 + "
           "比较 + JSON 树视图 + 括号匹配与摘要与全屏 + 工具栏 + 自动完成 + 文件关联 + "
-          "文件类型识别与 MIME 工具 + 绿色打包）")
+          "文件类型识别与 MIME 工具 + 护眼模式 + 绿色打包）")
     return 0
 
 

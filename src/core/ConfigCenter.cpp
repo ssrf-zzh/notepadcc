@@ -194,6 +194,7 @@ bool ConfigCenter::Load(std::wstring* error) {
                  L"general");
     general_.jsonTreeVisible =
         ReadBool(general, L"jsonTree", general_.jsonTreeVisible, warnings_, L"general");
+    general_.eyeCare = ReadBool(general, L"eyeCare", general_.eyeCare, warnings_, L"general");
 
     const infra::XmlElement* editor = Section(root, L"edit");
     if (editor != nullptr) {
@@ -332,6 +333,7 @@ bool ConfigCenter::Save(bool force, std::wstring* error) {
     general->SetAttributeBool(L"functionList", general_.functionListVisible);
     general->SetAttributeBool(L"markdownPreview", general_.markdownPreviewVisible);
     general->SetAttributeBool(L"jsonTree", general_.jsonTreeVisible);
+    general->SetAttributeBool(L"eyeCare", general_.eyeCare);
 
     infra::XmlElementPtr editor = root->AddChild(L"edit");
     editor->SetAttributeBool(L"tabToSpaces", edit_.tabToSpaces);

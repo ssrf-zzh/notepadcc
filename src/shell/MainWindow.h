@@ -148,6 +148,9 @@ private:
     void CommandStyleConfigurator();
     void CommandExportUdlSample();
     void CommandToggleDarkMode();
+    // 护眼 / 低蓝光（设计文档 2.7 第 7 条）：只换编辑区与标签栏的配色，不改变行为
+    void CommandToggleEyeCare();
+    edit::EditorPalette CurrentEditorPalette() const;
     // 基线 P0 的三件"编辑器基本功"：全屏（F11）、跳到匹配括号（Ctrl+B）、摘要
     void CommandToggleFullScreen();
     void CommandGotoMatchingBrace();
@@ -351,6 +354,8 @@ private:
     bool showLineNumbers_ = true;
     bool wrapEnabled_ = false;
     bool darkMode_ = false;
+    // 护眼模式（低蓝光）：与暗色模式叠加——浅 / 深两种主题下各有一套护眼配色
+    bool eyeCare_ = false;
     // 工具栏（设计文档 2.11 第 6 条）：按钮表存的是命令键，见 core::ToolbarItems
     ToolBar             toolbar_;
     core::ToolbarItems  toolbarItems_;

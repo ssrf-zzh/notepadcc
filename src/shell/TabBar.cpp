@@ -36,6 +36,27 @@ constexpr TabColours kDarkColours = {
     RGB(0xFF, 0xFF, 0xFF), RGB(0x5A, 0x9E, 0xE0),
 };
 
+// 护眼（低蓝光）：背景的蓝通道明显低于红通道——"低蓝光"就是字面意思。
+// 浅色下是米色纸面，深色下是暖棕黑，与编辑区那两套（EditorPalette::EyeCare）对齐。
+constexpr TabColours kEyeCareLightColours = {
+    RGB(0xED, 0xE0, 0xC8), RGB(0xF7, 0xED, 0xD9), RGB(0xE3, 0xD5, 0xB9), RGB(0xEA, 0xDD, 0xC2),
+    RGB(0xCB, 0xB9, 0x96), RGB(0x3B, 0x36, 0x2C), RGB(0x7C, 0x71, 0x5C), RGB(0xC0, 0x5B, 0x4D),
+    RGB(0xFF, 0xFF, 0xFF), RGB(0xB9, 0x8A, 0x2F),
+};
+
+constexpr TabColours kEyeCareDarkColours = {
+    RGB(0x2A, 0x23, 0x1C), RGB(0x20, 0x1A, 0x15), RGB(0x2F, 0x28, 0x20), RGB(0x35, 0x2D, 0x24),
+    RGB(0x45, 0x3A, 0x2E), RGB(0xE8, 0xDC, 0xC6), RGB(0x9A, 0x8C, 0x74), RGB(0xD9, 0x5B, 0x5B),
+    RGB(0xFF, 0xFF, 0xFF), RGB(0xC0, 0x8A, 0x3F),
+};
+
+const TabColours& TabColoursFor(bool dark, bool eyeCare) {
+    if (eyeCare) {
+        return dark ? kEyeCareDarkColours : kEyeCareLightColours;
+    }
+    return dark ? kDarkColours : kLightColours;
+}
+
 int DpiScaleFor(HWND hwnd, int value) {
     UINT dpi = 96;
     const HMODULE user32 = ::GetModuleHandleW(L"user32.dll");
@@ -285,6 +306,16 @@ void TabBar::SetDark(bool dark) {
     }
 }
 
+void TabBar::SetEyeCare(bool eyeCare) {
+    if (eyeCare_ == eyeCare) {
+        return;
+    }
+    eyeCare_ = eyeCare;
+    if (hwnd_ != nullptr) {
+        ::InvalidateRect(hwnd_, nullptr, TRUE);
+    }
+}
+
 void TabBar::Notify(TabAction action, npcc::core::BufferId source,
                     npcc::core::BufferId target) const {
     if (hwnd_ == nullptr) {
@@ -336,7 +367,7 @@ void TabBar::Paint(HDC target, const RECT& client) {
     const HGDIOBJ previousFont = ::SelectObject(target, font_);
     ::SetBkMode(target, TRANSPARENT);
 
-    const TabColours& colours = dark_ ? kDarkColours : kLightColours;
+    const TabColours& colours = TabColoursFor(dark_, eyeCare_);
     const HBRUSH background = ::CreateSolidBrush(colours.background);
     ::FillRect(target, &client, background);
 

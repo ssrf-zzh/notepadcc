@@ -29,6 +29,9 @@ struct GeneralConfig {
     bool markdownPreviewVisible = false;
     // JSON 树面板的开关（与 Markdown 预览互斥：两者都用右侧那一栏）
     bool jsonTreeVisible = false;
+    // 护眼模式（低蓝光，设计文档 2.7 第 7 条）：开着的时候默认前景/背景换成暖色对，
+    // 具体颜色在 edit::EditorPalette::EyeCare 里（配置只记"要不要"，不记色值）。
+    bool eyeCare = false;
 };
 
 struct EditConfig {

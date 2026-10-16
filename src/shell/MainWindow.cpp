@@ -129,6 +129,7 @@ enum : npcc::core::CmdId {
     kCmdViewGotoMatchBrace   = npcc::core::MakeCmdId(4, 27),
     kCmdViewSummary          = npcc::core::MakeCmdId(4, 28),
     kCmdViewToolbar          = npcc::core::MakeCmdId(4, 29),
+    kCmdViewEyeCare          = npcc::core::MakeCmdId(4, 30),
     // 宏（8 类）
     kCmdMacroRecord       = npcc::core::MakeCmdId(8, 1),
     kCmdMacroPlayLast     = npcc::core::MakeCmdId(8, 3),
@@ -391,8 +392,8 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
                     config_.RequestSave();
                 }
                 darkMode_ = styles_.IsDark();
-                documents_->SetPalette(darkMode_ ? edit::EditorPalette::Dark()
-                                                 : edit::EditorPalette::Light());
+                eyeCare_ = config_.General().eyeCare;
+                documents_->SetPalette(CurrentEditorPalette());
             }
             documents_->SetStyles(&styles_);
             ApplyConfigToRuntime();
@@ -457,6 +458,9 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             }
             // 工具栏要在命令（含宏、插件、运行命令）都注册好之后才装配：
             // 配置里记的是命令键，早一步装配就会有键查不到
+            // 标签栏的深浅 / 护眼也在启动时应用一次——不然"启动即暗色 / 护眼"时它还是浅色
+            tabBar_.SetDark(darkMode_);
+            tabBar_.SetEyeCare(eyeCare_);
             toolbar_.SetDark(darkMode_);
             ApplyToolbarConfig();
             // 语言包盖不住哪些键，启动时就写进日志：英文界面里冒出中文时，
@@ -1060,6 +1064,8 @@ void MainWindow::RegisterCommands() {
         });
     add(kCmdViewDarkMode, CmdCategory::View, L"cmd.view.darkMode", L"暗色模式(&D)",
         core::kCmdCheckable, [this](const CmdContext&) { CommandToggleDarkMode(); });
+    add(kCmdViewEyeCare, CmdCategory::View, L"cmd.view.eyeCare", L"护眼模式（低蓝光）(&E)",
+        core::kCmdCheckable, [this](const CmdContext&) { CommandToggleEyeCare(); });
     add(kCmdViewHexToggle, CmdCategory::View, L"cmd.view.hexToggle", L"十六进制查看（只读）",
         core::kCmdCheckable, [this](const CmdContext&) { CommandToggleHexView(); });
     add(kCmdViewHexGoTo, CmdCategory::View, L"cmd.view.hexGoTo", L"跳到偏移(&O)...",
@@ -1348,6 +1354,7 @@ void MainWindow::RegisterCommands() {
     bindChecked(kCmdViewSplitToggle, [this] { return splitEnabled_; });
     bindChecked(kCmdViewScrollSync, [this] { return splitScrollSync_; });
     bindChecked(kCmdViewDarkMode, [this] { return darkMode_; });
+    bindChecked(kCmdViewEyeCare, [this] { return eyeCare_; });
     bindChecked(kCmdMacroRecord, [this] { return macroRecorder_.Recording(); });
     bindChecked(kCmdViewWorkspaceClose, [this] { return !folderPanel_.Root().empty(); });
     bindChecked(kCmdViewWorkspaceOpenSel, [this] { return !folderPanel_.SelectedPath().empty(); });
@@ -3404,8 +3411,7 @@ void MainWindow::ApplyStyleSchemeToAllViews() {
     }
     // 控件皮肤跟着主题走（边距、光标、选区、记号），语法颜色由 ApplyLanguageForPath 负责。
     // 顺序无所谓：ApplySchemeDefaults 里会做 STYLECLEARALL，但它自己会把皮肤重铺一遍。
-    const edit::EditorPalette palette =
-        styles_.IsDark() ? edit::EditorPalette::Dark() : edit::EditorPalette::Light();
+    const edit::EditorPalette palette = CurrentEditorPalette();
     for (edit::Document* document : documents_->All()) {
         if (document == nullptr || document->view == nullptr) {
             continue;
@@ -3421,6 +3427,7 @@ void MainWindow::ApplyStyleSchemeToAllViews() {
         }
     }
     tabBar_.SetDark(styles_.IsDark());
+    tabBar_.SetEyeCare(eyeCare_);
 }
 
 namespace {
@@ -5085,12 +5092,29 @@ void MainWindow::CommandToggleDarkMode() {
                                      config_.General().theme);
     }
     // 之后新建的标签也要用同一套皮肤（DocumentManager 建视图时会用）
-    documents_->SetPalette(darkMode_ ? edit::EditorPalette::Dark() : edit::EditorPalette::Light());
+    documents_->SetPalette(CurrentEditorPalette());
     ApplyStyleSchemeToAllViews();
     hexView_.SetDark(darkMode_);   // 十六进制视图的自绘配色也跟着走
     toolbar_.SetDark(darkMode_);   // 工具栏同样（浅底/深底两套，不然深色下一条白杠）
     markdownPreview_.SetDark(darkMode_);
     jsonTreePanel_.SetDark(darkMode_);
+}
+
+edit::EditorPalette MainWindow::CurrentEditorPalette() const {
+    if (eyeCare_) {
+        return edit::EditorPalette::EyeCare(darkMode_);
+    }
+    return darkMode_ ? edit::EditorPalette::Dark() : edit::EditorPalette::Light();
+}
+
+void MainWindow::CommandToggleEyeCare() {
+    eyeCare_ = !eyeCare_;
+    // 配置只记"要不要"；色值在 EditorPalette::EyeCare 里（跟着深浅主题走）
+    config_.General().eyeCare = eyeCare_;
+    config_.RequestSave();
+    // 与暗色模式同一条重铺路径：编辑区（含默认前后景）与标签栏一起换
+    documents_->SetPalette(CurrentEditorPalette());
+    ApplyStyleSchemeToAllViews();
 }
 
 // ---- 全屏（F11，设计文档 2.4 第 6 条）----

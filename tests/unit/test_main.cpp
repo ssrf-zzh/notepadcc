@@ -996,6 +996,16 @@ int main() {
             Check(reloaded.Load(&error), "重新加载成功");
             Check(reloaded.General().theme == L"dark", "主题往返一致");
 
+            // 护眼开关（设计 2.6）：默认关；打开后与主题共存，往返一致
+            Check(!reloaded.General().eyeCare, "护眼模式默认关闭");
+            npcc::core::ConfigCenter eyeConfig;
+            eyeConfig.Load(nullptr);
+            eyeConfig.General().eyeCare = true;
+            Check(eyeConfig.Save(true, &error), "把护眼模式存成开");
+            npcc::core::ConfigCenter eyeReloaded;
+            Check(eyeReloaded.Load(&error), "护眼配置重新加载成功");
+            Check(eyeReloaded.General().eyeCare, "护眼开关往返一致");
+
             const std::string badTheme =
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
                 "<NotepadccConfig schemaVersion=\"1\">\n"
@@ -4633,6 +4643,51 @@ int main() {
                 ::DestroyWindow(host);
             }
         }
+    }
+
+    // ---------------------------------------------------------------- 护眼配色
+    // 低蓝光只动"背景 / 默认文本 / 皮肤"这几项，语法 token 的颜色不动——
+    // 这条边界值得钉住，免得以后有人"顺手"把 token 也调暖、把语法高亮洗掉
+    Section("护眼配色（EditorPalette::EyeCare）");
+    {
+        using npcc::edit::EditorPalette;
+        const EditorPalette lightCare = EditorPalette::EyeCare(false);
+        const EditorPalette darkCare = EditorPalette::EyeCare(true);
+        const EditorPalette light = EditorPalette::Light();
+        const EditorPalette dark = EditorPalette::Dark();
+
+        Check(!lightCare.dark && darkCare.dark, "两套护眼配色的深浅标志跟着参数走");
+        Check(lightCare.defaultFore == 0x3B362C && lightCare.defaultBack == 0xF4E8D4,
+              "浅色护眼：默认文本与背景是暖色对");
+        Check(darkCare.defaultFore == 0xE8DCC6 && darkCare.defaultBack == 0x201A15,
+              "深色护眼：默认文本与背景是暖色对");
+        Check(light.defaultFore == 0 && light.defaultBack == 0, "普通浅色不带默认色覆盖");
+        Check(dark.defaultFore == 0 && dark.defaultBack == 0, "普通深色不带默认色覆盖");
+
+        // "低蓝光"的字面检查：背景的蓝通道是所有通道里最低的（色调偏暖）
+        const auto blueIsLowest = [](std::uint32_t rgb) {
+            const std::uint32_t red = (rgb >> 16) & 0xFFu;
+            const std::uint32_t green = (rgb >> 8) & 0xFFu;
+            const std::uint32_t blue = rgb & 0xFFu;
+            return blue <= red && blue <= green;
+        };
+        Check(blueIsLowest(lightCare.defaultBack), "浅色护眼的背景蓝通道不占优（低蓝光）");
+        Check(blueIsLowest(darkCare.defaultBack), "深色护眼的背景蓝通道不占优（低蓝光）");
+
+        // 皮肤该换的几项都换了；不该动的（书签、括号）保持原版
+        Check(lightCare.lineNumberBack == 0xEADBBD && darkCare.lineNumberBack == 0x2A231C,
+              "行号边距底色也跟着换");
+        Check(lightCare.caretLineBack != light.caretLineBack &&
+                  darkCare.caretLineBack != dark.caretLineBack,
+              "当前行高亮也跟着换");
+        Check(lightCare.selectionBack != light.selectionBack &&
+                  darkCare.selectionBack != dark.selectionBack,
+              "选区底色也跟着换");
+        Check(lightCare.bookmarkBack == light.bookmarkBack &&
+                  darkCare.bookmarkBack == dark.bookmarkBack,
+              "书签记号保持原版（护眼只动背景相关的几项）");
+        Check(lightCare.braceBack == light.braceBack && darkCare.braceBack == dark.braceBack,
+              "括号高亮保持原版");
     }
 
     Section("语言定义（langs.xml）");

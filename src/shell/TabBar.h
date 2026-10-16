@@ -60,6 +60,10 @@ public:
     // 不影响标签行为——窗口本身（菜单栏、面板）仍是系统配色，见文档里的"够到哪一层"。
     void SetDark(bool dark);
     bool IsDark() const noexcept { return dark_; }
+    // 护眼模式（低蓝光）：与 SetDark 同一性质——只换自绘配色（暖色系），不改变行为。
+    // 与深/浅组合，绘制时选四套之一（浅护眼 / 深护眼 / 浅 / 深）。
+    void SetEyeCare(bool eyeCare);
+    bool IsEyeCare() const noexcept { return eyeCare_; }
 
 private:
     static LRESULT CALLBACK WndProcThunk(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -91,6 +95,7 @@ private:
     int                  hotCloseIndex_ = -1;
     bool                 dragging_ = false;
     bool                 dark_ = false;
+    bool                 eyeCare_ = false;
     POINT                dragOrigin_{};
 
     // 由字体实时测得的度量，随 DPI / 字体变化重建

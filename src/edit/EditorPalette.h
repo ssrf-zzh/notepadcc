@@ -29,6 +29,10 @@ struct EditorPalette {
     std::uint32_t braceFore = 0x000000;        // 配对括号高亮（前景/背景）
     std::uint32_t braceBack = 0xC8E8C8;
     std::uint32_t braceBadBack = 0xF6C6C6;     // 没有配对的孤立括号
+    // 护眼模式（低蓝光）对默认前景/背景的覆盖：0 = 不覆盖，照用配色方案里的值。
+    // 只有 EyeCare() 工厂会填这两项；语法 token 的颜色不经过这里（见设计说明书 2.7 第 7 条）。
+    std::uint32_t defaultFore = 0;
+    std::uint32_t defaultBack = 0;
 
     static EditorPalette Light() {
         EditorPalette palette;
@@ -52,6 +56,31 @@ struct EditorPalette {
         palette.braceFore = 0xF0F0F0;
         palette.braceBack = 0x2F5230;
         palette.braceBadBack = 0x5A2A2A;
+        return palette;
+    }
+
+    // 护眼模式（低蓝光）：在对应浅色 / 深色皮肤的基础上，把背景相关几项换成暖色系，
+    // 并给默认前景/背景一对低蓝光覆盖值。**只动这几项**——书签、括号高亮等仍跟着
+    // 浅/深原版；语法 token 的颜色也不在这里，保持主题原样（不然语法高亮会被洗掉）。
+    static EditorPalette EyeCare(bool darkTheme) {
+        EditorPalette palette = darkTheme ? Dark() : Light();
+        if (darkTheme) {
+            palette.defaultFore = 0xE8DCC6;      // 暖白
+            palette.defaultBack = 0x201A15;      // 暖棕黑（蓝通道最低）
+            palette.lineNumberFore = 0x99896F;
+            palette.lineNumberBack = 0x2A231C;
+            palette.caret = 0xE8DCC6;
+            palette.caretLineBack = 0x2B241D;
+            palette.selectionBack = 0x4A381F;
+        } else {
+            palette.defaultFore = 0x3B362C;      // 暖深灰
+            palette.defaultBack = 0xF4E8D4;      // 米色纸面（蓝通道最低）
+            palette.lineNumberFore = 0x8C7F66;
+            palette.lineNumberBack = 0xEADBBD;
+            palette.caret = 0x3B362C;
+            palette.caretLineBack = 0xEEDFC0;
+            palette.selectionBack = 0xDCC7A0;
+        }
         return palette;
     }
 };

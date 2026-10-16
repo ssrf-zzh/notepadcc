@@ -68,6 +68,7 @@ std::vector<LangPack> MakeBuiltin() {
         Entry(L"cmd.view.cyclePane", L"Switch to Other View", L"W"),
         Entry(L"cmd.view.scrollSync", L"Synchronize Scrolling", L"Y"),
         Entry(L"cmd.view.darkMode", L"Dark Mode", L"D"),
+        Entry(L"cmd.view.eyeCare", L"Eye Care Mode (Low Blue Light)", L"E"),
         Entry(L"cmd.view.hexToggle", L"Hex View (read-only)"),
         Entry(L"cmd.view.hexGoTo", L"Go to Offset...", L"O"),
         Entry(L"cmd.view.previewBrowser", L"Open Preview in Browser", L"B"),

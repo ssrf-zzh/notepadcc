@@ -908,10 +908,14 @@ void EditView::SetTabWidth(int32_t width, bool useTabs) const {
 
 void EditView::ApplySchemeDefaults(const StyleScheme& scheme) const {
     // 方案里的颜色是 0xRRGGBB，控件要 COLORREF——转换就在这一步做（见 StyleScheme 的说明）
+    // 护眼模式下 palette_ 带一对覆盖色（低蓝光的暖色），在这里顶掉方案里的默认前后景；
+    // 语法 token 的颜色不经过这里，所以语法高亮不受影响。
+    const std::uint32_t fore = palette_.defaultFore != 0 ? palette_.defaultFore : scheme.Fore();
+    const std::uint32_t back = palette_.defaultBack != 0 ? palette_.defaultBack : scheme.Back();
     Send(SCI_STYLESETFORE, STYLE_DEFAULT,
-         static_cast<intptr_t>(StyleScheme::ToScintillaColour(scheme.Fore())));
+         static_cast<intptr_t>(StyleScheme::ToScintillaColour(fore)));
     Send(SCI_STYLESETBACK, STYLE_DEFAULT,
-         static_cast<intptr_t>(StyleScheme::ToScintillaColour(scheme.Back())));
+         static_cast<intptr_t>(StyleScheme::ToScintillaColour(back)));
     // 字体名是 ASCII（方案文件里也是手写的），窄字符转换在这里是安全的
     std::string face;
     for (const wchar_t ch : scheme.FontFace()) {
