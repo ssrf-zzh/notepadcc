@@ -21,6 +21,10 @@ constexpr const wchar_t* kWindowClass = L"notepadccStyleConfig";
 enum StyleControl : int {
     kStyleLanguageLabel = 1200,
     kStyleLanguageCombo = 1201,
+    // 角色名标签。原先这些标签是用 id = -1 建的，而 Layout() 按 id 找控件摆位置——
+    // 找不到就留在 (0,0) 那个 7x7 的默认尺寸上，于是**名字一直没显示出来**，
+    // 界面上只剩六个色块（自动测试只看"对话框能打开"，看不见这种问题；截图才看出来）。
+    kStyleRoleLabelBase = 1290,   // +role
     kStyleRowBase       = 1210,   // +role: 颜色按钮
     kStyleBoldBase      = 1230,   // +role: 粗体
     kStyleItalicBase    = 1250,   // +role: 斜体
@@ -321,10 +325,13 @@ void StyleConfigurator::Layout() {
     y += rowHeight + gap;
 
     for (int role = 0; role < npcc::edit::kStyleRoleCount; ++role) {
-        // 角色名用 STATIC 画在颜色按钮左边（沿用创建顺序，见 Show()）
-        if (HWND label = ::GetDlgItem(hwnd_, kStyleRowBase + role); label != nullptr) {
-            ::MoveWindow(::GetDlgItem(hwnd_, kStyleRowBase + role), gap + labelWidth, y, Scale(64),
-                         rowHeight - Scale(6), TRUE);
+        // 角色名画在颜色按钮左边：标签与色块各有各的 id，本来就不该混用一个
+        if (HWND label = ::GetDlgItem(hwnd_, kStyleRoleLabelBase + role); label != nullptr) {
+            ::MoveWindow(label, gap, y + Scale(3), labelWidth - Scale(6), rowHeight - Scale(6),
+                         TRUE);
+        }
+        if (HWND swatch = ::GetDlgItem(hwnd_, kStyleRowBase + role); swatch != nullptr) {
+            ::MoveWindow(swatch, gap + labelWidth, y, Scale(64), rowHeight - Scale(6), TRUE);
         }
         if (HWND bold = ::GetDlgItem(hwnd_, kStyleBoldBase + role); bold != nullptr) {
             ::MoveWindow(bold, gap + labelWidth + Scale(72), y + Scale(3), Scale(48),
@@ -397,7 +404,7 @@ bool StyleConfigurator::Show(HWND owner, const npcc::edit::LanguageRegistry& lan
     RECT ownerRect{};
     ::GetWindowRect(owner, &ownerRect);
     const int width = Scale(520);
-    const int height = Scale(520);
+    const int height = Scale(560);
     const int x = ownerRect.left + ((ownerRect.right - ownerRect.left) - width) / 2;
     const int y = ownerRect.top + ((ownerRect.bottom - ownerRect.top) - height) / 2;
     hwnd_ = ::CreateWindowExW(WS_EX_DLGMODALFRAME, kWindowClass, L"样式配置器",
@@ -430,10 +437,8 @@ bool StyleConfigurator::Show(HWND owner, const npcc::edit::LanguageRegistry& lan
     }
     for (int role = 0; role < npcc::edit::kStyleRoleCount; ++role) {
         const auto kind = static_cast<npcc::edit::StyleRole>(role);
-        // 角色名当 STATIC 用，创建顺序与颜色按钮一一对应（Layout 里按 id 摆）
         const std::wstring name = npcc::edit::StyleScheme::RoleDisplayName(kind);
-        HWND label = Make(L"STATIC", name.c_str(), WS_VISIBLE | SS_LEFT, -1);
-        (void)label;
+        Make(L"STATIC", name.c_str(), WS_VISIBLE | SS_LEFT, kStyleRoleLabelBase + role);
         Make(L"BUTTON", L"", WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, kStyleRowBase + role);
         Make(L"BUTTON", L"粗", WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, kStyleBoldBase + role);
         Make(L"BUTTON", L"斜", WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
@@ -467,6 +472,9 @@ bool StyleConfigurator::Show(HWND owner, const npcc::edit::LanguageRegistry& lan
 
     ::EnableWindow(owner_, FALSE);
     ::ShowWindow(hwnd_, SW_SHOW);
+    // 窗口显示之后再摆一次位置：创建过程中的客户区尺寸未必是最终值（WM_SIZE 也是在这期间
+    // 到达的）。这一步是防御性的——真正抓到过的布局问题见 kStyleRoleLabelBase 那里的注释。
+    Layout();
     ::SetFocus(combo);
 
     MSG message{};
@@ -625,6 +633,10 @@ LRESULT StyleConfigurator::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
                 return 0;
             }
             break;
+        // 尺寸变了（含 DPI 变化引起的重排）就按真实客户区重摆一遍，免得有控件落在外面
+        case WM_SIZE:
+            Layout();
+            return 0;
         case WM_CLOSE:
             done_ = true;
             return 0;

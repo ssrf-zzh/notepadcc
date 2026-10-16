@@ -149,6 +149,7 @@ SH_OK = 1120
 SH_CANCEL = 1121
 
 STYLE_LIST = 1261         # 样式配置器里「具体样式」那个列表
+STYLE_ROLE_LABEL_BASE = 1290   # +role：角色名标签（"注释""关键字"…）
 LB_GETCOUNT = 0x018B
 LB_GETCURSEL = 0x0188
 LB_SETCURSEL = 0x0186
@@ -334,6 +335,39 @@ def wait_until_responsive(hwnd, timeout=15.0):
             return time.time() - start
         time.sleep(0.2)
     return None
+
+
+def wait_completion_state(scinti, want_active, timeout=3.0):
+    """等候选列表出现（want_active=True）或确认它没出现（False）。
+
+    返回 True/False 表示是否等到了；返 None 表示控件不回话。比固定 sleep 稳：
+    整段回归里机器一忙，0.8 秒就不一定够（实测偶发失败过一次）。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        active = send_bounded(scinti, SCI_AUTOCACTIVE, timeout_ms=500)
+        if active is None:
+            return None
+        if bool(active) == want_active:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def trigger_completion(window, scinti, timeout=3.0):
+    """触发"自动完成"，并等候选列表真的出现。
+
+    Scintilla 在编辑器**失去焦点**时会关掉候选框，而整段回归里别的窗口偶尔会抢走焦点，
+    所以等不到就再按一次（重试的是输入模拟，断言本身不打折：真坏了重按也出不来）。
+    """
+    for attempt in range(2):
+        user32.PostMessageW(window, WM_COMMAND, CMD_EDIT_AUTOCOMPLETE, 0)
+        if wait_completion_state(scinti, True, timeout=timeout):
+            return True
+        if attempt == 0:
+            user32.SetForegroundWindow(window)
+            time.sleep(0.2)
+    return False
 
 
 def test_bookmarks(main_window):
@@ -1226,10 +1260,8 @@ def test_auto_complete(root):
         # 1) 语言词库：光标放在开头的 "de" 之后，候选里只可能是词库里的 delta
         user32.SendMessageW(scinti, SCI_GOTOPOS, 2, 0)
         time.sleep(0.3)
-        user32.PostMessageW(window, WM_COMMAND, CMD_EDIT_AUTOCOMPLETE, 0)
-        time.sleep(0.8)
-        if user32.SendMessageW(scinti, SCI_AUTOCACTIVE, 0, 0) == 0:
-            print("  FAIL: 按下自动完成之后候选列表没出现")
+        if not trigger_completion(window, scinti):
+            print("  FAIL: 按下自动完成之后候选列表没出现（试了两次）")
             return False
         user32.PostMessageW(scinti, WM_KEYDOWN, 0x0D, 0)   # 回车选中第一个候选
         time.sleep(0.8)
@@ -1251,10 +1283,8 @@ def test_auto_complete(root):
             return False
         user32.SendMessageW(scinti, SCI_GOTOPOS, length, 0)
         time.sleep(0.3)
-        user32.PostMessageW(window, WM_COMMAND, CMD_EDIT_AUTOCOMPLETE, 0)
-        time.sleep(0.8)
-        if user32.SendMessageW(scinti, SCI_AUTOCACTIVE, 0, 0) == 0:
-            print("  FAIL: 文档内提词时候选列表没出现")
+        if not trigger_completion(window, scinti):
+            print("  FAIL: 文档内提词时候选列表没出现（试了两次）")
             return False
         user32.PostMessageW(scinti, WM_KEYDOWN, 0x0D, 0)
         time.sleep(0.8)
@@ -1284,8 +1314,8 @@ def test_auto_complete(root):
         scinti = visible_scintilla(window)
         user32.SendMessageW(scinti, SCI_GOTOPOS, 2, 0)
         user32.PostMessageW(window, WM_COMMAND, CMD_EDIT_AUTOCOMPLETE, 0)
-        time.sleep(0.8)
-        if user32.SendMessageW(scinti, SCI_AUTOCACTIVE, 0, 0) != 0:
+        # 这一条要确认"真的没弹"：等满两秒，中途一旦出现就是失败
+        if wait_completion_state(scinti, True, timeout=2.0):
             print("  FAIL: 没有任何候选时不该弹出候选列表")
             return False
         if scinti_text(scinti) != "qq":
@@ -1369,6 +1399,20 @@ def test_style_scheme(root):
         if count != 7:
             print(f"  FAIL: cpp 的具体样式该列 7 项，实际 {count}")
             return False
+        # 角色名标签必须真的摆过位置。这一条是被截图抓到的：标签当初用 id=-1 建，
+        # 而 Layout() 按 id 找控件摆放，找不到就留在默认的 7x7 上——名字全叠在角落，
+        # 界面上只剩六个色块，而"对话框能打开、确定能落盘"这类断言全是绿的。
+        for role in range(6):
+            label = user32.GetDlgItem(dialog, STYLE_ROLE_LABEL_BASE + role)
+            if not label:
+                print(f"  FAIL: 第 {role + 1} 个角色名标签不存在")
+                return False
+            rect = wintypes.RECT()
+            user32.GetWindowRect(label, ctypes.byref(rect))
+            if (rect.right - rect.left) < 20 or (rect.bottom - rect.top) < 10:
+                print(f"  FAIL: 第 {role + 1} 个角色名标签没被摆到位置上"
+                      f"（{rect.right - rect.left}x{rect.bottom - rect.top}）")
+                return False
         # 选中一项再切回来：走的是 LBN_SELCHANGE 那条路（界面上的"选中即刷新"）
         user32.PostMessageW(dialog, WM_COMMAND, STYLE_LIST | (LBN_SELCHANGE << 16), 0)
         time.sleep(0.5)
