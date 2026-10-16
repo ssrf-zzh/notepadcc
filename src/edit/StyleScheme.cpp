@@ -104,6 +104,15 @@ std::wstring StyleScheme::ColourText(std::uint32_t colour) {
     return buffer;
 }
 
+std::uint32_t StyleScheme::ToScintillaColour(std::uint32_t rrggbb) {
+    // R/B 互换，其余不动（COLORREF 是 0x00BBGGRR）
+    return ((rrggbb & 0x0000FFu) << 16) | (rrggbb & 0x00FF00u) | ((rrggbb & 0xFF0000u) >> 16);
+}
+
+std::uint32_t StyleScheme::FromScintillaColour(std::uint32_t colour) {
+    return ToScintillaColour(colour);   // 这变换是自己的逆
+}
+
 bool StyleScheme::ParseColour(std::wstring_view text, std::uint32_t& out) {
     if (text.empty()) {
         return false;

@@ -148,6 +148,16 @@ SH_CLEAR_ALL = 1112
 SH_OK = 1120
 SH_CANCEL = 1121
 
+
+def to_colorref(rgb):
+    """#RRGGBB → COLORREF（0x00BBGGRR）。
+
+    SCI_STYLEGETFORE 读回来的是**控件真正拿去绘制的** COLORREF，不是配置文件里的
+    #RRGGBB——红蓝是反的。所以核对颜色必须转一下：拿 #RRGGBB 直接比会永远差一个红蓝，
+    反过来若程序漏了转换，用对称色（如 #FF00FF）比又看不出来。两种都踩过。
+    """
+    return ((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF)
+
 STYLE_LIST = 1261         # 样式配置器里「具体样式」那个列表
 STYLE_ROLE_LABEL_BASE = 1290   # +role：角色名标签（"注释""关键字"…）
 LB_GETCOUNT = 0x018B
@@ -1373,7 +1383,7 @@ def test_style_scheme(root):
             print("  FAIL: 找不到可见的编辑控件")
             return False
         # cpp 的行注释是样式 2（Lexilla 的 SCE_C_COMMENTLINE）
-        if user32.SendMessageW(scinti, SCI_STYLEGETFORE, 2, 0) != 0x2E7D32:
+        if user32.SendMessageW(scinti, SCI_STYLEGETFORE, 2, 0) != to_colorref(0x2E7D32):
             print(f"  FAIL: 默认注释色应当是内置的绿 #2E7D32，实际 "
                   f"0x{user32.SendMessageW(scinti, SCI_STYLEGETFORE, 2, 0):06X}")
             return False
@@ -1450,8 +1460,8 @@ def test_style_scheme(root):
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<NotepadccStyles schemaVersion="1">\n'
         '  <Language name="cpp">\n'
-        '    <Style role="comment" fore="#FF00FF" bold="yes" italic="no"/>\n'
-        '    <StyleNumber number="7" name="次要项" fore="#00CC00" bold="no" italic="no"/>\n'
+        '    <Style role="comment" fore="#3366FF" bold="yes" italic="no"/>\n'
+        '    <StyleNumber number="7" name="次要项" fore="#CC5500" bold="no" italic="no"/>\n'
         '  </Language>\n'
         '</NotepadccStyles>\n'
     )
@@ -1466,12 +1476,12 @@ def test_style_scheme(root):
             return False
         scinti = visible_scintilla(window)
         actual = user32.SendMessageW(scinti, SCI_STYLEGETFORE, 2, 0)
-        if actual != 0xFF00FF:
-            print(f"  FAIL: 自定义配色应当生效（注释色 #FF00FF），实际 0x{actual:06X}")
+        if actual != to_colorref(0x3366FF):
+            print(f"  FAIL: 自定义配色应当生效（注释色 #3366FF），实际 0x{actual:06X}")
             return False
         perStyle = user32.SendMessageW(scinti, SCI_STYLEGETFORE, 7, 0)
-        if perStyle != 0x00CC00:
-            print(f"  FAIL: 逐样式号覆盖应当生效（样式 7 = #00CC00），实际 0x{perStyle:06X}")
+        if perStyle != to_colorref(0xCC5500):
+            print(f"  FAIL: 逐样式号覆盖应当生效（样式 7 = #CC5500），实际 0x{perStyle:06X}")
             return False
     finally:
         if window:

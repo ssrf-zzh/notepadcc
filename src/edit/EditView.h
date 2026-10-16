@@ -204,6 +204,10 @@ public:
     // ---- 语法着色的自检接口 ----
     // 光"接上了词法器"不等于"用户看得见颜色"：颜色要靠给每个样式号设前景色。
     // 这两个接口让测试能验证"某个位置的 token 确实拿到了与默认色不同的颜色"。
+    //
+    // 注意返回的是 **COLORREF（0x00BBGGRR）**，也就是控件真正拿去绘制的那个值——
+    // 不是配置文件里的 #RRGGBB。故意不做回转换：只有这样，断言才是在核对"屏幕上画什么"，
+    // 而"该转换的地方忘了转换"（红蓝互换）这种错误才可能被测试抓住。
     int32_t StyleAt(int32_t position) const;
     int32_t StyleForeColor(int32_t style) const;
     int32_t DefaultForeColor() const;

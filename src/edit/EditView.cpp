@@ -751,8 +751,11 @@ void EditView::SetTabWidth(int32_t width, bool useTabs) const {
 }
 
 void EditView::ApplySchemeDefaults(const StyleScheme& scheme) const {
-    Send(SCI_STYLESETFORE, STYLE_DEFAULT, static_cast<intptr_t>(scheme.Fore()));
-    Send(SCI_STYLESETBACK, STYLE_DEFAULT, static_cast<intptr_t>(scheme.Back()));
+    // 方案里的颜色是 0xRRGGBB，控件要 COLORREF——转换就在这一步做（见 StyleScheme 的说明）
+    Send(SCI_STYLESETFORE, STYLE_DEFAULT,
+         static_cast<intptr_t>(StyleScheme::ToScintillaColour(scheme.Fore())));
+    Send(SCI_STYLESETBACK, STYLE_DEFAULT,
+         static_cast<intptr_t>(StyleScheme::ToScintillaColour(scheme.Back())));
     // 字体名是 ASCII（方案文件里也是手写的），窄字符转换在这里是安全的
     std::string face;
     for (const wchar_t ch : scheme.FontFace()) {
@@ -769,7 +772,8 @@ void EditView::ApplySchemeDefaults(const StyleScheme& scheme) const {
 void EditView::ApplySyntaxColours(const LanguageDef& language, const StyleScheme& scheme) const {
     const std::vector<StyleEntry> entries = StylesFor(language);
     const auto apply = [this](int style, const RoleStyle& value) {
-        Send(SCI_STYLESETFORE, static_cast<uintptr_t>(style), static_cast<intptr_t>(value.fore));
+        Send(SCI_STYLESETFORE, static_cast<uintptr_t>(style),
+             static_cast<intptr_t>(StyleScheme::ToScintillaColour(value.fore)));
         Send(SCI_STYLESETBOLD, static_cast<uintptr_t>(style), value.bold ? 1 : 0);
         Send(SCI_STYLESETITALIC, static_cast<uintptr_t>(style), value.italic ? 1 : 0);
     };

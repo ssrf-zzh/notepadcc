@@ -84,6 +84,15 @@ public:
     static std::wstring ColourText(std::uint32_t colour);
     static bool ParseColour(std::wstring_view text, std::uint32_t& out);
 
+    // 0xRRGGBB ↔ Scintilla 用的 COLORREF（0x00BBGGRR）。
+    //
+    // 配置文件里写的是 #RRGGBB，而 SCI_STYLESETFORE / SETBACK 收的是 COLORREF，
+    // **红蓝是反的**。转换必须发生在交给控件的那一刻——踩过的坑：不转换时"关键字深蓝"
+    // 会画成红色、"字符串暗红"会画成蓝色，而所有断言都在比对"存进去的值"与
+    // "从控件读回来的值"（两边一致），于是没有一个测试看得出来（见附录 B）。
+    static std::uint32_t ToScintillaColour(std::uint32_t rrggbb);
+    static std::uint32_t FromScintillaColour(std::uint32_t colour);
+
 private:
     struct LanguageEntry {
         std::wstring                  name;

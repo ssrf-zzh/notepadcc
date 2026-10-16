@@ -3029,15 +3029,27 @@ int main() {
                     view.SetText("// c\nint x;\n");
 
                     view.ApplyLanguage(*cpp, nullptr);
-                    Check(view.StyleForeColor(2) == 0x2E7D32, "默认配色下注释色是绿");
+                    // 断言的是交给控件的 COLORREF（0x00BBGGRR），不是文件里的 #RRGGBB。
+                    // 只比对"存进去的值"是抓不到红蓝互换的（踩过，见附录 B）
+                    Check(view.StyleForeColor(2) == static_cast<int32_t>(
+                                                        npcc::edit::StyleScheme::ToScintillaColour(
+                                                            0x2E7D32)),
+                          "默认配色下注释色是绿（交给控件的是 COLORREF，红蓝没反）");
 
                     npcc::edit::StyleScheme scheme = npcc::edit::StyleScheme::Defaults();
                     npcc::edit::RoleStyle custom;
-                    custom.fore = 0xFF00FF;
+                    // 故意挑一个 R/B 不对称的颜色：对称色（如 #FF00FF）即使红蓝互换也看不出差别
+                    custom.fore = 0x1A2B3C;
                     scheme.SetRole(L"cpp", StyleRole::Comment, custom);
                     view.ApplyLanguage(*cpp, &scheme);
-                    Check(view.StyleForeColor(2) == 0xFF00FF, "方案里的注释色真的生效了");
-                    Check(view.StyleForeColor(5) == 0x0000C0, "没覆盖的角色不受影响");
+                    Check(view.StyleForeColor(2) ==
+                              static_cast<int32_t>(
+                                  npcc::edit::StyleScheme::ToScintillaColour(0x1A2B3C)),
+                          "方案里的注释色真的生效了");
+                    Check(view.StyleForeColor(5) ==
+                              static_cast<int32_t>(
+                                  npcc::edit::StyleScheme::ToScintillaColour(0x0000C0)),
+                          "没覆盖的角色不受影响");
 
                     // 逐样式号：压过角色色。这里故意挑一个角色也用到的号（2 = cpp 行注释），
                     // 否则证明不了"覆盖真的盖在角色之上"，只能证明"各写各的"
@@ -3045,10 +3057,15 @@ int main() {
                     perStyle.fore = 0x00AAFF;
                     scheme.SetStyle(L"cpp", 2, L"行注释", perStyle);
                     view.ApplyLanguage(*cpp, &scheme);
-                    Check(view.StyleForeColor(2) == 0x00AAFF, "逐样式号的覆盖压过了角色色");
+                    Check(view.StyleForeColor(2) ==
+                              static_cast<int32_t>(
+                                  npcc::edit::StyleScheme::ToScintillaColour(0x00AAFF)),
+                          "逐样式号的覆盖压过了角色色");
                     // 块注释（1）与行注释（2）同属 Comment 角色，所以它拿到的是角色色，
                     // 而不是上面那条只针对样式号 2 的覆盖——覆盖的作用范围是"这一个号"
-                    Check(view.StyleForeColor(1) == 0xFF00FF,
+                    Check(view.StyleForeColor(1) ==
+                              static_cast<int32_t>(
+                                  npcc::edit::StyleScheme::ToScintillaColour(0x1A2B3C)),
                           "同一个角色的别的样式号（块注释）只受角色色影响");
                     // 文件里有的样式号、目录里没有的（cpp 的运算符是 10）也要生效：
                     // 目录只影响"界面上列得出来"，文件才是最终话语权
@@ -3056,7 +3073,9 @@ int main() {
                     notInCatalogue.fore = 0xFF8800;
                     scheme.SetStyle(L"cpp", 10, L"运算符", notInCatalogue);
                     view.ApplyLanguage(*cpp, &scheme);
-                    Check(view.StyleForeColor(10) == 0xFF8800,
+                    Check(view.StyleForeColor(10) ==
+                              static_cast<int32_t>(
+                                  npcc::edit::StyleScheme::ToScintillaColour(0xFF8800)),
                           "目录里没有的样式号照样生效（文件才是权威）");
                 }
             } else {
