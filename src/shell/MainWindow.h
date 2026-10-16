@@ -260,6 +260,7 @@ private:
     void CommandPrint();
     void CommandExportHtml();
     void CommandExportRtf();
+    void CommandRemoteSites();
     // ---- 插件（设计文档 2.10）----
     void LoadPlugins();
     void CommandPluginManager();

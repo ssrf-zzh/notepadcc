@@ -31,6 +31,7 @@ std::vector<LangPack> MakeBuiltin() {
         Entry(L"cmd.file.print", L"Print...", L"P"),
         Entry(L"cmd.file.exportHtml", L"Export as HTML...", L"H"),
         Entry(L"cmd.file.exportRtf", L"Export as RTF...", L"R"),
+        Entry(L"cmd.file.remote", L"Remote Sites...", L"M"),
         // ---- 编辑 ----
         Entry(L"cmd.edit.undo", L"Undo", L"U"),
         Entry(L"cmd.edit.redo", L"Redo", L"R"),

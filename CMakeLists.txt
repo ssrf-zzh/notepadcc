@@ -150,6 +150,8 @@ set(NPCC_CORE_SOURCES
     src/core/Sha256.cpp
     src/core/UpdateManifest.cpp
     src/core/UpdateVerify.cpp
+    src/core/RemoteSite.cpp
+    src/core/FtpProtocol.cpp
     src/edit/ColumnEdit.cpp
     src/edit/HexModel.cpp
     src/edit/ColumnText.cpp
@@ -170,6 +172,9 @@ set(NPCC_CORE_SOURCES
     src/infra/ThreadPool.cpp
     src/infra/Xml.cpp
     src/infra/UpdateService.cpp
+    src/infra/FtpClient.cpp
+    src/infra/SftpRunner.cpp
+    src/infra/RemoteService.cpp
     src/io/AtomicFile.cpp
     src/io/FileReader.cpp
     src/io/FileWatcher.cpp
@@ -209,6 +214,8 @@ set(NPCC_CORE_SOURCES
     src/shell/TabBar.cpp
     src/shell/ToolBar.cpp
     src/shell/ToolbarDialog.cpp
+    src/shell/RemoteDialog.cpp
+    src/shell/RemoteSiteDialog.cpp
     src/shell/UpdateDialog.cpp)
 
 add_library(notepadcc_core STATIC ${NPCC_CORE_SOURCES})
@@ -217,7 +224,9 @@ target_link_libraries(notepadcc_core PUBLIC
     scintilla lexilla pcre2-8-static npcc_flags comctl32 comdlg32 shell32
     # 更新检查（M3 第十块）：WinHTTP 下载、WinVerifyTrust 的 Authenticode 校验、
     # BCrypt 的 RSA 验签与 SHA-256 用的自实现同属这一条链路
-    winhttp wintrust crypt32 bcrypt)
+    winhttp wintrust crypt32 bcrypt
+    # 远程编辑（M3 第十一块）：自研 FTP 客户端的 WinSock2
+    ws2_32)
 
 # 链接与代码生成选项：主程序与测试共用
 add_library(npcc_app_options INTERFACE)

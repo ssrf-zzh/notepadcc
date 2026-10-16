@@ -332,6 +332,43 @@ bool ConfigCenter::Load(std::wstring* error) {
             3600, warnings_, L"update"));
     }
 
+    // 远程站点（M3 第十一块）：一个个 <Site> 子元素。坏站点只警告并跳过
+    // （少一个站点不该让程序起不来），名字重复的后来者覆盖前者——站点名
+    // 同时是本地缓存目录名，"两个同名站点"在磁盘上本来就分不开。
+    const infra::XmlElement* remote = Section(root, L"remote");
+    if (remote != nullptr) {
+        std::vector<RemoteSite> sites;
+        for (const infra::XmlElement* node : remote->Children(L"Site")) {
+            RemoteSite site;
+            site.name = ReadString(node, L"name", L"");
+            if (site.name.empty()) {
+                warnings_.push_back(L"[remote] 有一个不带 name 的站点，已跳过");
+                continue;
+            }
+            const std::wstring protocol =
+                ReadString(node, L"protocol", L"ftp");
+            if (!ParseRemoteProtocol(protocol, &site.protocol)) {
+                warnings_.push_back(L"[remote] 站点 \"" + site.name + L"\" 的协议 \"" +
+                                    protocol + L"\" 不认识（只认 ftp / sftp），已跳过");
+                continue;
+            }
+            site.host = ReadString(node, L"host", L"");
+            if (site.host.empty()) {
+                warnings_.push_back(L"[remote] 站点 \"" + site.name + L"\" 没有主机名，已跳过");
+                continue;
+            }
+            const int port = ReadIntInRange(node, L"port", 0, 0, 65535, warnings_, L"remote");
+            site.port = static_cast<std::uint16_t>(port);
+            site.user = ReadString(node, L"user", L"");
+            site.password = ReadString(node, L"password", L"");
+            site.keyFile = ReadString(node, L"keyFile", L"");
+            site.acceptNewHostKey = ReadBool(node, L"acceptNewHostKey", false, warnings_, L"remote");
+            site.initialDir = ReadString(node, L"initialDir", L"");
+            sites.push_back(std::move(site));
+        }
+        remote_.sites = std::move(sites);
+    }
+
     for (const std::wstring& warning : warnings_) {
         infra::LogWarn(L"config", L"配置项已回退默认值: " + warning);
     }
@@ -435,6 +472,25 @@ bool ConfigCenter::Save(bool force, std::wstring* error) {
     update->SetAttribute(L"sourceUrl", update_.sourceUrl);
     update->SetAttributeInt(L"startupDelaySeconds",
                             static_cast<int>(update_.startupDelaySeconds));
+
+    // 远程站点：没配站点就不写这一节（跟工具栏项表同一个取舍）
+    if (!remote_.sites.empty()) {
+        infra::XmlElementPtr remote = root->AddChild(L"remote");
+        for (const RemoteSite& site : remote_.sites) {
+            infra::XmlElementPtr node = remote->AddChild(L"Site");
+            node->SetAttribute(L"name", site.name);
+            node->SetAttribute(L"protocol", RemoteProtocolToken(site.protocol));
+            node->SetAttribute(L"host", site.host);
+            if (site.port != 0) {
+                node->SetAttributeInt(L"port", static_cast<int>(site.port));
+            }
+            node->SetAttribute(L"user", site.user);
+            node->SetAttribute(L"password", site.password);
+            node->SetAttribute(L"keyFile", site.keyFile);
+            node->SetAttributeBool(L"acceptNewHostKey", site.acceptNewHostKey);
+            node->SetAttribute(L"initialDir", site.initialDir);
+        }
+    }
 
     const bool ok = io::SaveXmlFile(Path().wstring(), document, error);
     if (ok) {

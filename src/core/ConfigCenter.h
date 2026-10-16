@@ -7,6 +7,7 @@
 
 #include "edit/Encoding.h"
 #include "core/ToolbarItems.h"
+#include "core/RemoteSite.h"
 
 namespace npcc::core {
 
@@ -106,6 +107,13 @@ struct UpdateConfig {
     std::uint32_t startupDelaySeconds = 30;   // 启动后多久开始检查（1~3600 秒）
 };
 
+// 远程站点表（M3 第十一块）：数量可变的一组站点，存进 <remote> 节的
+// <Site> 子元素（与工具栏项表同一个做法）。密码是**明文**——多数编辑器
+// 都这个待遇（SSH 私钥记的是文件路径），界面里如实说明，不假装它安全。
+struct RemoteConfig {
+    std::vector<RemoteSite> sites;
+};
+
 // 配置中心（设计文档 4.5 / 7.2）。
 //
 // 三条硬性要求，都是"别让配置把程序搞挂"：
@@ -142,6 +150,7 @@ public:
     ToolbarConfig&  Toolbar() noexcept { return toolbar_; }
     ContextMenuConfig& ContextMenu() noexcept { return contextMenu_; }
     UpdateConfig&   Update() noexcept { return update_; }
+    RemoteConfig&   Remote() noexcept { return remote_; }
 
     const GeneralConfig&  General() const noexcept { return general_; }
     const EditConfig&     Edit() const noexcept { return edit_; }
@@ -152,6 +161,7 @@ public:
     const ToolbarConfig&  Toolbar() const noexcept { return toolbar_; }
     const ContextMenuConfig& ContextMenu() const noexcept { return contextMenu_; }
     const UpdateConfig&   Update() const noexcept { return update_; }
+    const RemoteConfig&   Remote() const noexcept { return remote_; }
 
     // 加载过程中被回退的属性名，供"关于/诊断"展示
     const std::vector<std::wstring>& Warnings() const noexcept { return warnings_; }
@@ -166,6 +176,7 @@ private:
     ToolbarConfig   toolbar_;
     ContextMenuConfig contextMenu_;
     UpdateConfig    update_;
+    RemoteConfig    remote_;
     std::vector<std::wstring> warnings_;
     long long       lastSaveTick_ = 0;
     bool            dirty_ = false;

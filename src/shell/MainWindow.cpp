@@ -37,6 +37,7 @@
 #include "shell/ComparePickDialog.h"
 #include "shell/ToolbarDialog.h"
 #include "shell/UpdateDialog.h"
+#include "shell/RemoteDialog.h"
 #include "core/Diff.h"
 #include "core/ExportHtml.h"
 #include "core/ExportRtf.h"
@@ -81,6 +82,7 @@ enum : npcc::core::CmdId {
     kCmdFilePrint      = npcc::core::MakeCmdId(1, 8),
     kCmdFileExportHtml = npcc::core::MakeCmdId(1, 9),
     kCmdFileExportRtf  = npcc::core::MakeCmdId(1, 10),
+    kCmdFileRemote     = npcc::core::MakeCmdId(1, 11),
 
     kCmdEditUndo      = npcc::core::MakeCmdId(2, 1),
     kCmdEditRedo      = npcc::core::MakeCmdId(2, 2),
@@ -988,6 +990,11 @@ void MainWindow::RegisterCommands() {
         [this](const CmdContext&) { CommandExportHtml(); });
     add(kCmdFileExportRtf, CmdCategory::File, L"cmd.file.exportRtf", L"导出为 RTF(&R)...",
         needsBuffer, [this](const CmdContext&) { CommandExportRtf(); });
+    // 分隔线也要占一个命令 ID（用第 15 类里的保留号，见工具菜单那边的说明）
+    add(core::MakeCmdId(15, 10), CmdCategory::File, L"cmd.file.sepRemote", L"-",
+        core::kCmdNone, [](const CmdContext&) {});
+    add(kCmdFileRemote, CmdCategory::File, L"cmd.file.remote", L"远程站点(&M)...",
+        core::kCmdNone, [this](const CmdContext&) { CommandRemoteSites(); });
 
     // ---- 编辑 ----
     add(kCmdEditUndo, CmdCategory::Edit, L"cmd.edit.undo", L"撤销(&U)",
@@ -5395,6 +5402,31 @@ void MainWindow::CommandCustomizeContextMenu() {
     config_.SaveNow();
     ApplyContextMenuConfig();
     statusBar_.SetMessage(core::Tr(L"status.contextMenuUpdated", L"右键菜单已更新"));
+}
+
+void MainWindow::CommandRemoteSites() {
+    // 站点表来自配置，缓存根就是配置根（<配置根>\remote\<站点>\…）。
+    // 下载/上传都在对话框里做完，这里只负责三件事：备料、把改动写回配置、
+    // 把"下载并打开"选中的缓存文件走常规打开流程（之后它就是一份普通本地文档）。
+    shell::RemoteDialog::Request request;
+    request.sites = config_.Remote().sites;
+    request.configRoot = infra::ConfigRoot().wstring();
+    if (edit::Document* document = ActiveDocument(); document != nullptr) {
+        request.currentFilePath = document->buffer.filePath;
+    }
+    const shell::RemoteDialog::Outcome outcome =
+        shell::RemoteDialog::Show(hwnd_, UpdatePool(), std::move(request));
+    if (outcome.sitesChanged) {
+        config_.Remote().sites = outcome.sites;
+        config_.SaveNow();
+        infra::LogInfo(L"remote", L"远程站点表已写回配置（" +
+                                     std::to_wstring(config_.Remote().sites.size()) + L" 个）");
+    }
+    if (!outcome.openLocalPath.empty()) {
+        if (OpenDocumentPath(outcome.openLocalPath)) {
+            statusBar_.SetMessage(L"已从远程下载并打开：" + outcome.openLocalPath);
+        }
+    }
 }
 
 void MainWindow::CommandCheckUpdate() {

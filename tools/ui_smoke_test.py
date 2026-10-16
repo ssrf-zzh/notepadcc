@@ -12,6 +12,7 @@ import json
 import os
 import quopri
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -262,6 +263,33 @@ CMD_FUNCTION_JUMP = (4 << 12) | 20
 CMD_FILE_PRINT = (1 << 12) | 8
 CMD_FILE_EXPORT_HTML = (1 << 12) | 9
 CMD_FILE_EXPORT_RTF = (1 << 12) | 10
+CMD_FILE_REMOTE = (1 << 12) | 11            # 文件 → 远程站点…
+
+# 远程站点浏览框 / 站点编辑器（自绘窗口类，不是 #32770；控件号与 src/shell 里一致）
+REMOTE_BROWSE_CLASS = "notepadccRemoteBrowse"
+REMOTE_SITES_CLASS = "notepadccRemoteSites"
+REMOTE_SITE = 1801
+REMOTE_PATH_TEXT = 1802
+REMOTE_STATUS = 1803
+REMOTE_LIST = 1804
+REMOTE_NAME_EDIT = 1805
+REMOTE_UP = 1810
+REMOTE_OPEN = 1812
+REMOTE_UPLOAD = 1813
+REMOTE_MKDIR = 1814
+REMOTE_RENAME = 1815
+REMOTE_DELETE = 1816
+REMOTE_SITES_BUTTON = 1817
+REMOTE_CLOSE = 1818
+SITE_LIST = 1830
+SITE_NEW = 1831
+SITE_SAVE = 1832
+SITE_DELETE = 1833
+SITE_CLOSE = 1834
+SITE_NAME = 1840
+SITE_HOST = 1842
+SITE_STATUS = 1849
+CBN_SELCHANGE = 1
 CMD_SETTINGS_PLUGINS = (7 << 12) | 5
 PLUGIN_ADMIN_CLASS = "notepadccPluginAdmin"
 PLUGIN_ADMIN_LIST = 1401
@@ -4539,6 +4567,8 @@ def run():
         failed = True
     if not test_update_check(root):
         failed = True
+    if not test_remote_edit(root):
+        failed = True
 
     if failed:
         print("FAIL: 界面回归未通过")
@@ -4551,7 +4581,7 @@ def run():
           "比较 + JSON 树视图 + 括号匹配与摘要与全屏 + 工具栏 + 右键菜单定制 + 自动完成 + "
           "文件关联 + "
           "文件类型识别与 MIME 工具 + 护眼模式 + XML 树视图与校验 + XPath 查询 + "
-          "自动更新检查 + 绿色打包）")
+          "自动更新检查 + 远程编辑（FTP/SFTP 站点）+ 绿色打包）")
     return 0
 
 
@@ -7750,6 +7780,559 @@ def test_update_check(root):
 
     print("  自动更新检查：启动延迟检查拿到“已是最新”，篡改签名 / 错哈希 / 未签名 exe "
           "三道闸门各拦一次，包确实下载并解压到 update/downloads/<版本>/package")
+    return True
+
+class MiniFtpServer:
+    """最小可用的 FTP 服务器（远程编辑回归专用），只覆盖用到的命令。
+
+    数据连接走 PASV；LIST 回 UNIX 格式（UTF-8 编码），文件名含中文 / 空格都能
+    表达，与 FtpClient 的解析约定一致。绑定 127.0.0.1:0，端口由系统分配，
+    回归时不会和别的服务抢口。
+    """
+
+    def __init__(self, root):
+        self.root = os.path.abspath(root)
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(8)
+        self.port = self._sock.getsockname()[1]
+        self._stop = False
+        self._thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self.commands = []
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    def shutdown(self):
+        self._stop = True
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
+    def _accept_loop(self):
+        while not self._stop:
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._session, args=(conn,), daemon=True).start()
+
+    def _reply(self, conn, text):
+        conn.sendall((text + "\r\n").encode("utf-8"))
+
+    def _local(self, remote):
+        parts = [p for p in remote.split("/") if p not in ("", ".")]
+        out = self.root
+        for part in parts:
+            if part == "..":
+                out = os.path.dirname(out)
+                if not os.path.abspath(out).startswith(self.root):
+                    out = self.root
+                continue
+            out = os.path.join(out, part)
+        out = os.path.abspath(out)
+        if not out.startswith(self.root):
+            return None
+        return out
+
+    def _resolve(self, cwd, arg):
+        if not arg:
+            return self._local(cwd)
+        if arg.startswith("/"):
+            return self._local(arg)
+        return self._local(cwd.rstrip("/") + "/" + arg)
+
+    def _listing(self, local):
+        lines = []
+        if os.path.isdir(local):
+            for name in sorted(os.listdir(local)):
+                full = os.path.join(local, name)
+                if os.path.isdir(full):
+                    lines.append("drwxr-xr-x 1 owner group 0 Jan 01 00:00 " + name)
+                else:
+                    lines.append("-rw-r--r-- 1 owner group %d Jan 01 00:00 %s"
+                                 % (os.path.getsize(full), name))
+        else:
+            lines.append("-rw-r--r-- 1 owner group %d Jan 01 00:00 %s"
+                         % (os.path.getsize(local), os.path.basename(local)))
+        return "".join(line + "\r\n" for line in lines).encode("utf-8")
+
+    def _session(self, conn):
+        data_sock = None
+        pending = None
+        try:
+            conn.settimeout(30)
+            stream = conn.makefile("rb")
+            self._reply(conn, "220 MiniFTP ready")
+            cwd = "/"
+            for raw in stream:
+                line = raw.decode("utf-8", "replace").rstrip("\r\n")
+                verb, _, rest = line.partition(" ")
+                verb = verb.strip().upper()
+                arg = rest.strip()
+                self.commands.append(line)
+                if verb == "USER":
+                    self._reply(conn, "331 need password")
+                elif verb == "PASS":
+                    self._reply(conn, "230 logged in")
+                elif verb == "SYST":
+                    self._reply(conn, "215 UNIX Type: L8")
+                elif verb == "TYPE":
+                    self._reply(conn, "200 type set")
+                elif verb == "OPTS":
+                    self._reply(conn, "200 ok")
+                elif verb == "QUIT":
+                    self._reply(conn, "221 bye")
+                    break
+                elif verb == "CWD":
+                    target = self._resolve(cwd, arg)
+                    if target and os.path.isdir(target):
+                        cwd = arg
+                        self._reply(conn, "250 ok")
+                    else:
+                        self._reply(conn, "550 no such directory")
+                elif verb == "PASV":
+                    if data_sock is not None:
+                        data_sock.close()
+                    data_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    data_sock.bind(("127.0.0.1", 0))
+                    data_sock.listen(1)
+                    data_sock.settimeout(15)
+                    port = data_sock.getsockname()[1]
+                    self._reply(conn, "227 Entering Passive Mode (127,0,0,1,%d,%d)"
+                                % (port >> 8, port & 0xFF))
+                elif verb == "LIST":
+                    target = self._resolve(cwd, arg)
+                    if not target or not os.path.exists(target):
+                        self._reply(conn, "550 no such file or directory")
+                        continue
+                    self._reply(conn, "150 opening data connection")
+                    try:
+                        data, _ = data_sock.accept()
+                    except OSError:
+                        self._reply(conn, "425 cannot open data connection")
+                        continue
+                    try:
+                        data.sendall(self._listing(target))
+                    finally:
+                        data.close()
+                    self._reply(conn, "226 transfer complete")
+                elif verb == "RETR":
+                    target = self._resolve(cwd, arg)
+                    if not target or not os.path.isfile(target):
+                        self._reply(conn, "550 no such file")
+                        continue
+                    self._reply(conn, "150 opening data connection")
+                    try:
+                        data, _ = data_sock.accept()
+                    except OSError:
+                        self._reply(conn, "425 cannot open data connection")
+                        continue
+                    try:
+                        with open(target, "rb") as handle:
+                            data.sendall(handle.read())
+                    finally:
+                        data.close()
+                    self._reply(conn, "226 transfer complete")
+                elif verb == "STOR":
+                    target = self._resolve(cwd, arg)
+                    if not target or not os.path.isdir(os.path.dirname(target)):
+                        self._reply(conn, "550 no such directory")
+                        continue
+                    self._reply(conn, "150 opening data connection")
+                    try:
+                        data, _ = data_sock.accept()
+                    except OSError:
+                        self._reply(conn, "425 cannot open data connection")
+                        continue
+                    try:
+                        with open(target, "wb") as handle:
+                            while True:
+                                chunk = data.recv(65536)
+                                if not chunk:
+                                    break
+                                handle.write(chunk)
+                    finally:
+                        data.close()
+                    self._reply(conn, "226 transfer complete")
+                elif verb == "MKD":
+                    target = self._resolve(cwd, arg)
+                    try:
+                        os.mkdir(target)
+                        self._reply(conn, "257 created")
+                    except OSError:
+                        self._reply(conn, "550 cannot create directory")
+                elif verb == "DELE":
+                    target = self._resolve(cwd, arg)
+                    try:
+                        os.remove(target)
+                        self._reply(conn, "250 deleted")
+                    except OSError:
+                        self._reply(conn, "550 cannot delete file")
+                elif verb == "RMD":
+                    target = self._resolve(cwd, arg)
+                    try:
+                        os.rmdir(target)
+                        self._reply(conn, "250 removed")
+                    except OSError:
+                        self._reply(conn, "550 cannot remove directory")
+                elif verb == "RNFR":
+                    target = self._resolve(cwd, arg)
+                    if target and os.path.exists(target):
+                        pending = target
+                        self._reply(conn, "350 ready for RNTO")
+                    else:
+                        self._reply(conn, "550 no such file or directory")
+                elif verb == "RNTO":
+                    target = self._resolve(cwd, arg)
+                    try:
+                        os.rename(pending, target)
+                        self._reply(conn, "250 renamed")
+                    except OSError:
+                        self._reply(conn, "550 rename failed")
+                else:
+                    self._reply(conn, "502 not implemented")
+        except OSError:
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+
+def test_remote_edit(root):
+    """远程编辑（M3 第十一块）：自研 FTP 客户端 + sftp.exe 驱动 + 自绘浏览框。
+
+    在 127.0.0.1 上起一个最小 FTP 服务器（端口自动分配），手写 config.xml 指向它，
+    再跨进程驱动 notepadccRemoteBrowse / notepadccRemoteSites 两个自绘框：
+      1 列目录：目录在前、文件带字节数，中英文名字都不走样；
+      2 双击进子目录 / 上一级回到根；
+      3 下载内容含中文的文件并打开：编辑器内容与磁盘逐字相等（整篇比较）；
+      4 下载 edit.txt → 列块插入 X → 保存进缓存 → 上传：服务器文件逐字相等；
+      5 新建文件夹 / 重命名 / 删除目录（过确认框）：服务器目录表逐步核对；
+      6 切到缺用户名的 SFTP 站点：状态行给出确定性报错（ValidateRemoteSite 拦下）；
+      7 站点编辑器：点「新建」再保存 → 追加到表尾，浏览框下拉框同步 +1，
+        关框后 config.xml 里三个站点都在（含新加的 s2）。
+    """
+    work = os.path.join(root, "build", "remote_test")
+    shutil.rmtree(work, ignore_errors=True)
+    server_root = os.path.join(work, "server")
+    os.makedirs(os.path.join(server_root, "sub"))
+
+    def write_text(path, text):
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+
+    write_text(os.path.join(server_root, "hello.txt"), "远程测试：hello\n")
+    write_text(os.path.join(server_root, "edit.txt"), "aaa\nbbb\nccc")
+    write_text(os.path.join(server_root, "sub", "inner.txt"), "inner\n")
+
+    server = MiniFtpServer(server_root).start()
+
+    cfg = os.path.join(root, "build", "bin", "config")
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+
+    # 这一段的 config.xml 手写：前一段（更新检查）可能留了自己的配置，先清干净
+    for name in ("config.xml", "session.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+    shutil.rmtree(os.path.join(cfg, "remote"), ignore_errors=True)
+    with open(os.path.join(cfg, "config.xml"), "w", encoding="utf-8", newline="") as handle:
+        handle.write('<?xml version="1.0" encoding="utf-8"?>\n'
+                     '<NotepadccConfig schemaVersion="1">\n'
+                     '  <remote>\n'
+                     f'    <Site name="t1" protocol="ftp" host="127.0.0.1" port="{server.port}" '
+                     'user="tester" password="pw" initialDir="/" />\n'
+                     '    <Site name="sftp-bad" protocol="sftp" host="127.0.0.1" />\n'
+                     '  </remote>\n'
+                     '</NotepadccConfig>\n')
+
+    def find_dialog(cls, timeout=10.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            dialog = user32.FindWindowW(cls, None)
+            if dialog:
+                return dialog
+            time.sleep(0.2)
+        return None
+
+    def wait_text(control, want, timeout=15.0):
+        """等控件的 WM_GETTEXT 正好等于 want；超时返回最后读到的文本。"""
+        deadline = time.time() + timeout
+        last = None
+        while time.time() < deadline:
+            last = window_text(control)
+            if last == want:
+                return last
+            time.sleep(0.15)
+        return last
+
+    def click(dialog, control_id):
+        user32.PostMessageW(dialog, WM_COMMAND, control_id, 0)
+
+    def select_row(dialog, index):
+        box = find_child(dialog, "ListBox")
+        send_bounded(box, LB_SETCURSEL, index, 0)
+        user32.PostMessageW(dialog, WM_COMMAND, (LBN_SELCHANGE << 16) | REMOTE_LIST, 0)
+        time.sleep(0.3)
+
+    def select_site(dialog, index):
+        combo = find_child(dialog, "ComboBox")
+        send_bounded(combo, CB_SETCURSEL, index, 0)
+        user32.PostMessageW(dialog, WM_COMMAND, (CBN_SELCHANGE << 16) | REMOTE_SITE, combo)
+        time.sleep(0.3)
+
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable"], cwd=root)
+    window = wait_for_main_window("notepadcc - 新建 1")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+
+        def open_remote():
+            user32.PostMessageW(window, WM_COMMAND, CMD_FILE_REMOTE, 0)
+            return find_dialog(REMOTE_BROWSE_CLASS)
+
+        # ---- 1) 列目录：目录在前，文件带字节数 ----
+        dialog = open_remote()
+        if not dialog:
+            print("  FAIL: 远程站点对话框没有出现")
+            return False
+        status = user32.GetDlgItem(dialog, REMOTE_STATUS)
+        got = wait_text(status, "共 3 项")
+        if got != "共 3 项":
+            print(f"  FAIL: 列目录状态应为「共 3 项」，实际 {got!r}")
+            return False
+        listed = window_text(dialog)
+        want = "[目录] sub\r\nedit.txt  (11 字节)\r\nhello.txt  (21 字节)"
+        if listed != want:
+            print(f"  FAIL: 目录列表不等于预期\n           实际 {listed!r}\n           期望 {want!r}")
+            return False
+
+        # ---- 2) 进子目录 / 上一级 ----
+        select_row(dialog, 0)
+        user32.PostMessageW(dialog, WM_COMMAND, (2 << 16) | REMOTE_LIST, 0)   # LBN_DBLCLK
+        got = wait_text(status, "共 1 项")
+        if got != "共 1 项":
+            print(f"  FAIL: 进子目录后应「共 1 项」，实际 {got!r}")
+            return False
+        path_text = window_text(user32.GetDlgItem(dialog, REMOTE_PATH_TEXT))
+        if path_text != "当前目录：/sub":
+            print(f"  FAIL: 路径行应为「当前目录：/sub」，实际 {path_text!r}")
+            return False
+        click(dialog, REMOTE_UP)
+        got = wait_text(status, "共 3 项")
+        path_text = window_text(user32.GetDlgItem(dialog, REMOTE_PATH_TEXT))
+        if got != "共 3 项" or path_text != "当前目录：/":
+            print(f"  FAIL: 上一级后状态 {got!r}、路径 {path_text!r}")
+            return False
+
+        # ---- 3) 下载（内容含中文）并打开：整篇相等 ----
+        select_row(dialog, 2)                 # [目录] sub, edit.txt, hello.txt
+        click(dialog, REMOTE_OPEN)
+        deadline = time.time() + 20.0
+        while time.time() < deadline and user32.FindWindowW(REMOTE_BROWSE_CLASS, None):
+            time.sleep(0.25)
+        if user32.FindWindowW(REMOTE_BROWSE_CLASS, None):
+            print("  FAIL: 「下载并打开」后浏览框应自己关掉")
+            return False
+        window = wait_for_main_window("notepadcc - hello.txt")
+        if not window:
+            print("  FAIL: 下载后主窗口标题不是 notepadcc - hello.txt")
+            return False
+        opened = scinti_text(visible_scintilla(window))
+        if opened != "远程测试：hello\n":
+            print(f"  FAIL: 下载的文件内容不相等，实际 {opened!r}")
+            return False
+
+        # ---- 4) 下载 edit.txt → 列块插入 → 保存进缓存 → 上传 ----
+        dialog = open_remote()
+        if not dialog:
+            print("  FAIL: 第二次打开远程框失败")
+            return False
+        status = user32.GetDlgItem(dialog, REMOTE_STATUS)
+        if wait_text(status, "共 3 项") != "共 3 项":
+            print("  FAIL: 第二次列目录状态不对")
+            return False
+        select_row(dialog, 1)                 # edit.txt
+        click(dialog, REMOTE_OPEN)
+        deadline = time.time() + 20.0
+        while time.time() < deadline and user32.FindWindowW(REMOTE_BROWSE_CLASS, None):
+            time.sleep(0.25)
+        window = wait_for_main_window("notepadcc - edit.txt")
+        if not window:
+            print("  FAIL: 下载 edit.txt 后主窗口标题不对")
+            return False
+        scinti = visible_scintilla(window)
+        user32.SendMessageW(scinti, SCI_SETSELECTIONMODE, SC_SEL_RECTANGLE, 0)
+        user32.SendMessageW(scinti, SCI_SETRECTANGULARSELECTIONANCHOR, 1, 0)
+        user32.SendMessageW(scinti, SCI_SETRECTANGULARSELECTIONCARET, 11, 0)
+        time.sleep(0.3)
+        user32.PostMessageW(window, WM_COMMAND, CMD_COLUMN_EDIT, 0)
+        time.sleep(1.5)
+        column = user32.FindWindowW("notepadccColumnDialog", None)
+        if not column:
+            print("  FAIL: 列块编辑对话框没有出现")
+            return False
+        set_text(column, COLUMN_TEMPLATE_EDIT, "X")
+        user32.PostMessageW(column, WM_COMMAND, COLUMN_INSERT_BUTTON, 0)
+        time.sleep(1.0)
+        edited = scinti_text(scinti)
+        if edited != "aXaa\nbXbb\ncXcc":
+            print(f"  FAIL: 列块插入后的文本不对，实际 {edited!r}")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_FILE_SAVE, 0)
+        time.sleep(1.5)
+        cache = os.path.join(cfg, "remote", "t1", "edit.txt")
+        if not os.path.exists(cache):
+            print(f"  FAIL: 保存后应在缓存里生成 {cache}")
+            return False
+        with open(cache, encoding="utf-8", newline="") as handle:
+            cached = handle.read()
+        if cached != "aXaa\nbXbb\ncXcc":
+            print(f"  FAIL: 缓存文件内容不对，实际 {cached!r}")
+            return False
+
+        dialog = open_remote()
+        if not dialog:
+            print("  FAIL: 第三次打开远程框失败")
+            return False
+        status = user32.GetDlgItem(dialog, REMOTE_STATUS)
+        if wait_text(status, "共 3 项") != "共 3 项":
+            print("  FAIL: 上传前列目录状态不对")
+            return False
+        click(dialog, REMOTE_UPLOAD)
+        got = wait_text(status, "上传完成（共 3 项）")
+        if got != "上传完成（共 3 项）":
+            print(f"  FAIL: 上传后状态应为「上传完成（共 3 项）」，实际 {got!r}")
+            return False
+        with open(os.path.join(server_root, "edit.txt"), encoding="utf-8", newline="") as handle:
+            uploaded = handle.read()
+        if uploaded != "aXaa\nbXbb\ncXcc":
+            print(f"  FAIL: 服务器上的文件内容不对，实际 {uploaded!r}")
+            return False
+
+        # ---- 5) 新建文件夹 / 重命名 / 删除目录（过确认框）----
+        set_text(dialog, REMOTE_NAME_EDIT, "新目录")
+        click(dialog, REMOTE_MKDIR)
+        got = wait_text(status, "新建文件夹完成（共 4 项）")
+        if got != "新建文件夹完成（共 4 项）":
+            print(f"  FAIL: 新建文件夹状态不对，实际 {got!r}")
+            return False
+        names = sorted(os.listdir(server_root))
+        if names != ["edit.txt", "hello.txt", "sub", "新目录"]:
+            print(f"  FAIL: 新建后服务器目录不对：{names!r}")
+            return False
+
+        select_row(dialog, 1)                 # [目录] sub, [目录] 新目录, edit.txt, hello.txt
+        set_text(dialog, REMOTE_NAME_EDIT, "改名了")
+        click(dialog, REMOTE_RENAME)
+        got = wait_text(status, "重命名完成（共 4 项）")
+        if got != "重命名完成（共 4 项）":
+            print(f"  FAIL: 重命名状态不对，实际 {got!r}")
+            return False
+        names = sorted(os.listdir(server_root))
+        if names != ["edit.txt", "hello.txt", "sub", "改名了"]:
+            print(f"  FAIL: 重命名后服务器目录不对：{names!r}")
+            return False
+
+        select_row(dialog, 1)                 # [目录] sub, [目录] 改名了, edit.txt, hello.txt
+        user32.PostMessageW(dialog, WM_COMMAND, REMOTE_DELETE, 0)
+        time.sleep(1.0)
+        if not dismiss_dialog("删除远程目录", IDYES, timeout=8.0):
+            print("  FAIL: 删除确认框没点掉")
+            return False
+        got = wait_text(status, "删除目录完成（共 3 项）")
+        if got != "删除目录完成（共 3 项）":
+            print(f"  FAIL: 删除后状态不对，实际 {got!r}")
+            return False
+        names = sorted(os.listdir(server_root))
+        if names != ["edit.txt", "hello.txt", "sub"]:
+            print(f"  FAIL: 删除后服务器目录不对：{names!r}")
+            return False
+
+        # ---- 6) SFTP 站点（缺用户名）→ 确定性报错 ----
+        select_site(dialog, 1)
+        want = "失败：SFTP 需要用户名（调用系统 sftp.exe 的命令行形式是 user@host）"
+        got = wait_text(status, want)
+        if got != want:
+            print(f"  FAIL: SFTP 站点报错文案不对，实际 {got!r}")
+            return False
+
+        # ---- 7) 站点编辑器：新建的站点追加到表尾，浏览框下拉框同步 ----
+        click(dialog, REMOTE_SITES_BUTTON)
+        editor = find_dialog(REMOTE_SITES_CLASS)
+        if not editor:
+            print("  FAIL: 站点编辑器没有出现")
+            return False
+        if window_text(editor) != "t1 (ftp)\r\nsftp-bad (sftp)":
+            print(f"  FAIL: 站点编辑器初始列表不对：{window_text(editor)!r}")
+            return False
+        editor_status = user32.GetDlgItem(editor, SITE_STATUS)
+        click(editor, SITE_NEW)
+        got = wait_text(editor_status, "填好参数后点「保存」")
+        if got != "填好参数后点「保存」":
+            print(f"  FAIL: 点「新建」后的提示不对，实际 {got!r}")
+            return False
+        set_text(editor, SITE_NAME, "s2")
+        set_text(editor, SITE_HOST, "example.invalid")
+        click(editor, SITE_SAVE)
+        got = wait_text(editor_status, "已保存：s2")
+        if got != "已保存：s2":
+            print(f"  FAIL: 保存站点失败，状态 {got!r}")
+            return False
+        listed = window_text(editor)
+        if listed != "t1 (ftp)\r\nsftp-bad (sftp)\r\ns2 (ftp)":
+            print(f"  FAIL: 新建的站点应追加到表尾，实际 {listed!r}")
+            return False
+        click(editor, SITE_CLOSE)
+        time.sleep(0.8)
+        if user32.FindWindowW(REMOTE_SITES_CLASS, None):
+            print("  FAIL: 站点编辑器没关掉")
+            return False
+        combo = find_child(dialog, "ComboBox")
+        count = send_bounded(combo, CB_GETCOUNT)
+        if count != 3:
+            print(f"  FAIL: 关掉编辑器后浏览框站点下拉框应有 3 项，实际 {count!r}")
+            return False
+        click(dialog, REMOTE_CLOSE)
+        deadline = time.time() + 8.0
+        config = ""
+        while time.time() < deadline:
+            if not user32.FindWindowW(REMOTE_BROWSE_CLASS, None):
+                with open(os.path.join(cfg, "config.xml"), encoding="utf-8") as handle:
+                    config = handle.read()
+                if 'name="s2"' in config:
+                    break
+            time.sleep(0.25)
+        if user32.FindWindowW(REMOTE_BROWSE_CLASS, None):
+            print("  FAIL: 浏览框没关掉")
+            return False
+        for piece in ('name="t1"', 'name="sftp-bad"', 'name="s2"'):
+            if piece not in config:
+                print(f"  FAIL: 关框后 config.xml 里缺 {piece}：{config!r}")
+                return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        server.shutdown()
+        for name in ("config.xml", "session.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+        shutil.rmtree(os.path.join(cfg, "remote"), ignore_errors=True)
+
+    print("  远程编辑：FTP 列目录 / 进子目录 / 下载打开 / 列块编辑后上传 / "
+          "新建重命名删除 / SFTP 报错文案 / 站点编辑器新建站点回写，全部逐字核对通过")
     return True
 
 if __name__ == "__main__":

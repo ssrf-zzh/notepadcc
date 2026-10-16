@@ -70,6 +70,9 @@
 #include "infra/Paths.h"
 #include "infra/UpdateService.h"
 #include "infra/Xml.h"
+#include "core/FtpProtocol.h"
+#include "core/RemoteSite.h"
+#include "infra/SftpRunner.h"
 
 // 只用它拿风格号常量（STYLE_DEFAULT / STYLE_LINENUMBER），不碰任何窗口逻辑
 #include <Scintilla.h>
@@ -7387,6 +7390,283 @@ int main() {
               "UTF-8 往返回到原字符串");
         Check(npcc::infra::Utf8FromWide(L"") == "" && npcc::infra::WideFromUtf8("") == L"",
               "空串往返不炸");
+    }
+
+    Section("远程编辑：站点校验与远程路径（M3 第十一块）");
+    {
+        using npcc::core::ParseRemoteProtocol;
+        using npcc::core::RemoteCachePath;
+        using npcc::core::RemoteDefaultPort;
+        using npcc::core::RemoteIsCacheSafeSegment;
+        using npcc::core::RemoteIsValidComponent;
+        using npcc::core::RemoteIsValidDirPath;
+        using npcc::core::RemoteJoin;
+        using npcc::core::RemoteLeafName;
+        using npcc::core::RemoteNormalizeDir;
+        using npcc::core::RemoteParentDir;
+        using npcc::core::RemotePathFromCache;
+        using npcc::core::RemoteProtocol;
+        using npcc::core::RemoteProtocolToken;
+        using npcc::core::RemoteSite;
+        using npcc::core::ValidateRemoteSite;
+
+        // —— 协议标识 ——
+        RemoteProtocol protocol = RemoteProtocol::Ftp;
+        Check(ParseRemoteProtocol(L"sftp", &protocol) && protocol == RemoteProtocol::Sftp,
+              "sftp 解析成 SFTP");
+        Check(ParseRemoteProtocol(L"FTP", &protocol) && protocol == RemoteProtocol::Ftp,
+              "FTP 大小写不敏感");
+        Check(!ParseRemoteProtocol(L"scp", &protocol), "不认识的协议被拒");
+        CheckEqual(ToUtf8(RemoteProtocolToken(RemoteProtocol::Sftp)), "sftp", "SFTP 令牌");
+        Check(RemoteDefaultPort(RemoteProtocol::Ftp) == 21 &&
+                  RemoteDefaultPort(RemoteProtocol::Sftp) == 22,
+              "默认端口 21 / 22");
+
+        // —— 远程路径（POSIX 风格纯函数）——
+        CheckEqual(ToUtf8(RemoteNormalizeDir(L"")), "/", "空目录规范化成根");
+        CheckEqual(ToUtf8(RemoteNormalizeDir(L"/a//b/./c/")), "/a/b/c", "折叠空段与 .");
+        CheckEqual(ToUtf8(RemoteNormalizeDir(L"a/b")), "/a/b", "相对路径补上前导斜杠");
+        CheckEqual(ToUtf8(RemoteNormalizeDir(L"/a/../../..")), "/", "根之上不再往上");
+        CheckEqual(ToUtf8(RemoteNormalizeDir(L"/a/b/../c")), "/a/c", ".. 回退一层");
+        CheckEqual(ToUtf8(RemoteJoin(L"/pub", L"file.txt")), "/pub/file.txt", "拼接");
+        CheckEqual(ToUtf8(RemoteJoin(L"/", L"file.txt")), "/file.txt", "根下拼接不加双斜杠");
+        CheckEqual(ToUtf8(RemoteJoin(L"/pub/data", L"../x")), "/pub/x", "拼接后再规范化");
+        CheckEqual(ToUtf8(RemoteJoin(L"/pub", L"")), "/pub", "空名字等于自身");
+        CheckEqual(ToUtf8(RemoteParentDir(L"/a/b")), "/a", "上一级");
+        CheckEqual(ToUtf8(RemoteParentDir(L"/a")), "/", "根的下一级回到根");
+        CheckEqual(ToUtf8(RemoteParentDir(L"/")), "/", "根再上一级还是根");
+        CheckEqual(ToUtf8(RemoteLeafName(L"/a/b/c.txt")), "c.txt", "取叶子名");
+        CheckEqual(ToUtf8(RemoteLeafName(L"/")), "", "根没有叶子名");
+
+        Check(RemoteIsValidComponent(L"名字.txt") && RemoteIsValidComponent(L"a b"),
+              "普通名字合法（含空格）");
+        Check(!RemoteIsValidComponent(L"") && !RemoteIsValidComponent(L".") &&
+                  !RemoteIsValidComponent(L".."),
+              "空 / . / .. 都不合法");
+        Check(!RemoteIsValidComponent(L"a/b") && !RemoteIsValidComponent(L"a\\b"),
+              "名字里不许有斜杠");
+        Check(!RemoteIsValidComponent(L"a\nb"), "名字里不许有控制字符");
+        Check(RemoteIsValidDirPath(L"/a/b") && RemoteIsValidDirPath(L"/a/..") &&
+                  RemoteIsValidDirPath(L""),
+              "目录整体检查：结构字符由规范化处理");
+        Check(!RemoteIsValidDirPath(L"/a/b\\c"), "目录里有非法名字（反斜杠）要拦住");
+
+        // 本地缓存用的一段名字更严：Windows 非法字符与设备名都挡住
+        Check(RemoteIsCacheSafeSegment(L"名字.txt") && RemoteIsCacheSafeSegment(L"a b.txt"),
+              "缓存段：常见名字能过");
+        Check(!RemoteIsCacheSafeSegment(L"con") && !RemoteIsCacheSafeSegment(L"CON.txt") &&
+                  !RemoteIsCacheSafeSegment(L"lpt9.log"),
+              "缓存段：Windows 设备名（连扩展名一起）被拒");
+        Check(!RemoteIsCacheSafeSegment(L"a<b") && !RemoteIsCacheSafeSegment(L"a|b") &&
+                  !RemoteIsCacheSafeSegment(L"a?b") && !RemoteIsCacheSafeSegment(L"a*b"),
+              "缓存段：非法字符被拒");
+        Check(!RemoteIsCacheSafeSegment(L"trail.") && !RemoteIsCacheSafeSegment(L"trail "),
+              "缓存段：结尾的点与空格被拒");
+        Check(!RemoteIsCacheSafeSegment(L".."), "缓存段：.. 被拒");
+
+        // —— 站点校验 ——
+        RemoteSite site;
+        site.name = L"t1";
+        site.host = L"example.com";
+        site.user = L"tester";
+        std::wstring error;
+        Check(ValidateRemoteSite(site, &error), "普通 FTP 站点通过校验");
+        site.name = L"bad/name";
+        Check(!ValidateRemoteSite(site, &error) && error.find(L"站点名") != std::wstring::npos,
+              "站点名里的斜杠被拒");
+        site.name = L"t1";
+        site.protocol = RemoteProtocol::Sftp;
+        site.user.clear();
+        Check(!ValidateRemoteSite(site, &error) && error.find(L"用户名") != std::wstring::npos,
+              "SFTP 缺用户名被拒（要拼 user@host）");
+        site.user = L"tester@host";
+        Check(!ValidateRemoteSite(site, &error) && error.find(L"@") != std::wstring::npos,
+              "用户名里的 @ 被拒");
+        site.user = L"tester";
+        site.host = L"exa mple.com";
+        Check(!ValidateRemoteSite(site, &error) && error.find(L"主机名") != std::wstring::npos,
+              "主机名里的空格被拒");
+        site.host = L"example.com";
+        site.initialDir = L"a\nb";
+        Check(!ValidateRemoteSite(site, &error), "起始目录里的换行被拒");
+
+        // —— 下载缓存映射（两个方向）——
+        std::wstring cachePath;
+        Check(RemoteCachePath(L"C:\\cfg", L"t1", L"/pub/a.txt", &cachePath, &error) &&
+                  cachePath == L"C:\\cfg\\remote\\t1\\pub\\a.txt",
+              "缓存路径：配置根/remote/站点/每一段");
+        Check(RemoteCachePath(L"C:\\cfg\\", L"t1", L"/a", &cachePath, &error) &&
+                  cachePath == L"C:\\cfg\\remote\\t1\\a",
+              "配置根结尾有斜杠也不出双斜杠");
+        Check(!RemoteCachePath(L"C:\\cfg", L"t1", L"/a/../b", &cachePath, &error),
+              "远程路径里的 .. 拒绝映射到本地");
+        Check(!RemoteCachePath(L"C:\\cfg", L"t1", L"/con", &cachePath, &error) &&
+                  error.find(L"映射不过来") != std::wstring::npos,
+              "远程名字是设备名时拒绝并说清楚原因");
+        Check(!RemoteCachePath(L"C:\\cfg", L"bad/name", L"/a", &cachePath, &error),
+              "站点名不能当目录段用时拒绝");
+
+        std::wstring remoteBack;
+        Check(RemotePathFromCache(L"C:\\cfg", L"t1", L"C:\\cfg\\remote\\t1\\pub\\a.txt",
+                                  &remoteBack) &&
+                  remoteBack == L"/pub/a.txt",
+              "缓存路径反推回远程路径");
+        Check(RemotePathFromCache(L"C:\\CFG", L"T1", L"c:\\cfg\\remote\\t1\\A.TXT",
+                                  &remoteBack) &&
+                  remoteBack == L"/A.TXT",
+              "反推：Windows 路径不分大小写");
+        Check(!RemotePathFromCache(L"C:\\cfg", L"t1", L"C:\\cfg\\remote\\t2\\a.txt",
+                                   &remoteBack),
+              "反推：站点名对不上就拒绝");
+        Check(!RemotePathFromCache(L"C:\\cfg", L"t1", L"D:\\elsewhere\\remote\\t1\\a.txt",
+                                   &remoteBack),
+              "反推：配置根对不上就拒绝");
+        Check(!RemotePathFromCache(L"C:\\cfg", L"t1", L"C:\\cfg\\remote\\t1\\..\\x",
+                                   &remoteBack),
+              "反推：.. 段被拒（不会把上传写到外面去）");
+        Check(!RemotePathFromCache(L"C:\\cfg", L"t1", L"C:\\cfg\\remote\\t1",
+                                   &remoteBack),
+              "反推：只有前缀没有文件名的拒绝");
+    }
+
+    Section("远程编辑：FTP/SFTP 协议解析（M3 第十一块）");
+    {
+        using npcc::core::BuildSftpCommand;
+        using npcc::core::FtpListEntry;
+        using npcc::core::FtpReply;
+        using npcc::core::ParseFtpListLine;
+        using npcc::core::ParseFtpMultilineReply;
+        using npcc::core::ParseFtpPasvReply;
+        using npcc::core::ParseFtpReplyLine;
+        using npcc::core::ParseSftpPwdOutput;
+
+        FtpReply reply;
+        Check(ParseFtpReplyLine("230 登录成功\r\n", &reply) && reply.code == 230 &&
+                  reply.text == "登录成功",
+              "单行应答：码与文本");
+        Check(ParseFtpReplyLine("230-Line", &reply) && reply.code == 230 &&
+                  reply.text == "Line",
+              "多行的首行也认（码后面的 -）");
+        Check(!ParseFtpReplyLine("23", &reply) && !ParseFtpReplyLine("2a0 x", &reply) &&
+                  !ParseFtpReplyLine("", &reply),
+              "不成形的行被拒");
+
+        std::vector<std::string> lines{"211-Features", "SIZE", "211 End"};
+        Check(ParseFtpMultilineReply(lines, 0, &reply) && reply.code == 211 &&
+                  reply.text == "SIZE\nEnd",
+              "多行应答：中间行 + 收尾行文本");
+        lines = {"211-Features", "SIZE"};
+        Check(!ParseFtpMultilineReply(lines, 0, &reply), "没收尾行 = 还没读完");
+        lines = {"220 blah", "211 done"};
+        Check(!ParseFtpMultilineReply(lines, 0, &reply), "首行不是多行形式就拒绝");
+
+        std::string pasvHost;
+        std::uint16_t pasvPort = 0;
+        Check(ParseFtpPasvReply("Entering Passive Mode (127,0,0,1,21,1)", &pasvHost, &pasvPort) &&
+                  pasvHost == "127.0.0.1" && pasvPort == 21 * 256 + 1,
+              "PASV 六个数：主机与端口");
+        Check(!ParseFtpPasvReply("Entering Passive Mode 127,0,0,1,21,1", &pasvHost, &pasvPort),
+              "PASV 缺括号被拒");
+        Check(!ParseFtpPasvReply("(1,2,3,4,5)", &pasvHost, &pasvPort), "PASV 少一个数被拒");
+        Check(!ParseFtpPasvReply("(1,2,3,4,5,300)", &pasvHost, &pasvPort),
+              "PASV 单个数超过 255 被拒");
+
+        FtpListEntry entry;
+        Check(ParseFtpListLine("-rw-r--r--    1 user group  1234 Jan 10 12:00 my file.txt",
+                               &entry) &&
+                  entry.name == "my file.txt" && entry.size == 1234 && !entry.isDir,
+              "UNIX 行：文件名含空格时取剩余全部");
+        Check(ParseFtpListLine("drwxr-xr-x    2 root root        4096 Oct 17 01:00 sub",
+                               &entry) &&
+                  entry.name == "sub" && entry.isDir,
+              "UNIX 行：目录");
+        Check(ParseFtpListLine("lrwxrwxrwx 1 u g 7 Jan 01 00:00 link -> target", &entry) &&
+                  entry.name == "link" && !entry.isDir,
+              "UNIX 行：符号链接只留名字");
+        Check(ParseFtpListLine("01-10-24  12:00PM       <DIR>          sub", &entry) &&
+                  entry.name == "sub" && entry.isDir,
+              "DOS 行：<DIR>");
+        Check(ParseFtpListLine("01-10-24  12:00PM               1234 readme.txt", &entry) &&
+                  entry.name == "readme.txt" && entry.size == 1234 && !entry.isDir,
+              "DOS 行：文件");
+        Check(!ParseFtpListLine("total 12", &entry) &&
+                  !ParseFtpListLine("", &entry) &&
+                  !ParseFtpListLine("sftp> ls -l /", &entry),
+              "认不出的行（total / 空行 / sftp 回显）跳过");
+        Check(ParseFtpListLine("crw-rw-rw- 1 root root 1, 3 Jan 01 00:00 null", &entry) == false,
+              "设备文件那种 major,minor 不认，跳过");
+
+        std::string dir;
+        Check(ParseSftpPwdOutput("sftp> pwd\r\nRemote working directory: /home/tester\r\n", &dir) &&
+                  dir == "/home/tester",
+              "sftp pwd：从混排输出里取登录目录");
+        Check(!ParseSftpPwdOutput("sftp> pwd\nPermission denied\n", &dir),
+              "sftp pwd：没有那一行就报失败");
+
+        std::string command;
+        Check(BuildSftpCommand("get", {"a b.txt", "/x/y"}, &command) &&
+                  command == "get \"a b.txt\" \"/x/y\"\n",
+              "批处理命令：参数一律加引号（名字里有空格也能过）");
+        Check(BuildSftpCommand("ls -l", {"/pub"}, &command) && command == "ls -l \"/pub\"\n",
+              "批处理命令：动词可以带开关");
+        Check(BuildSftpCommand("pwd", {}, &command) && command == "pwd\n", "批处理命令：无参数");
+        Check(!BuildSftpCommand("get; rm", {}, &command) && !BuildSftpCommand("", {}, &command),
+              "批处理命令：动词里不许有分号 / 空动词");
+        Check(!BuildSftpCommand("get", {"a\"b"}, &command), "批处理命令：参数里的引号被拒");
+        Check(!BuildSftpCommand("get", {"a\nb"}, &command), "批处理命令：参数里的换行被拒");
+    }
+
+    Section("远程编辑：sftp.exe 参数组装（M3 第十一块）");
+    {
+        using npcc::core::RemoteProtocol;
+        using npcc::core::RemoteSite;
+        using npcc::infra::BuildSftpArguments;
+        using npcc::infra::SftpAvailable;
+
+        RemoteSite site;
+        site.name = L"t1";
+        site.host = L"example.com";
+        site.user = L"tester";
+        std::wstring arguments;
+        std::wstring error;
+        Check(!BuildSftpArguments(site, &arguments, &error) &&
+                  error.find(L"不是 SFTP 站点") != std::wstring::npos,
+              "FTP 站点调 SFTP 组装被拒");
+        site.protocol = RemoteProtocol::Sftp;
+        site.user.clear();
+        Check(!BuildSftpArguments(site, &arguments, &error), "缺用户名被拒");
+        site.user = L"tester";
+        site.port = 2222;
+        site.acceptNewHostKey = true;
+        site.keyFile = L"no_such_key_file_zzz";
+        Check(!BuildSftpArguments(site, &arguments, &error) &&
+                  error.find(L"私钥文件不存在") != std::wstring::npos,
+              "私钥文件不存在时明确报错");
+        // 私钥用一个真实存在的文件：本测试程序自己
+        wchar_t selfPath[MAX_PATH] = {};
+        ::GetModuleFileNameW(nullptr, selfPath, MAX_PATH);
+        site.keyFile = selfPath;
+        Check(BuildSftpArguments(site, &arguments, &error), "参数组装成功");
+        Check(arguments.find(L"-b - -P 2222") != std::wstring::npos &&
+                  arguments.find(L"-oBatchMode=yes") != std::wstring::npos &&
+                  arguments.find(L"-oStrictHostKeyChecking=accept-new") != std::wstring::npos &&
+                  arguments.find(L"-i \"") != std::wstring::npos &&
+                  arguments.find(L"tester@example.com") != std::wstring::npos,
+              "参数含批处理、端口、密钥、严格校验开关与 user@host");
+        site.keyFile.clear();
+        site.acceptNewHostKey = false;
+        Check(BuildSftpArguments(site, &arguments, &error) &&
+                  arguments.find(L"accept-new") == std::wstring::npos &&
+                  arguments.find(L"-oBatchMode=yes") != std::wstring::npos,
+              "不勾接受新主机密钥时不带 accept-new");
+        Check(BuildSftpArguments(site, &arguments, nullptr), "成功路径没给 error 指针也不炸");
+        site.host.clear();
+        Check(!BuildSftpArguments(site, &arguments, nullptr), "失败路径没给 error 指针也不炸");
+        site.host = L"example.com";
+
+        // SftpAvailable 只要求"能问出个真假"，别把系统有没有 OpenSSH 当成断言
+        const bool available = SftpAvailable();
+        Check(available || !available, "SftpAvailable 能安全地问出来");
     }
 
     FinishSections();
