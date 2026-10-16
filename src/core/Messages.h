@@ -21,6 +21,7 @@ enum : UINT {
     kMsgStartupRecovery = WM_APP + 13,  // 窗口显示之后再问"要不要恢复上次未保存的内容"
     kMsgCrashTest       = WM_APP + 14,  // 自检开关：等窗口就绪后故意崩一次
     kMsgFunctionListReady = WM_APP + 15, // 函数列表后台解析结果（指针所有权转移给 UI 线程）
+    kMsgStartupNotice   = WM_APP + 16,  // 窗口显示后再露面一次的打开提示（二进制、大文件档等）
     kMsgUserRangeStart  = WM_APP + 100, // 以下保留给外壳内部
 };
 

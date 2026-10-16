@@ -13,7 +13,6 @@ namespace npcc::search {
 namespace {
 
 constexpr std::uint32_t kFallbackCodePage = 936;
-constexpr std::size_t   kBinaryProbeBytes = 8192;
 
 // 目录名黑名单：这些目录里几乎不可能有用户想找的文本，
 // 遍历它们只会浪费时间，还会把版本库内部对象翻出来。
@@ -29,25 +28,6 @@ bool IsDefaultExcludedDir(std::wstring_view name) {
         }
     }
     return false;
-}
-
-// 二进制判定：出现 NUL 字节，或控制字符占比过高（换行/制表符除外）
-bool LooksBinary(std::string_view bytes) {
-    const std::size_t probe = std::min(bytes.size(), kBinaryProbeBytes);
-    if (probe == 0) {
-        return false;
-    }
-    std::size_t suspicious = 0;
-    for (std::size_t i = 0; i < probe; ++i) {
-        const unsigned char ch = static_cast<unsigned char>(bytes[i]);
-        if (ch == 0) {
-            return true;
-        }
-        if (ch < 0x09 || (ch > 0x0D && ch < 0x20)) {
-            ++suspicious;
-        }
-    }
-    return suspicious * 100 > probe * 30;
 }
 
 }  // namespace
@@ -107,7 +87,7 @@ bool PrepareFile(const std::wstring& path, const SearchConfig& config, PreparedF
     out.fileSize = read.size;
     QueryFileIdentity(path, out.fileSize, out.lastWriteMs);
 
-    if (config.skipBinary && LooksBinary(read.bytes)) {
+    if (config.skipBinary && edit::LooksBinaryContent(read.bytes)) {
         out.binary = true;
         return false;
     }

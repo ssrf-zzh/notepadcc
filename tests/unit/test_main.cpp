@@ -284,6 +284,23 @@ int main() {
     Check(!npcc::edit::IsValidUtf8("\xE4\xB8"), "截断的多字节序列应判为非法");
     Check(!npcc::edit::IsValidUtf8("\xED\xA0\x80"), "UTF-16 代理区码点应判为非法");
 
+    Section("LooksBinaryContent");
+    Check(!npcc::edit::LooksBinaryContent(""), "空内容不算二进制");
+    Check(!npcc::edit::LooksBinaryContent("plain text\r\nwith\ttabs\n"), "纯文本不算二进制");
+    Check(!npcc::edit::LooksBinaryContent("中文内容，标点也算。\n"), "UTF-8 中文不算二进制");
+    Check(npcc::edit::LooksBinaryContent(std::string("MZ\x90\x00\x03", 5)), "NUL 一票否决");
+    Check(npcc::edit::LooksBinaryContent(std::string("\x01\x02\x03\x04\x05\x06\x07\x08", 8)),
+          "控制字符占多数算二进制");
+    Check(npcc::edit::LooksBinaryContent(std::string("\x01\x02\x03\x04" "abcdef", 10)),
+          "控制字符超过三成算二进制");
+    Check(!npcc::edit::LooksBinaryContent(std::string("\x01\x02\x03" "abcdefg", 10)),
+          "控制字符不到三成仍算文本");
+    {
+        std::string big(8 * 1024, 'a');
+        big += std::string("\x00\x00", 2);
+        Check(!npcc::edit::LooksBinaryContent(big), "只看开头 8 KB：更靠后的 NUL 不影响");
+    }
+
     Section("DetectEol / NormalizeEol");
     Check(npcc::edit::DetectEol("a\r\nb\r\n") == npcc::edit::EolMode::Crlf, "CRLF 识别");
     Check(npcc::edit::DetectEol("a\nb\n") == npcc::edit::EolMode::Lf, "LF 识别");
@@ -3949,6 +3966,37 @@ int main() {
             Check(!UrlDecode("a%2", out), "百分号后面不足两位要拒绝");
             Check(!UrlDecode("a%zz", out), "百分号后面不是十六进制要拒绝");
             Check(UrlDecode("a+b", out) && out == "a+b", "'+' 保持原样（不做表单式转换）");
+        }
+
+        // Quoted-Printable：标准向量、软换行、行尾空白、非法输入与往返
+        {
+            std::string out;
+            Check(QuotedPrintableEncode("hello world\r\n") == "hello world\r\n",
+                  "可打印字符与硬换行原样");
+            Check(QuotedPrintableEncode("\xE4\xB8\xAD") == "=E4=B8=AD", "非 ASCII 编成 =XX 大写");
+            Check(QuotedPrintableEncode("a=b") == "a=3Db", "'=' 必须编码");
+            Check(QuotedPrintableEncode("trail \nnext") == "trail=20\nnext", "行尾空格要编码");
+            Check(QuotedPrintableEncode("in line\nnext") == "in line\nnext",
+                  "不在行尾的空格保持原样");
+            Check(QuotedPrintableEncode(std::string(75, 'a') + "b") ==
+                      std::string(75, 'a') + "=\r\nb",
+                  "第 76 列起用软换行");
+            const std::string many = QuotedPrintableEncode(std::string(100, '\x01'));
+            Check(many.find("=\r\n") != std::string::npos, "=XX 攒满一行也会软换行");
+            Check(QuotedPrintableDecode(many, out) && out == std::string(100, '\x01'),
+                  "长内容编码后解码往返");
+            Check(QuotedPrintableDecode("hello=20world", out) && out == "hello world",
+                  "解码 =20");
+            Check(QuotedPrintableDecode("soft=\r\nbreak", out) && out == "softbreak",
+                  "软换行接回同一行");
+            Check(QuotedPrintableDecode("soft=\nbreak", out) && out == "softbreak",
+                  "=LF 软换行也认");
+            const std::string roundTrip = "中文 mixed = text \r\nline two";
+            Check(QuotedPrintableDecode(QuotedPrintableEncode(roundTrip), out) &&
+                      out == roundTrip,
+                  "编码后解码是往返的");
+            Check(!QuotedPrintableDecode("a=zz", out), "= 后面不是十六进制要拒绝");
+            Check(!QuotedPrintableDecode("tail=", out), "结尾孤立的 = 要拒绝");
         }
 
         // HTML 实体：转义与还原、数字实体、不认识的实体原样保留

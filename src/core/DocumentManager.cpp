@@ -159,6 +159,10 @@ OpenOutcome DocumentManager::Open(const std::wstring& path) {
                std::to_wstring(added->buffer.lastKnown.size / 1024) + L" KB）";
     }
     infra::LogInfo(L"file", log);
+    if (!added->buffer.loadWarning.empty()) {
+        // 提示也留一份在日志里：状态栏那行是瞬时的，日志才是"当时提醒了什么"的底档
+        infra::LogInfo(L"file", L"打开提示: " + added->buffer.loadWarning);
+    }
     outcome.document = added;
     outcome.status = OpenStatus::Ok;
     return outcome;
@@ -208,6 +212,17 @@ bool DocumentManager::LoadInto(edit::Document& document, std::wstring& error,
         document.buffer.eol = loaded.eol;
         document.buffer.detectedEol = loaded.eol;
         document.buffer.loadWarning = loaded.warning;
+        // 二进制内容（前 8 KB 里有 NUL 或大量控制字符）照样打开，但要给个说法：
+        // 更合适的是十六进制视图。UTF-16 文本天然带 NUL，已经按编码认出来的就不算
+        const bool utf16Text = loaded.encoding.uniMode == edit::UniMode::Utf16LE ||
+                               loaded.encoding.uniMode == edit::UniMode::Utf16BE;
+        if (!utf16Text && edit::LooksBinaryContent(read.bytes)) {
+            const std::wstring hint =
+                L"这看起来是二进制文件，建议用「视图 → 十六进制查看（只读）」核对字节。";
+            document.buffer.loadWarning = document.buffer.loadWarning.empty()
+                                              ? hint
+                                              : document.buffer.loadWarning + L" " + hint;
+        }
         loadedBytes = loaded.editorBytes;
     } else {
         if (!mapped.Open(target)) {
@@ -232,9 +247,13 @@ bool DocumentManager::LoadInto(edit::Document& document, std::wstring& error,
         document.buffer.encoding = encoding;
         document.buffer.eol = edit::DetectEol(head);
         document.buffer.detectedEol = document.buffer.eol;
-        document.buffer.loadWarning = (tier == edit::FileTier::Huge)
-                                          ? L"文件较大，已以只读方式打开。"
-                                          : L"文件较大，已进入大文件模式。";
+        std::wstring warningText = (tier == edit::FileTier::Huge)
+                                       ? L"文件较大，已以只读方式打开。"
+                                       : L"文件较大，已进入大文件模式。";
+        if (edit::LooksBinaryContent(head)) {
+            warningText += L"这看起来是二进制文件，建议用「视图 → 十六进制查看（只读）」核对字节。";
+        }
+        document.buffer.loadWarning = std::move(warningText);
     }
 
     edit::EditView& view = *document.view;

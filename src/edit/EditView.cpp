@@ -169,9 +169,18 @@ void EditView::SetEolMode(EolMode eol) const {
 }
 
 void EditView::SetText(std::string_view bytes) const {
-    // SCI_SETTEXT 要求 NUL 结尾，string_view 不保证，必须复制一份
-    const std::string owned(bytes);
-    Send(SCI_SETTEXT, 0, reinterpret_cast<intptr_t>(owned.c_str()));
+    // SCI_SETTEXT 内部按 strlen 走、遇到 NUL 就断：二进制文件里的 NUL 是普通字节，
+    // 被"截断"之后保存就会丢数据。改用带长度的 SCI_ADDTEXT（先清空再装）。
+    Send(SCI_CLEARALL);
+    if (!bytes.empty()) {
+        // Scintilla 会把内容拷进自己的文档模型，这个临时缓冲用完即弃
+        const std::string owned(bytes);
+        Send(SCI_ADDTEXT, static_cast<uintptr_t>(owned.size()),
+             reinterpret_cast<intptr_t>(owned.data()));
+    }
+    // ADDTEXT 会把光标停到插入内容之后（旧 SCI_SETTEXT 没这一步），装完归位到 0：
+    // 光标位置会被"跳到第几行""十六进制视图联动滚到光标字节"读走，停在文末是错的
+    Send(SCI_GOTOPOS, 0);
 }
 
 std::string EditView::WordAtCaret() const {

@@ -185,6 +185,8 @@ enum : npcc::core::CmdId {
     kCmdToolExportLangPack  = npcc::core::MakeCmdId(14, 35),
     kCmdToolCompareDocument = npcc::core::MakeCmdId(14, 36),
     kCmdToolCompareDisk     = npcc::core::MakeCmdId(14, 37),
+    kCmdToolQuotedPrintableEncode = npcc::core::MakeCmdId(14, 38),
+    kCmdToolQuotedPrintableDecode = npcc::core::MakeCmdId(14, 39),
     // 运行类（9）：第 1 号是 F5 那个对话框，第 kRunCommandBase 号起是用户存的命令
     kCmdRunDialog           = npcc::core::MakeCmdId(9, npcc::core::kRunCommandDialogIndex),
     kCmdEditAutoComplete = npcc::core::MakeCmdId(2, 33),
@@ -502,6 +504,9 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             // 答复之前不许写快照，否则会把上一轮没来得及恢复的内容直接覆盖掉。
             recoveryPending_ = true;
             ::PostMessageW(hwnd_, core::kMsgStartupRecovery, 0, 0);
+            // 打开提示（二进制、混合行尾、大文件档）同理：WM_CREATE 里设了也会被
+            // 随后的激活流程（行/列刷新）冲掉，等窗口出来再露面
+            ::PostMessageW(hwnd_, core::kMsgStartupNotice, 0, 0);
             return 0;
         }
         case WM_SIZE:
@@ -727,6 +732,9 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
         case core::kMsgStartupRecovery:
             CheckStartupRecovery();
             return 0;
+        case core::kMsgStartupNotice:
+            AnnounceActiveLoadWarning();
+            return 0;
         case core::kMsgOpenFiles: {
             // 别的实例把文件交过来了（或者刚启动时被双击了文件）
             const std::vector<std::wstring> pending = infra::TakePendingFiles();
@@ -803,6 +811,7 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             ::DragFinish(drop);
             SyncTabBar();
             ActivateDocument(documents_->Active() != nullptr ? documents_->Active()->buffer.id : 0);
+            AnnounceActiveLoadWarning();
             return 0;
         }
         case WM_CLOSE: {
@@ -1239,11 +1248,18 @@ void MainWindow::RegisterCommands() {
     addTool(kCmdToolUrlEncode, L"cmd.tool.urlEncode", L"URL 编码",
             [](std::string_view text, std::uint32_t) { return edit::UrlEncode(text); });
     add(kCmdToolUrlDecode, CmdCategory::Tools, L"cmd.tool.urlDecode", L"URL 解码",
-        needsWritable, [this](const CmdContext&) { CommandDecodeText(false); });
+        needsWritable, [this](const CmdContext&) { CommandDecodeText(TextDecodeKind::Url); });
     addTool(kCmdToolBase64Encode, L"cmd.tool.base64Encode", L"Base64 编码",
             [](std::string_view text, std::uint32_t) { return edit::Base64Encode(text); });
     add(kCmdToolBase64Decode, CmdCategory::Tools, L"cmd.tool.base64Decode", L"Base64 解码",
-        needsWritable, [this](const CmdContext&) { CommandDecodeText(true); });
+        needsWritable, [this](const CmdContext&) { CommandDecodeText(TextDecodeKind::Base64); });
+    addTool(kCmdToolQuotedPrintableEncode, L"cmd.tool.qpEncode", L"Quoted-Printable 编码",
+            [](std::string_view text, std::uint32_t) {
+                return edit::QuotedPrintableEncode(text);
+            });
+    add(kCmdToolQuotedPrintableDecode, CmdCategory::Tools, L"cmd.tool.qpDecode",
+        L"Quoted-Printable 解码", needsWritable,
+        [this](const CmdContext&) { CommandDecodeText(TextDecodeKind::QuotedPrintable); });
     addTool(kCmdToolHtmlEscape, L"cmd.tool.htmlEscape", L"HTML 实体转义",
             [](std::string_view text, std::uint32_t) { return edit::EscapeHtml(text); });
     addTool(kCmdToolHtmlUnescape, L"cmd.tool.htmlUnescape", L"HTML 实体还原",
@@ -2490,6 +2506,7 @@ void MainWindow::CommandOpen() {
 
     SyncTabBar();
     ActivateDocument(documents_->Active() != nullptr ? documents_->Active()->buffer.id : 0);
+    AnnounceActiveLoadWarning();
 }
 
 bool MainWindow::CommandSave() {
@@ -2756,6 +2773,10 @@ void MainWindow::CheckActiveDocumentForExternalChange(io::FileChangeKind kind) {
         infra::LogInfo(L"watch", L"兜底检查：文件身份未变，跳过: " + document->buffer.filePath);
         return;
     }
+    if (externalChangePromptOpen_) {
+        // 上一个确认框还开着（关框时焦点回来会再次走到这里），不要叠第二个
+        return;
+    }
     infra::LogInfo(L"watch", L"兜底检查：确认外部改动，准备询问用户: " +
                                 document->buffer.filePath);
 
@@ -2766,8 +2787,10 @@ void MainWindow::CheckActiveDocumentForExternalChange(io::FileChangeKind kind) {
         L"· 选择「是」重新加载磁盘上的最新内容（编辑器里未保存的改动会丢失）；\n"
         L"· 选择「否」保留当前编辑的内容，之后保存会覆盖磁盘上的版本。\n\n"
         L"是否重新加载？";
+    externalChangePromptOpen_ = true;
     const int answer = ::MessageBoxW(hwnd_, question.c_str(), L"文件已被外部修改",
                                      MB_ICONWARNING | MB_YESNO);
+    externalChangePromptOpen_ = false;
     if (answer == IDYES) {
         std::wstring error;
         if (!documents_->Reload(*document, error)) {
@@ -4424,6 +4447,20 @@ void MainWindow::RefreshJsonTree() {
     jsonTreePanel_.SetJson(document->view->GetAllText());
 }
 
+// 打开之后留下的提示在状态栏露面一次（DocumentManager 只负责把它写进
+// buffer.loadWarning；以前没有任何地方读它，等于白写）。日志里另有一份底档，
+// 见 DocumentManager::Open。
+void MainWindow::AnnounceActiveLoadWarning() {
+    if (documents_ == nullptr) {
+        return;
+    }
+    const edit::Document* document = documents_->Active();
+    if (document == nullptr || document->buffer.loadWarning.empty()) {
+        return;
+    }
+    statusBar_.SetMessage(document->buffer.loadWarning);
+}
+
 bool MainWindow::OpenDocumentPath(const std::wstring& path) {
     const core::OpenOutcome outcome = documents_->Open(path);
     if (outcome.status != core::OpenStatus::Ok &&
@@ -4437,6 +4474,7 @@ bool MainWindow::OpenDocumentPath(const std::wstring& path) {
     if (edit::Document* document = documents_->Active(); document != nullptr) {
         ActivateDocument(document->buffer.id);
     }
+    AnnounceActiveLoadWarning();
     return true;
 }
 
@@ -5278,7 +5316,7 @@ void MainWindow::CommandExportUdlSample() {
         L"UDL 示例", MB_ICONINFORMATION);
 }
 
-void MainWindow::CommandDecodeText(bool base64) {
+void MainWindow::CommandDecodeText(TextDecodeKind kind) {
     edit::Document* document = ActiveDocument();
     if (document == nullptr || document->view == nullptr) {
         return;
@@ -5298,24 +5336,37 @@ void MainWindow::CommandDecodeText(bool base64) {
         document->view->SelectionStart() == document->view->SelectionEnd()
             ? document->view->ByteLength()
             : std::max(document->view->SelectionStart(), document->view->SelectionEnd()));
-    const bool ok = base64 ? edit::Base64Decode(original, decoded) : edit::UrlDecode(original, decoded);
-    if (!ok) {
-        ::MessageBoxW(hwnd_, base64
-                                 ? L"选中的内容不是合法的 Base64（长度必须是 4 的倍数，"
-                                   L"且只含 A–Z a–z 0–9 + / 与结尾的 =）。"
-                                 : L"选中的内容里有不完整的百分号转义（% 后面要跟两位十六进制）。",
-                      L"无法解码", MB_ICONWARNING);
+    const auto decode = [kind](std::string_view text, std::string& out) {
+        switch (kind) {
+            case TextDecodeKind::Base64: return edit::Base64Decode(text, out);
+            case TextDecodeKind::QuotedPrintable: return edit::QuotedPrintableDecode(text, out);
+            case TextDecodeKind::Url:
+            default: return edit::UrlDecode(text, out);
+        }
+    };
+    if (!decode(original, decoded)) {
+        const wchar_t* reason =
+            kind == TextDecodeKind::Base64
+                ? L"选中的内容不是合法的 Base64（长度必须是 4 的倍数，"
+                  L"且只含 A–Z a–z 0–9 + / 与结尾的 =）。"
+            : kind == TextDecodeKind::QuotedPrintable
+                ? L"选中的内容里有不完整的 Quoted-Printable 转义"
+                  L"（= 后面要跟两位十六进制，或者紧挨着行尾换行）。"
+                : L"选中的内容里有不完整的百分号转义（% 后面要跟两位十六进制）。";
+        ::MessageBoxW(hwnd_, reason, L"无法解码", MB_ICONWARNING);
         return;
     }
     ApplyTextTool(
-        [base64](std::string_view text, std::uint32_t) {
+        [decode](std::string_view text, std::uint32_t) {
             std::string out;
-            if (base64 ? edit::Base64Decode(text, out) : edit::UrlDecode(text, out)) {
+            if (decode(text, out)) {
                 return out;
             }
             return std::string(text);   // 上面已经检过一次，这里只是兜底：原样返回等于"没有变化"
         },
-        base64 ? L"Base64 解码" : L"URL 解码");
+        kind == TextDecodeKind::Base64           ? L"Base64 解码"
+        : kind == TextDecodeKind::QuotedPrintable ? L"Quoted-Printable 解码"
+                                                  : L"URL 解码");
 }
 
 // JSON / XML 格式化（设计文档 2.13）。

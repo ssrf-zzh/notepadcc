@@ -123,6 +123,8 @@ std::vector<LangPack> MakeBuiltin() {
         Entry(L"cmd.tool.urlDecode", L"URL Decode"),
         Entry(L"cmd.tool.base64Encode", L"Base64 Encode"),
         Entry(L"cmd.tool.base64Decode", L"Base64 Decode"),
+        Entry(L"cmd.tool.qpEncode", L"Quoted-Printable Encode"),
+        Entry(L"cmd.tool.qpDecode", L"Quoted-Printable Decode"),
         Entry(L"cmd.tool.htmlEscape", L"Escape HTML Entities"),
         Entry(L"cmd.tool.htmlUnescape", L"Unescape HTML Entities"),
         // ---- 工具：注释与结构化数据 ----

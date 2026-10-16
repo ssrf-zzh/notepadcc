@@ -91,6 +91,25 @@ const wchar_t* CodePageShortName(uint32_t codePage) {
 
 }  // namespace
 
+bool LooksBinaryContent(std::string_view bytes) {
+    constexpr std::size_t kProbeBytes = 8 * 1024;
+    const std::size_t probe = bytes.size() < kProbeBytes ? bytes.size() : kProbeBytes;
+    if (probe == 0) {
+        return false;
+    }
+    std::size_t suspicious = 0;
+    for (std::size_t i = 0; i < probe; ++i) {
+        const unsigned char ch = static_cast<unsigned char>(bytes[i]);
+        if (ch == 0) {
+            return true;   // NUL 一票否决：文本文件里没有它
+        }
+        if (ch < 0x09 || (ch > 0x0D && ch < 0x20)) {
+            ++suspicious;
+        }
+    }
+    return suspicious * 100 > probe * 30;
+}
+
 bool IsValidUtf8(std::string_view bytes) {
     size_t i = 0;
     while (i < bytes.size()) {

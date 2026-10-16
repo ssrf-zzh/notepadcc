@@ -47,6 +47,10 @@ EncodingState DetectEncodingFromHead(std::string_view head, uint32_t fallbackCod
 std::string EncodeForSave(std::string_view editorBytes, const EncodingState& state);
 
 bool IsValidUtf8(std::string_view bytes);
+// 二进制内容判定（看开头最多 8 KB）：出现 NUL 字节，或控制字符（\t\n\v\f\r 除外）
+// 占比超过 30%。"在文件中查找"跳过二进制与打开文件时的"要不要用十六进制看"
+// 共用这一处判定——阈值只写一遍，两边才不会慢慢跑偏
+bool LooksBinaryContent(std::string_view bytes);
 EolMode DetectEol(std::string_view bytes);
 std::string NormalizeEol(std::string_view bytes, EolMode target);
 

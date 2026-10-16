@@ -64,6 +64,11 @@ bool Base64Decode(std::string_view text, std::string& out);
 // 只对"未保留字符"之外做百分号编码；解码只认 %XX（'+' 保持原样，不做表单式转换）
 std::string UrlEncode(std::string_view text);
 bool UrlDecode(std::string_view text, std::string& out);
+// Quoted-Printable（RFC 2045，MIME 邮件正文就是这种编码）：非可打印字节编成 =XX（大写），
+// 行宽 76 列、超了在行尾放一个 '=' 软换行（=\r\n）；行尾的空格/制表符必须编码。
+std::string QuotedPrintableEncode(std::string_view text);
+// 只认 =XX 与软换行（=\r\n 或 =\n）；非法序列返回 false，不改动 out
+bool QuotedPrintableDecode(std::string_view text, std::string& out);
 std::string EscapeHtml(std::string_view text);
 std::string UnescapeHtml(std::string_view text);
 

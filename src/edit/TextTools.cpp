@@ -574,6 +574,85 @@ bool UrlDecode(std::string_view text, std::string& out) {
     return true;
 }
 
+std::string QuotedPrintableEncode(std::string_view text) {
+    // RFC 2045：一行最多 76 字符（不含 CRLF）。软换行占掉一个 '='，所以内容攒到
+    // 75 列就得断行；=XX 是 3 个字符宽，放不下时整个挪到下一行。
+    constexpr std::size_t kMaxContent = 75;
+    static const char* hex = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(text.size() + text.size() / 60 * 3);
+    std::size_t lineLength = 0;
+
+    const auto softBreak = [&out, &lineLength]() {
+        out += "=\r\n";
+        lineLength = 0;
+    };
+    const auto encodeByte = [&](unsigned char byte) {
+        if (lineLength + 3 > kMaxContent) {
+            softBreak();
+        }
+        out.push_back('=');
+        out.push_back(hex[(byte >> 4) & 0xF]);
+        out.push_back(hex[byte & 0xF]);
+        lineLength += 3;
+    };
+
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const unsigned char byte = static_cast<unsigned char>(text[i]);
+        if (byte == '\r' || byte == '\n') {
+            // 硬换行保持原样（CRLF 两个字节一起搬），但行宽从头数
+            out.push_back(text[i]);
+            if (byte == '\r' && i + 1 < text.size() && text[i + 1] == '\n') {
+                out.push_back('\n');
+                ++i;
+            }
+            lineLength = 0;
+            continue;
+        }
+        // 行尾的空格/制表符必须编码：运输环节会悄悄抹掉行尾空白，正文就变样了
+        const bool atLineEnd =
+            i + 1 == text.size() || text[i + 1] == '\r' || text[i + 1] == '\n';
+        const bool literal = (byte >= 33 && byte <= 126 && byte != '=') ||
+                             ((byte == ' ' || byte == '\t') && !atLineEnd);
+        if (literal) {
+            if (lineLength + 1 > kMaxContent) {
+                softBreak();
+            }
+            out.push_back(text[i]);
+            ++lineLength;
+        } else {
+            encodeByte(byte);
+        }
+    }
+    return out;
+}
+
+bool QuotedPrintableDecode(std::string_view text, std::string& out) {
+    std::string decoded;
+    decoded.reserve(text.size());
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] != '=') {
+            decoded.push_back(text[i]);
+            continue;
+        }
+        if (i + 1 < text.size() && text[i + 1] == '\n') {
+            ++i;   // 软换行（有的编码器只写 =\n）：这一对换行是排版，不是内容
+            continue;
+        }
+        if (i + 2 < text.size() && text[i + 1] == '\r' && text[i + 2] == '\n') {
+            i += 2;
+            continue;
+        }
+        if (i + 2 >= text.size() || !IsHexDigit(text[i + 1]) || !IsHexDigit(text[i + 2])) {
+            return false;   // '=' 后面既不是软换行也不是两位十六进制：宁可报错，也不要猜
+        }
+        decoded.push_back(static_cast<char>((HexValue(text[i + 1]) << 4) | HexValue(text[i + 2])));
+        i += 2;
+    }
+    out = std::move(decoded);
+    return true;
+}
+
 namespace {
 
 bool IsWordStart(char ch) {

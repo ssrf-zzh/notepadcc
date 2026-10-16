@@ -136,7 +136,10 @@ private:
     void ApplyTextTool(
         const std::function<std::string(std::string_view, std::uint32_t)>& tool,
         const wchar_t* description);
-    void CommandDecodeText(bool base64);
+    // 文本解码的三种来源（URL 百分号 / Base64 / Quoted-Printable）：共用一条
+    // "先校验、失败讲清楚、成功走 ApplyTextTool"的路径
+    enum class TextDecodeKind { Url, Base64, QuotedPrintable };
+    void CommandDecodeText(TextDecodeKind kind);
     void CommandToggleComment(bool block);
     // JSON / XML 格式化（设计文档 2.13）。这两件事会失败（内容不合法），
     // 所以不能走 ApplyTextTool 那条"永不失败"的入口：先试一次，失败只弹说明。
@@ -263,6 +266,8 @@ private:
                               std::vector<core::FunctionSymbol> symbols);
     // 打开一个具体路径（工作区双击、单实例转交都用它，免得两处各写一遍）
     bool OpenDocumentPath(const std::wstring& path);
+    // 打开后留在 loadWarning 里的提示（二进制内容、混合行尾、大文件档）在状态栏露面一次
+    void AnnounceActiveLoadWarning();
     void ApplyStyleSchemeToAllViews();
     void CommandAutoComplete();
     const edit::LanguageDef* ActiveLanguage() const;
@@ -316,6 +321,10 @@ private:
     };
     std::vector<SnapshotState> snapshotStates_;
     bool recoveryPending_ = false;
+    // "文件已被外部修改"确认框开着的时候，兜底检查不要再叠第二个：
+    // 关框时焦点回到主窗口会同步触发 WM_SETFOCUS → 兜底检查，而那一刻
+    // 磁盘身份还没刷新（重新加载/保留内容还没执行），第二次询问就会冒出来
+    bool externalChangePromptOpen_ = false;
     bool crashTest_ = false;
     std::unique_ptr<core::DocumentManager> documents_;
     TabBar                     tabBar_;

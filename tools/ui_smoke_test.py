@@ -7,6 +7,7 @@
 import ctypes
 import base64
 import os
+import quopri
 import shutil
 import subprocess
 import sys
@@ -178,6 +179,8 @@ CMD_TOOL_REMOVE_DUP_FIRST = (14 << 12) | 12
 CMD_TOOL_UPPERCASE = (14 << 12) | 19
 CMD_TOOL_BASE64_ENCODE = (14 << 12) | 23
 CMD_TOOL_BASE64_DECODE = (14 << 12) | 24
+CMD_TOOL_QP_ENCODE = (14 << 12) | 38
+CMD_TOOL_QP_DECODE = (14 << 12) | 39
 CMD_TOOL_TOGGLE_COMMENT = (14 << 12) | 27
 CMD_TOOL_BLOCK_COMMENT = (14 << 12) | 28
 CMD_TOOL_EXPORT_LANGS = (14 << 12) | 29
@@ -2848,6 +2851,156 @@ def test_tools_menu(root):
     return True
 
 
+def test_mime_binary(root):
+    """文件类型识别与 MIME 工具。
+
+    二进制：打开一个开头就有 NUL 的文件，提示要出现在状态栏与日志里，而且内容
+    整份装进编辑控件、不被 NUL "截断"（被截断的话，一次保存就等于丢数据）。
+    Quoted-Printable：与 Python 标准库 quopri 互为参照——两边各自编码、交对方解码，
+    必须逐字节等于原文；非法转义要弹说明并且一个字节都不动。
+    """
+    work = os.path.join(root, "build", "mime_test")
+    os.makedirs(work, exist_ok=True)
+    cfg = os.path.join(root, "build", "bin", "config")
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+
+    def clean_config():
+        for name in ("config.xml", "session.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    # ---- 一、二进制识别：NUL 开头的文件要提示"更该用十六进制看" ----
+    blob = os.path.join(work, "blob.bin")
+    data = b"MZ\x90\x00\x03" + bytes((index * 7 + 1) & 0xFF for index in range(512))
+    with open(blob, "wb") as handle:
+        handle.write(data)
+    clean_config()
+    log_path = remove_log_with_retry(root)
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", blob], cwd=root)
+    window = wait_for_main_window("notepadcc - blob.bin")
+    try:
+        if not window:
+            print("  FAIL: 找不到打开了 blob.bin 的窗口")
+            return False
+        status = ""
+        deadline = time.time() + 6.0
+        while time.time() < deadline:
+            status = read_status_bar(window) or ""
+            if "二进制" in status:
+                break
+            time.sleep(0.2)
+        if "二进制" not in status or "十六进制" not in status:
+            print(f"  FAIL: 二进制文件的提示没出现在状态栏，实际读到 {status!r}")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到编辑控件")
+            return False
+        length = send_bounded(scinti, SCI_GETLENGTH)
+        if length != len(data):
+            print(f"  FAIL: 二进制内容被截断：控件里 {length} 字节，文件 {len(data)} 字节")
+            return False
+        log_text = ""
+        if os.path.exists(log_path):
+            with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
+                log_text = handle.read()
+        if "打开提示" not in log_text or "二进制" not in log_text:
+            print(f"  FAIL: 日志里没留下二进制提示的底档\n{log_text[-400:]}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    # ---- 二、Quoted-Printable：与标准库 quopri 互为参照 ----
+    original = "中文 mixed = text \r\nline two\r\n" + "长" * 60 + "\r\n"
+    encoded_by_python = quopri.encodestring(original.encode("utf-8")).decode("ascii")
+    qp_path = os.path.join(work, "qp_in.txt")
+    with open(qp_path, "w", encoding="utf-8", newline="") as handle:
+        handle.write(encoded_by_python)
+    clean_config()
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", qp_path], cwd=root)
+    window = wait_for_main_window("notepadcc - qp_in.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到打开了 qp_in.txt 的窗口")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到编辑控件")
+            return False
+        # 1) 程序解 quopri 编出来的内容：应当逐字等于原文（软换行 =\r\n 一并吃掉）
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_QP_DECODE, 0)
+        time.sleep(0.8)
+        decoded = scinti_text(scinti)
+        if decoded != original:
+            print(f"  FAIL: 程序解码 quopri 产物不对\n           实际 {decoded[:80]!r}\n"
+                  f"           期望 {original[:80]!r}")
+            return False
+        # 2) 程序再编码：几个形状必须对，且 quopri 能逐字节解回原文
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_QP_ENCODE, 0)
+        time.sleep(0.8)
+        encoded = scinti_text(scinti)
+        if "=E4=B8=AD" not in encoded:
+            print(f"  FAIL: 非 ASCII 没编成大写 =XX {encoded[:80]!r}")
+            return False
+        if "=3D" not in encoded:
+            print(f"  FAIL: '=' 没编码 {encoded[:80]!r}")
+            return False
+        if " \r\n" in encoded:
+            print("  FAIL: 行尾空格没编码（运输途中会被抹掉）")
+            return False
+        back = quopri.decodestring(encoded.encode("ascii")).decode("utf-8")
+        if back != original:
+            print(f"  FAIL: quopri 把程序编的内容解回来与原文不一致\n"
+                  f"           实际 {back[:80]!r}\n           期望 {original[:80]!r}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    # ---- 三、非法转义：弹说明、内容一个字节都不动 ----
+    broken = os.path.join(work, "qp_broken.txt")
+    with open(broken, "w", encoding="utf-8", newline="") as handle:
+        handle.write("good =41 but broken =zz tail\r\n")
+    clean_config()
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", broken], cwd=root)
+    window = wait_for_main_window("notepadcc - qp_broken.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到打开了 qp_broken.txt 的窗口")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_QP_DECODE, 0)
+        if not dismiss_dialog("无法解码", IDOK, timeout=8.0):
+            print("  FAIL: 非法 Quoted-Printable 应当弹出说明，而不是静默处理")
+            return False
+        time.sleep(0.5)
+        scinti = visible_scintilla(window)
+        if scinti is None or scinti_text(scinti) != "good =41 but broken =zz tail\r\n":
+            print("  FAIL: 解码失败之后内容不该被改动")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        clean_config()
+
+    print("  文件类型识别与 MIME 工具：二进制提示进状态栏与日志（内容不被 NUL 截断），"
+          "Quoted-Printable 与 quopri 双向逐字节一致，非法转义被挡下")
+    return True
+
+
 def test_portable_package(root):
     """绿色发行：打包 → 解压 → 直接运行，核对"解压即用"与"只写程序目录"。
 
@@ -4156,6 +4309,8 @@ def run():
         failed = True
     if not test_tools_menu(root):
         failed = True
+    if not test_mime_binary(root):
+        failed = True
     if not test_language_defs(root):
         failed = True
     if not test_style_scheme(root):
@@ -4212,7 +4367,7 @@ def run():
           "宏 + 文件夹工作区 + 函数列表 + 导出与打印 + 插件宿主 + JSON/XML 格式化 + "
           "运行命令 + 界面语言 + 十六进制查看 + 复制为富文本 + Markdown 预览 + 对话框文案 + "
           "比较 + JSON 树视图 + 括号匹配与摘要与全屏 + 工具栏 + 自动完成 + 文件关联 + "
-          "绿色打包）")
+          "文件类型识别与 MIME 工具 + 绿色打包）")
     return 0
 
 
