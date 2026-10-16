@@ -55,8 +55,8 @@ public:
 
     bool Create(HWND parent, int controlId);
     void Destroy();
-    // 主窗口销毁后子窗口句柄随之失效，此时只清空记录，不再调用 DestroyWindow
-    void Detach() noexcept { hwnd_ = nullptr; }
+    // 主窗口销毁后子窗口句柄随之失效，此时只清记录与子类化，不再调用 DestroyWindow
+    void Detach() noexcept;
     void SetVisible(bool visible) const;
     void Resize(const RECT& client) const;
 
@@ -348,7 +348,14 @@ public:
     uint32_t CodePage() const;   // 65001 表示缓冲区按 UTF-8 解释
 
 private:
+    // 子类化 Scintilla：目前只为一个目的——把 WM_CONTEXTMENU 拦住（Scintilla
+    // 自带的是英文硬编码菜单）。归一成屏幕坐标后转给父窗口，外壳弹自己的菜单。
+    static LRESULT CALLBACK SubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+    LRESULT HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+    void RestoreSubclass();
+
     HWND hwnd_ = nullptr;
+    WNDPROC originalProc_ = nullptr;   // 子类化前的窗口过程；空 = 没装上
     mutable const wchar_t* languageName_ = L"普通文本";
     mutable std::wstring   languageKey_ = L"null";   // 语言定义里的稳定标识，供注释等按语言的功能使用
     mutable bool           foldingEnabled_ = false;

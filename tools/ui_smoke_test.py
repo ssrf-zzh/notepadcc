@@ -349,6 +349,15 @@ TB_DLG_CURRENT = 1603                # 对话框里"现在的按钮"那个列表
 TB_MSG_ITEM_COUNT = 0x8000 + 60      # ToolBar::kMsgItemCount
 TB_MSG_ITEM_CENTER_X = 0x8000 + 61   # ToolBar::kMsgItemCenterX
 
+# ---- 右键菜单定制（M3 第九块）----
+CMD_SETTINGS_CONTEXT_MENU = (7 << 12) | 7     # 设置 → 自定义右键菜单…
+CONTEXTMENU_DIALOG_CLASS = "notepadccContextMenuCustomize"
+POPUP_MENU_CLASS = "#32768"                   # TrackPopupMenu 弹出的菜单窗口类
+MN_GETHMENU = 0x01E1                          # 向菜单窗口要 HMENU（菜单是内核对象，跨进程可用）
+WM_CONTEXTMENU = 0x007B
+VK_DOWN = 0x28
+VK_RETURN = 0x0D
+
 # ---- 状态栏（系统控件 msctls_statusbar32）----
 STATUS_CLASS = "msctls_statusbar32"
 SB_GETTEXTLENGTHW = 0x040C            # WM_USER + 12
@@ -4489,6 +4498,8 @@ def run():
         failed = True
     if not test_toolbar(root):
         failed = True
+    if not test_context_menu(root):
+        failed = True
     if not test_auto_complete(root):
         failed = True
     if not test_associated_commands(root):
@@ -4504,7 +4515,8 @@ def run():
           "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + UDL + 暗色模式 + "
           "宏 + 文件夹工作区 + 函数列表 + 导出与打印 + 插件宿主 + JSON/XML 格式化 + "
           "运行命令 + 界面语言 + 十六进制查看 + 复制为富文本 + Markdown 预览 + 对话框文案 + "
-          "比较 + JSON 树视图 + 括号匹配与摘要与全屏 + 工具栏 + 自动完成 + 文件关联 + "
+          "比较 + JSON 树视图 + 括号匹配与摘要与全屏 + 工具栏 + 右键菜单定制 + 自动完成 + "
+          "文件关联 + "
           "文件类型识别与 MIME 工具 + 护眼模式 + XML 树视图与校验 + XPath 查询 + 绿色打包）")
     return 0
 
@@ -5778,6 +5790,461 @@ def test_toolbar(root):
           "（暗色）真的切换并显示勾选、菜单项勾选态跟着命令状态走、关掉后"
           "config.xml 记下 visible=no、定制对话框删按钮后界面与配置一起变、"
           "恢复默认又回到代码里那份表")
+    return True
+
+
+def test_context_menu(root):
+    """右键菜单深度定制（M3 第九块）：弹出的是我们自己的菜单、项表由配置驱动、
+    定制对话框改得动表，改动落盘并在重启后仍然生效。
+
+    端到端链路比“命令发出去了”深一层：给编辑控件真的发一条 WM_CONTEXTMENU
+    （与用户按右键同一条路：EditView 拦下 Scintilla 自带的英文菜单转给外壳）→
+    真的弹出 TrackPopupMenu → 从菜单窗口（#32768）把 HMENU 要回来逐项核对
+    （菜单是内核对象，GetMenuStringW 跨进程可用）→ 给菜单窗口投 Down/Enter 按键，
+    真的选中并执行一条命令（「全选」，用 Scintilla 选区核对执行结果）→ Esc 关掉。
+    """
+    work = os.path.join(root, "build", "contextmenu_test")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    cfg = os.path.join(root, "build", "bin", "config")
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+
+    path = os.path.join(work, "a.txt")
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write("one\ntwo\nthree\n")
+
+    for name in ("config.xml", "session.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+    remove_log_with_retry(root)
+
+    config_path = os.path.join(cfg, "config.xml")
+    # 默认右键菜单项表：None 是分隔符。顺序就是显示顺序，改动默认表要连这里一起改
+    default_items = ["撤销", "重做", None, "剪切", "复制", "粘贴", None, "全选", None,
+                     "注释/取消注释"]
+
+    def read_config():
+        if not os.path.exists(config_path):
+            return ""
+        with open(config_path, "r", encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+
+    def wait_config(predicate, timeout=8.0):
+        # 改动走 SaveNow（立刻写盘）：等它出现，别跟写盘抢跑
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if predicate(read_config()):
+                return True
+            time.sleep(0.2)
+        return False
+
+    def strip_accel(text):
+        # 菜单里的文本是"撤销(&U)"这种形式：& 是加速键下划线，尾部的 (U) 是加速键本身；
+        # 核对的是命令名，两样都去掉
+        text = text.replace("&", "")
+        if len(text) >= 3 and text.endswith(")") and text[-3] == "(":
+            text = text[:-3]
+        return text
+
+    def dialog():
+        return user32.FindWindowW(CONTEXTMENU_DIALOG_CLASS, None)
+
+    def wait_dialog(timeout=8.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            box = dialog()
+            if box:
+                return box
+            time.sleep(0.2)
+        return None
+
+    def wait_dialog_gone(timeout=8.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not dialog():
+                return True
+            time.sleep(0.2)
+        return False
+
+    def close_dialog_if_any():
+        box = dialog()
+        if box:
+            send_bounded(box, WM_CLOSE)
+            time.sleep(0.4)
+
+    def child_with_id(parent, control_id):
+        for child in children(parent):
+            if user32.GetDlgCtrlID(child) == control_id:
+                return child
+        return None
+
+    def click_button(parent, text, timeout=6.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for child in children(parent):
+                if window_text(child) == text:
+                    user32.PostMessageW(child, 0x00F5, 0, 0)   # BM_CLICK，投递不阻塞
+                    return True
+            time.sleep(0.2)
+        return False
+
+    def wait_current_list(box, expected_count, timeout=6.0):
+        """等对话框的“右键菜单里的命令”列表填满到期望的项数。"""
+        deadline = time.time() + timeout
+        current = None
+        while time.time() < deadline:
+            box = dialog()
+            if box:
+                current = child_with_id(box, TB_DLG_CURRENT)
+                if current and send_bounded(current, LB_GETCOUNT) == expected_count:
+                    break
+            time.sleep(0.2)
+        return current
+
+    def popup_window(timeout=5.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            found = user32.FindWindowW(POPUP_MENU_CLASS, None)
+            if found:
+                return found
+            time.sleep(0.1)
+        return None
+
+    def post_contextmenu(window):
+        """给编辑控件投一条 WM_CONTEXTMENU——外壳收到的就是这一类消息。
+
+        必须投递而不是同步发送：外壳要等 TrackPopupMenu 结束才返回，
+        同步发送会把脚本卡在菜单的整个生命周期里。
+        """
+        view = visible_scintilla(window)
+        if not view:
+            return False
+        rect = wintypes.RECT()
+        user32.GetWindowRect(view, ctypes.byref(rect))
+        x = (rect.left + rect.right) // 2
+        y = (rect.top + rect.bottom) // 2
+        user32.PostMessageW(view, WM_CONTEXTMENU, view,
+                            ((y & 0xFFFF) << 16) | (x & 0xFFFF))
+        return True
+
+    def open_popup(window):
+        if not post_contextmenu(window):
+            return None
+        return popup_window()
+
+    def popup_items(menu):
+        """把此刻弹出的菜单逐项读回来（分隔线读出来是空串）。"""
+        hmenu = send_bounded(menu, MN_GETHMENU, 0, 0)
+        if not hmenu:
+            return None
+        out = []
+        for position in range(user32.GetMenuItemCount(hmenu)):
+            buffer = ctypes.create_unicode_buffer(512)
+            user32.GetMenuStringW(hmenu, position, buffer, 512, MF_BYPOSITION)
+            out.append(strip_accel(buffer.value))
+        return out
+
+    def dismiss_popup(menu):
+        """给菜单窗口投一条 Esc（实测 WM_CANCELMODE 不管用、WM_KEYDOWN 管用）。
+
+        菜单关掉之前主线程留在菜单的消息循环里，后面的断言都做不了。
+        """
+        user32.PostMessageW(menu, WM_KEYDOWN, VK_ESCAPE, 0)
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if not user32.FindWindowW(POPUP_MENU_CLASS, None):
+                return True
+            time.sleep(0.1)
+        return False
+
+    def expected_of(items):
+        # 弹出菜单里分隔线的文本读出来是空串
+        return ["" if item is None else item for item in items]
+
+    def launch():
+        proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
+        window = wait_for_main_window("notepadcc - a.txt")
+        return proc, window
+
+    def stop(proc, window):
+        if window and user32.IsWindow(window):
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            deadline = time.time() + 6.0
+            while time.time() < deadline and user32.IsWindow(window):
+                time.sleep(0.2)
+        if proc.poll() is None:
+            proc.kill()
+        time.sleep(0.4)
+
+    proc, window = launch()
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        time.sleep(1.0)
+        view = visible_scintilla(window)
+        if not view:
+            print("  FAIL: 找不到可见的编辑控件")
+            return False
+
+        # ---- 1) 默认菜单：真的弹出来、逐项核对；键盘选中「全选」真的执行 ----
+        send_bounded(view, SCI_GOTOLINE, 2, 0)
+        time.sleep(0.3)
+        menu = open_popup(window)
+        if not menu:
+            print("  FAIL: 发 WM_CONTEXTMENU 之后没有弹出右键菜单（#32768 没出现）")
+            return False
+        items = popup_items(menu)
+        if items != expected_of(default_items):
+            print(f"  FAIL: 默认右键菜单项不对：{items!r}")
+            dismiss_popup(menu)
+            return False
+        # 向下 6 次（箭头键会跳过分隔符）落到「全选」，回车执行
+        for _ in range(6):
+            user32.PostMessageW(menu, WM_KEYDOWN, VK_DOWN, 0)
+            time.sleep(0.15)
+        user32.PostMessageW(menu, WM_KEYDOWN, VK_RETURN, 0)
+        if not dismiss_popup(menu):   # 回车应当已经关掉菜单；这里主要是等它真的关掉
+            print("  FAIL: 回车之后右键菜单没关掉")
+            return False
+        start = end = length = None
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            start = send_bounded(view, SCI_GETSELECTIONSTART)
+            end = send_bounded(view, SCI_GETSELECTIONEND)
+            length = send_bounded(view, SCI_GETLENGTH)
+            if start == 0 and end == length:
+                break
+            time.sleep(0.2)
+        if (start, end, length) != (0, 14, 14):
+            print(f"  FAIL: 从右键菜单选「全选」应当选中整篇，实际选区 {start}..{end}"
+                  f"（长度 {length}）")
+            return False
+
+        # ---- 2) 定制对话框：标题 / 说明 / 项表；取消不改配置 ----
+        user32.PostMessageW(window, WM_COMMAND, CMD_SETTINGS_CONTEXT_MENU, 0)   # 模态框，投递
+        box = wait_dialog()
+        if not box:
+            print("  FAIL: 自定义右键菜单对话框没有出现")
+            return False
+        if user32.IsWindowEnabled(window):
+            print("  FAIL: 对话框应当是模态的（主窗口该被禁用）")
+            close_dialog_if_any()
+            return False
+        if window_text(box) != "自定义右键菜单":
+            print(f"  FAIL: 对话框标题不对：{window_text(box)!r}")
+            close_dialog_if_any()
+            return False
+        texts = dialog_texts(box)
+        for want in ("可用命令（双击加进右键菜单）", "右键菜单里的命令（顺序就是显示顺序）"):
+            if want not in texts:
+                print(f"  FAIL: 对话框里找不到说明文字 {want!r}，实际 {texts!r}")
+                close_dialog_if_any()
+                return False
+        current = wait_current_list(box, len(default_items))
+        available = child_with_id(dialog() or box, TB_DLG_AVAILABLE)
+        if not current or not available:
+            print("  FAIL: 对话框里找不到两个列表（可用命令 / 右键菜单里的命令）")
+            close_dialog_if_any()
+            return False
+        if (send_bounded(available, LB_GETCOUNT) or 0) <= 0:
+            print("  FAIL: 「可用命令」列表不该是空的")
+            close_dialog_if_any()
+            return False
+        if not click_button(dialog() or box, "取消"):
+            print("  FAIL: 对话框里找不到「取消」按钮")
+            close_dialog_if_any()
+            return False
+        if not wait_dialog_gone():
+            print("  FAIL: 点取消之后对话框应当关掉")
+            return False
+        if "<contextmenu" in read_config():
+            print("  FAIL: 取消不该往配置里写 <contextmenu>")
+            return False
+
+        # ---- 3) 删掉「撤销」→ 确定：弹出菜单与配置一起变 ----
+        user32.PostMessageW(window, WM_COMMAND, CMD_SETTINGS_CONTEXT_MENU, 0)
+        box = wait_dialog()
+        if not box:
+            print("  FAIL: 第二次打开自定义对话框失败")
+            return False
+        current = wait_current_list(box, len(default_items))
+        if not current:
+            print("  FAIL: 第二次打开时当前项表没满员")
+            close_dialog_if_any()
+            return False
+        send_bounded(current, LB_SETCURSEL, 0, 0)
+        if not click_button(dialog() or box, "← 移除"):
+            print("  FAIL: 对话框里找不到「← 移除」按钮")
+            close_dialog_if_any()
+            return False
+        deadline = time.time() + 6.0
+        while (time.time() < deadline and
+               send_bounded(current, LB_GETCOUNT) != len(default_items) - 1):
+            time.sleep(0.2)
+        if send_bounded(current, LB_GETCOUNT) != len(default_items) - 1:
+            print("  FAIL: 移除之后当前项表应当少一项")
+            close_dialog_if_any()
+            return False
+        if not click_button(dialog() or box, "确定"):
+            print("  FAIL: 对话框里找不到「确定」按钮")
+            close_dialog_if_any()
+            return False
+        if not wait_dialog_gone():
+            print("  FAIL: 点了确定之后对话框应当关掉")
+            return False
+        if not wait_config(lambda text: "<contextmenu" in text and "cmd.edit.undo" not in text):
+            print(f"  FAIL: 配置里应当只剩改动后的右键菜单项表\n{read_config()[-400:]}")
+            return False
+        after_remove = [item for item in default_items if item != "撤销"]
+        menu = open_popup(window)
+        if not menu:
+            print("  FAIL: 改过配置之后右键菜单没弹出来")
+            return False
+        items = popup_items(menu)
+        if items != expected_of(after_remove):
+            print(f"  FAIL: 删掉「撤销」之后的菜单不对：{items!r}")
+            dismiss_popup(menu)
+            return False
+        if not dismiss_popup(menu):
+            print("  FAIL: 菜单没关掉")
+            return False
+
+        # ---- 4) 重启：配置里的项表仍然生效 ----
+        stop(proc, window)
+        session_path = os.path.join(cfg, "session.xml")
+        if os.path.exists(session_path):
+            os.remove(session_path)
+        proc, window = launch()
+        if not window:
+            print("  FAIL: 重启后找不到主窗口")
+            return False
+        time.sleep(1.0)
+        menu = open_popup(window)
+        if not menu:
+            print("  FAIL: 重启之后右键菜单没弹出来")
+            return False
+        items = popup_items(menu)
+        if items != expected_of(after_remove):
+            print(f"  FAIL: 重启后菜单应当保持删改后的项表：{items!r}")
+            dismiss_popup(menu)
+            return False
+        if not dismiss_popup(menu):
+            print("  FAIL: 菜单没关掉")
+            return False
+
+        # ---- 5) 恢复默认：菜单回到代码里那份表，配置文件里不再留 <contextmenu> ----
+        user32.PostMessageW(window, WM_COMMAND, CMD_SETTINGS_CONTEXT_MENU, 0)
+        box = wait_dialog()
+        if not box:
+            print("  FAIL: 第三次打开自定义对话框失败")
+            return False
+        if not click_button(box, "恢复默认"):
+            print("  FAIL: 对话框里找不到「恢复默认」按钮")
+            close_dialog_if_any()
+            return False
+        if not wait_dialog_gone():
+            print("  FAIL: 点了恢复默认之后对话框应当关掉")
+            return False
+        if not wait_config(lambda text: "<contextmenu" not in text):
+            print(f"  FAIL: 恢复默认之后配置里不该再留 <contextmenu>\n{read_config()[-400:]}")
+            return False
+        menu = open_popup(window)
+        if not menu:
+            print("  FAIL: 恢复默认之后右键菜单没弹出来")
+            return False
+        items = popup_items(menu)
+        if items != expected_of(default_items):
+            print(f"  FAIL: 恢复默认之后菜单应当回到默认项表：{items!r}")
+            dismiss_popup(menu)
+            return False
+        if not dismiss_popup(menu):
+            print("  FAIL: 菜单没关掉")
+            return False
+
+        # ---- 6) 全部删空：右键不弹菜单（配置说了算），配置里记 empty=yes ----
+        user32.PostMessageW(window, WM_COMMAND, CMD_SETTINGS_CONTEXT_MENU, 0)
+        box = wait_dialog()
+        if not box:
+            print("  FAIL: 第四次打开自定义对话框失败")
+            return False
+        current = wait_current_list(box, len(default_items))
+        if not current:
+            print("  FAIL: 第四次打开时当前项表没满员")
+            close_dialog_if_any()
+            return False
+        removed = 0
+        while removed <= len(default_items):
+            if not send_bounded(current, LB_GETCOUNT):
+                break
+            send_bounded(current, LB_SETCURSEL, 0, 0)
+            click_button(dialog() or box, "← 移除")
+            removed += 1
+            time.sleep(0.15)
+        if send_bounded(current, LB_GETCOUNT) != 0:
+            print(f"  FAIL: 没删空，还剩 {send_bounded(current, LB_GETCOUNT)} 项")
+            close_dialog_if_any()
+            return False
+        if not click_button(dialog() or box, "确定"):
+            print("  FAIL: 对话框里找不到「确定」按钮")
+            close_dialog_if_any()
+            return False
+        if not wait_dialog_gone():
+            print("  FAIL: 点了确定之后对话框应当关掉")
+            return False
+        if not wait_config(lambda text: "contextmenu" in text and 'empty="yes"' in text):
+            print(f"  FAIL: 删空之后配置里应当记 empty=yes\n{read_config()[-400:]}")
+            return False
+        if not post_contextmenu(window):
+            print("  FAIL: 找不到可见的编辑控件")
+            return False
+        appeared = None
+        deadline = time.time() + 1.5
+        while time.time() < deadline:
+            appeared = user32.FindWindowW(POPUP_MENU_CLASS, None)
+            if appeared:
+                break
+            time.sleep(0.1)
+        if appeared:
+            print("  FAIL: 项表删空之后右键不该再弹菜单（配置说了算）")
+            dismiss_popup(appeared)
+            return False
+        if send_bounded(window, WM_NULL) is None:
+            print("  FAIL: 不弹菜单不等于卡死：主窗口应当照常响应")
+            return False
+
+        # ---- 7) 再恢复默认收尾：配置干净、菜单回到默认 ----
+        user32.PostMessageW(window, WM_COMMAND, CMD_SETTINGS_CONTEXT_MENU, 0)
+        box = wait_dialog()
+        if not box:
+            print("  FAIL: 第五次打开自定义对话框失败")
+            return False
+        if not click_button(box, "恢复默认"):
+            print("  FAIL: 对话框里找不到「恢复默认」按钮")
+            close_dialog_if_any()
+            return False
+        if not wait_dialog_gone():
+            print("  FAIL: 点了恢复默认之后对话框应当关掉")
+            return False
+        if not wait_config(lambda text: "<contextmenu" not in text):
+            print(f"  FAIL: 收尾时配置里不该再留 <contextmenu>\n{read_config()[-400:]}")
+            return False
+    finally:
+        close_dialog_if_any()
+        leftover = user32.FindWindowW(POPUP_MENU_CLASS, None)
+        if leftover:
+            dismiss_popup(leftover)
+        stop(proc, window)
+        for name in ("config.xml", "session.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    print("  右键菜单定制：默认 10 项逐项核对、键盘选中「全选」真的执行、对话框"
+          "模态且删项后菜单与配置一起变、重启后仍生效、恢复默认回到代码里那份表、"
+          "删空之后右键不再弹菜单")
     return True
 
 

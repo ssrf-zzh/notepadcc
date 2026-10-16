@@ -32,6 +32,25 @@ const ToolbarItems& DefaultToolbarItems() {
     return items;
 }
 
+const ToolbarItems& DefaultContextMenuItems() {
+    // 默认只放"编辑这段文字时最顺手"的那些：撤销重做、剪贴板三件套、全选、
+    // 注释。要加别的（宏 / 运行命令 / 插件命令都行）走"自定义右键菜单…"，
+    // 候选表与工具栏共用同一份。
+    static const ToolbarItems items = {
+        L"cmd.edit.undo",
+        L"cmd.edit.redo",
+        kToolbarSeparator,
+        L"cmd.edit.cut",
+        L"cmd.edit.copy",
+        L"cmd.edit.paste",
+        kToolbarSeparator,
+        L"cmd.edit.selectAll",
+        kToolbarSeparator,
+        L"cmd.tool.toggleComment",
+    };
+    return items;
+}
+
 ToolbarItems NormalizeToolbarItems(const ToolbarItems& requested,
                                    const std::function<bool(const std::wstring&)>& known) {
     ToolbarItems out;

@@ -543,6 +543,41 @@ int main() {
         }
         Check(unique, "默认表里没有重复按钮");
 
+        // 右键菜单默认表（同一套格式）：只放"编辑这段文字"最顺手的几个
+        const npcc::core::ToolbarItems& contextDefaults =
+            npcc::core::DefaultContextMenuItems();
+        Check(!contextDefaults.empty(), "右键菜单默认表不是空的");
+        Check(contextDefaults.front() != npcc::core::kToolbarSeparator &&
+                  contextDefaults.back() != npcc::core::kToolbarSeparator,
+              "右键菜单默认表首尾都不是分隔符");
+        int contextButtons = 0;
+        bool contextClean = true;
+        for (std::size_t i = 0; i < contextDefaults.size(); ++i) {
+            if (contextDefaults[i] == npcc::core::kToolbarSeparator) {
+                if (i == 0 || contextDefaults[i - 1] == npcc::core::kToolbarSeparator) {
+                    contextClean = false;
+                }
+            } else {
+                ++contextButtons;
+            }
+        }
+        Check(contextClean, "右键菜单默认表里没有连排的分隔符");
+        Check(contextButtons == 7, "右键菜单默认表里有 7 个可点命令");
+        bool contextUnique = true;
+        for (std::size_t i = 0; i < contextDefaults.size(); ++i) {
+            for (std::size_t j = i + 1; j < contextDefaults.size(); ++j) {
+                if (contextDefaults[i] != npcc::core::kToolbarSeparator &&
+                    contextDefaults[i] == contextDefaults[j]) {
+                    contextUnique = false;
+                }
+            }
+        }
+        Check(contextUnique, "右键菜单默认表里没有重复命令");
+        const auto allKnown = [](const std::wstring&) { return true; };
+        Check(npcc::core::NormalizeToolbarItems(contextDefaults, allKnown) ==
+                  contextDefaults,
+              "右键菜单默认表本身就是整理过的形态");
+
         const auto known = [](const std::wstring& key) {
             return key == L"a" || key == L"b";
         };
@@ -1158,6 +1193,49 @@ int main() {
                 const npcc::io::ReadResult read = npcc::io::ReadWholeFile(path.wstring());
                 Check(read.ok && read.bytes.find("empty=\"yes\"") != std::string::npos,
                       "空表在文件里记成 empty=yes");
+            }
+        }
+
+        // 右键菜单项表：与工具栏同一套格式。"没配过（用默认表）"与"配成空表
+        // （右键不再弹菜单）"同样是两种状态
+        {
+            std::filesystem::remove(path, ec);
+            npcc::core::ConfigCenter config;
+            config.Load(nullptr);
+            Check(!config.ContextMenu().custom, "默认没有自定义右键菜单");
+            Check(config.ContextMenu().items.empty(), "默认右键菜单项表是空的（用代码默认表）");
+            std::wstring error;
+            Check(config.Save(true, &error), "默认状态保存成功");
+            {
+                const npcc::io::ReadResult read = npcc::io::ReadWholeFile(path.wstring());
+                Check(read.ok, "读回配置");
+                Check(read.bytes.find("<contextmenu") == std::string::npos,
+                      "没配过右键菜单时配置里没有 <contextmenu>");
+            }
+
+            config.ContextMenu().items = {L"cmd.edit.copy", npcc::core::kToolbarSeparator,
+                                          L"cmd.edit.paste"};
+            config.ContextMenu().custom = true;
+            Check(config.Save(true, &error), "保存自定义右键菜单成功");
+            npcc::core::ConfigCenter reloaded;
+            Check(reloaded.Load(&error), "重新加载成功");
+            Check(reloaded.ContextMenu().custom, "右键菜单自定义标记往返一致");
+            Check(reloaded.ContextMenu().items ==
+                      npcc::core::ToolbarItems({L"cmd.edit.copy",
+                                                npcc::core::kToolbarSeparator,
+                                                L"cmd.edit.paste"}),
+                  "右键菜单项表（含分隔符）往返一致，顺序不变");
+
+            reloaded.ContextMenu().items.clear();
+            Check(reloaded.Save(true, &error), "保存空右键菜单成功");
+            npcc::core::ConfigCenter emptied;
+            Check(emptied.Load(&error), "重新加载成功");
+            Check(emptied.ContextMenu().custom, "空右键菜单仍然算「用户配过」");
+            Check(emptied.ContextMenu().items.empty(), "空右键菜单往返一致（没有退回默认表）");
+            {
+                const npcc::io::ReadResult read = npcc::io::ReadWholeFile(path.wstring());
+                Check(read.ok && read.bytes.find("empty=\"yes\"") != std::string::npos,
+                      "空右键菜单在文件里记成 empty=yes");
             }
         }
 

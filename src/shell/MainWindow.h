@@ -106,6 +106,8 @@ private:
     void ApplyConfigToRuntime();
     // 按配置装配工具栏（按钮表 + 可见性 + 图标大小），随后重排布局
     void ApplyToolbarConfig();
+    // 按配置装配右键菜单项表（键的解析与灰显在弹出时逐条做，这里只管整理与留痕）
+    void ApplyContextMenuConfig();
     void ScheduleAutosave();
     void WriteSnapshots();
     void RemoveSnapshotFor(core::BufferId id);
@@ -128,6 +130,8 @@ private:
     void CommandManageShortcuts();
     void CommandToggleToolbar();
     void CommandCustomizeToolbar();
+    void CommandCustomizeContextMenu();
+    void ShowEditorContextMenu(POINT screenPoint);
     void CommandToggleSplit();
     void CommandCyclePane();
     void CommandConvertEol(edit::EolMode target);
@@ -368,6 +372,9 @@ private:
     ToolBar             toolbar_;
     core::ToolbarItems  toolbarItems_;
     bool                toolbarVisible_ = true;
+    // 右键菜单项表（M3 第九块"右键菜单深度定制"）：与工具栏同一套键表格式，
+    // 弹出时按注册表逐条解析（见 ShowEditorContextMenu）
+    core::ToolbarItems  contextMenuItems_;
     // 全屏（F11）：进出时把菜单、样式、窗口位置原样存下来，退出时逐项还原——
     // 只记一个"是不是全屏"的布尔量是不够的，还原时要用的东西必须一起留着
     bool            fullScreen_ = false;

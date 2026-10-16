@@ -1,6 +1,7 @@
 #include "edit/EditView.h"
 
 #include <windows.h>
+#include <windowsx.h>   // GET_X_LPARAM / GET_Y_LPARAM（WM_CONTEXTMENU 的坐标）
 
 #include <Scintilla.h>
 // Lexilla.h 依赖 ILexer.h 中的 ILexer5（它自己不包含该头文件），必须先引入
@@ -91,16 +92,76 @@ bool EditView::Create(HWND parent, int controlId) {
         0, 0, 0, 0, parent,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(controlId)),
         ::GetModuleHandleW(nullptr), nullptr);
+    if (hwnd_ != nullptr) {
+        // 子类化：WM_CONTEXTMENU 走我们自己的右键菜单（见下面 SubclassProc 的注释）。
+        // GWLP_USERDATA 由我们独占——Scintilla 自己不碰它
+        ::SetWindowLongPtrW(hwnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+        originalProc_ = reinterpret_cast<WNDPROC>(::SetWindowLongPtrW(
+            hwnd_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&EditView::SubclassProc)));
+    }
     return hwnd_ != nullptr;
 }
 
 void EditView::Destroy() {
     if (hwnd_ != nullptr) {
         if (::IsWindow(hwnd_) != 0) {
+            RestoreSubclass();
             ::DestroyWindow(hwnd_);
         }
         hwnd_ = nullptr;
     }
+}
+
+void EditView::Detach() noexcept {
+    if (hwnd_ != nullptr) {
+        if (::IsWindow(hwnd_) != 0) {
+            RestoreSubclass();
+        }
+        hwnd_ = nullptr;
+    }
+}
+
+void EditView::RestoreSubclass() {
+    // 先把窗口过程还回去：销毁过程里还有消息（WM_DESTROY、WM_NCDESTROY）
+    // 要经过窗口，不能落在一个即将析构的对象上
+    if (originalProc_ != nullptr) {
+        ::SetWindowLongPtrW(hwnd_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(originalProc_));
+        originalProc_ = nullptr;
+    }
+    ::SetWindowLongPtrW(hwnd_, GWLP_USERDATA, 0);
+}
+
+LRESULT CALLBACK EditView::SubclassProc(HWND hwnd, UINT message, WPARAM wParam,
+                                        LPARAM lParam) {
+    auto* self = reinterpret_cast<EditView*>(::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (self != nullptr) {
+        return self->HandleMessage(hwnd, message, wParam, lParam);
+    }
+    return ::DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+LRESULT EditView::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == WM_CONTEXTMENU) {
+        // Scintilla 自带的右键菜单是英文、硬编码的那一份（ScintillaBase::ContextMenu），
+        // 与命令注册表 / 界面语言 / 右键菜单定制都对不上。这里把它拦下来换算成屏幕坐标，
+        // 转给父窗口——外壳按注册表与配置弹自己的菜单。键盘（菜单键 / Shift+F10）来的
+        // lParam 是 (-1,-1)，贴着光标弹出。
+        POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (point.x == -1 && point.y == -1) {
+            const auto caret =
+                static_cast<intptr_t>(::SendMessageW(hwnd, SCI_GETCURRENTPOS, 0, 0));
+            point.x = static_cast<int>(::SendMessageW(hwnd, SCI_POINTXFROMPOSITION, 0, caret));
+            point.y = static_cast<int>(::SendMessageW(hwnd, SCI_POINTYFROMPOSITION, 0, caret));
+            ::ClientToScreen(hwnd, &point);
+        }
+        ::SendMessageW(::GetParent(hwnd), WM_CONTEXTMENU, reinterpret_cast<WPARAM>(hwnd),
+                       MAKELPARAM(static_cast<short>(point.x), static_cast<short>(point.y)));
+        return 0;
+    }
+    if (originalProc_ != nullptr) {
+        return ::CallWindowProcW(originalProc_, hwnd, message, wParam, lParam);
+    }
+    return ::DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
 void EditView::SetVisible(bool visible) const {

@@ -89,6 +89,14 @@ struct ToolbarConfig {
     bool         custom = false;       // 用户动过按钮表（区分"没配过"与"配成了空表"）
 };
 
+// 右键菜单项表（M3 第九块）：与工具栏按钮表同一套格式与整理规则。
+// custom=false = 用代码里的默认表；custom=true + 空表 = "一个都不放"
+// （那种情况下右键不再弹菜单——用户的配置说了算）。
+struct ContextMenuConfig {
+    ToolbarItems items;                // 空 = 用默认表
+    bool         custom = false;       // 区分"没配过"与"配成了空表"
+};
+
 // 配置中心（设计文档 4.5 / 7.2）。
 //
 // 三条硬性要求，都是"别让配置把程序搞挂"：
@@ -123,6 +131,7 @@ public:
     LargeFileConfig& LargeFile() noexcept { return largeFile_; }
     SearchDefaults& Search() noexcept { return search_; }
     ToolbarConfig&  Toolbar() noexcept { return toolbar_; }
+    ContextMenuConfig& ContextMenu() noexcept { return contextMenu_; }
 
     const GeneralConfig&  General() const noexcept { return general_; }
     const EditConfig&     Edit() const noexcept { return edit_; }
@@ -131,6 +140,7 @@ public:
     const LargeFileConfig& LargeFile() const noexcept { return largeFile_; }
     const SearchDefaults& Search() const noexcept { return search_; }
     const ToolbarConfig&  Toolbar() const noexcept { return toolbar_; }
+    const ContextMenuConfig& ContextMenu() const noexcept { return contextMenu_; }
 
     // 加载过程中被回退的属性名，供"关于/诊断"展示
     const std::vector<std::wstring>& Warnings() const noexcept { return warnings_; }
@@ -143,6 +153,7 @@ private:
     LargeFileConfig largeFile_;
     SearchDefaults  search_;
     ToolbarConfig   toolbar_;
+    ContextMenuConfig contextMenu_;
     std::vector<std::wstring> warnings_;
     long long       lastSaveTick_ = 0;
     bool            dirty_ = false;

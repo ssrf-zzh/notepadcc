@@ -208,6 +208,7 @@ enum : npcc::core::CmdId {
     kCmdSettingsUnregisterAssoc = npcc::core::MakeCmdId(7, 4),
     kCmdSettingsPlugins         = npcc::core::MakeCmdId(7, 5),
     kCmdSettingsToolbar         = npcc::core::MakeCmdId(7, 6),
+    kCmdSettingsContextMenu     = npcc::core::MakeCmdId(7, 7),
     // 界面语言（设置类）：一个语言一条，编号跟着"有哪些语言包"走
     kLanguageCommandBase        = 128,
 
@@ -475,6 +476,7 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             tabBar_.SetEyeCare(eyeCare_);
             toolbar_.SetDark(darkMode_);
             ApplyToolbarConfig();
+            ApplyContextMenuConfig();
             // 语言包盖不住哪些键，启动时就写进日志：英文界面里冒出中文时，
             // 这条日志是唯一的线索（设计文档 6.6 第 2 条）
             ReportMissingLanguageKeys();
@@ -557,6 +559,16 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
                                      MF_BYPOSITION);
             }
             return 0;
+        }
+        case WM_CONTEXTMENU: {
+            // 编辑视图把自己的右键转上来（EditView 拦下了 Scintilla 自带的英文菜单，
+            // 见 EditView.cpp）。wParam = 源视图，lParam = 屏幕坐标。
+            const auto source = reinterpret_cast<HWND>(wParam);
+            if (source != nullptr && ::GetParent(source) == hwnd_) {
+                ShowEditorContextMenu(POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)});
+                return 0;
+            }
+            break;
         }
         case WM_SETFOCUS: {
             if (edit::Document* document = documents_->Active(); document != nullptr && document->view) {
@@ -1354,6 +1366,9 @@ void MainWindow::RegisterCommands() {
     add(kCmdSettingsToolbar, CmdCategory::Settings, L"cmd.settings.toolbar",
         L"自定义工具栏(&T)...", core::kCmdNone,
         [this](const CmdContext&) { CommandCustomizeToolbar(); });
+    add(kCmdSettingsContextMenu, CmdCategory::Settings, L"cmd.settings.contextMenu",
+        L"自定义右键菜单(&M)...", core::kCmdNone,
+        [this](const CmdContext&) { CommandCustomizeContextMenu(); });
     // ---- 运行 ----
     // 用户自己存的那些命令由 RegisterRunCommands() 在加载配置之后补上
     add(kCmdRunDialog, CmdCategory::Run, L"cmd.run.dialog", L"运行(&R)...", core::kCmdNone,
@@ -5318,6 +5333,82 @@ void MainWindow::CommandCustomizeToolbar() {
     config_.SaveNow();   // 用户刚做的改动，不等那 1 秒的合并窗口
     ApplyToolbarConfig();
     statusBar_.SetMessage(core::Tr(L"status.toolbarUpdated", L"工具栏已更新"));
+}
+
+void MainWindow::ApplyContextMenuConfig() {
+    const core::ContextMenuConfig& config = config_.ContextMenu();
+    const auto known = [this](const std::wstring& key) {
+        return registry_.FindByKey(key) != nullptr;
+    };
+    // custom=false 时用代码里的默认项表；整理规则与工具栏共用（认不出的键丢掉、
+    // 重复只留第一次、分隔符不站头尾不连排）——"哪些能进右键菜单"与"哪些能上
+    // 工具栏"是同一份候选表，宏 / 运行命令 / 插件命令都能进
+    const core::ToolbarItems& source =
+        config.custom ? config.items : core::DefaultContextMenuItems();
+    contextMenuItems_ = core::NormalizeToolbarItems(source, known);
+    if (config.custom) {
+        for (const std::wstring& key : config.items) {
+            if (key != core::kToolbarSeparator && registry_.FindByKey(key) == nullptr) {
+                infra::LogWarn(L"contextmenu", L"右键菜单里的命令现在不存在，已跳过: " + key);
+            }
+        }
+    }
+}
+
+void MainWindow::CommandCustomizeContextMenu() {
+    ToolbarPicks picks;
+    if (!CustomizeContextMenu(hwnd_, registry_, contextMenuItems_, picks)) {
+        return;   // 取消：配置一个字节都不动
+    }
+    core::ContextMenuConfig& config = config_.ContextMenu();
+    config.custom = picks.custom;
+    // 与工具栏同一条规矩："恢复默认"存回的是空表 + custom=false
+    config.items = picks.custom ? picks.items : core::ToolbarItems();
+    config_.SaveNow();
+    ApplyContextMenuConfig();
+    statusBar_.SetMessage(core::Tr(L"status.contextMenuUpdated", L"右键菜单已更新"));
+}
+
+void MainWindow::ShowEditorContextMenu(POINT screenPoint) {
+    if (contextMenuItems_.empty()) {
+        return;   // 用户把项全删了：右键不弹菜单（配置说了算）
+    }
+    HMENU menu = ::CreatePopupMenu();
+    if (menu == nullptr) {
+        return;
+    }
+    const core::CmdContext context = Context();
+    for (const std::wstring& key : contextMenuItems_) {
+        if (key == core::kToolbarSeparator) {
+            ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            continue;
+        }
+        const core::Command* command = registry_.FindByKey(key);
+        if (command == nullptr) {
+            continue;   // 装配进表时就记过日志了
+        }
+        // 灰显与勾选态跟主菜单同源（命令注册表），不是弹出来才临时算一份
+        UINT flags = MF_STRING;
+        flags |= registry_.IsEnabled(command->id, context) ? MF_ENABLED : MF_GRAYED;
+        if (registry_.IsChecked(command->id, context)) {
+            flags |= MF_CHECKED;
+        }
+        ::AppendMenuW(menu, flags, static_cast<UINT_PTR>(command->id), command->text.c_str());
+    }
+    const UINT chosen = ::TrackPopupMenu(
+        menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, screenPoint.x, screenPoint.y,
+        0, hwnd_, nullptr);
+    ::DestroyMenu(menu);
+    if (chosen == 0) {
+        return;   // 点到别处 / Esc 关掉
+    }
+    const auto id = static_cast<core::CmdId>(chosen);
+    const core::ExecResult executed = registry_.Execute(id, Context());
+    toolbar_.Refresh();
+    if (executed == core::ExecResult::Disabled) {
+        infra::LogWarn(L"cmd", L"命令被禁用，未执行: " + std::to_wstring(id));
+    }
+    UpdateDocumentInfo();
 }
 
 // 设计里写的是"失败时给出状态栏提示而非静默无响应"：点了没反应是最难排查的那类问题。

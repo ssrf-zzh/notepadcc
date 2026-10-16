@@ -159,6 +159,7 @@ std::vector<LangPack> MakeBuiltin() {
         Entry(L"cmd.settings.unregisterAssoc", L"Remove from 'Open with' List", L"R"),
         Entry(L"cmd.settings.plugins", L"Plugin Manager...", L"G"),
         Entry(L"cmd.settings.toolbar", L"Customize Toolbar...", L"T"),
+        Entry(L"cmd.settings.contextMenu", L"Customize Context Menu...", L"M"),
         // 界面语言那几条命令的文本就是语言自己的名字（"English"/"简体中文"），
         // 故意不翻译：语言名要用它自己的语言写，用户才找得到
         // ---- 帮助 ----

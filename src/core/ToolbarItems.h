@@ -21,6 +21,12 @@ inline constexpr const wchar_t* kToolbarSeparator = L"-";
 // 代码里写的那份默认按钮表（配置文件里没有给出 <Item> 时用它）
 const ToolbarItems& DefaultToolbarItems();
 
+// 右键菜单的默认项表（M3 第九块"右键菜单深度定制"）。它就是同一套东西：
+// 存命令键、"-" 是分隔符、NormalizeToolbarItems 就是它的整理器——候选里
+// 同样包含宏 / 运行命令 / 插件命令，所以"哪些能进右键菜单"与"哪些能上工具栏"
+// 是同一个答案。
+const ToolbarItems& DefaultContextMenuItems();
+
 // 把一份"用户给的"按钮表整理成能用的：键不存在的丢掉、重复的只留第一次、
 // 分隔符不站在开头 / 结尾、两个分隔符不挨着。known 回答"这个键现在在不在"。
 //

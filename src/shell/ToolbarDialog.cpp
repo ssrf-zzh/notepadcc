@@ -13,6 +13,10 @@ namespace npcc::shell {
 namespace {
 
 constexpr const wchar_t* kWindowClass = L"notepadccToolbarCustomize";
+constexpr const wchar_t* kContextMenuWindowClass = L"notepadccContextMenuCustomize";
+
+// 这套对话框服务的两种目标：只有标题 / 说明文字与"恢复默认"的默认表不同
+enum class Target { Toolbar, ContextMenu };
 
 enum : int {
     kIdAvailableLabel = 1600,
@@ -59,7 +63,7 @@ const core::CmdCategory kOrder[] = {
 class ToolbarDialog {
 public:
     bool Show(HWND owner, const core::CommandRegistry& registry,
-              const core::ToolbarItems& current, ToolbarPicks& out);
+              const core::ToolbarItems& current, Target target, ToolbarPicks& out);
 
 private:
     static LRESULT CALLBACK WndProcThunk(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -75,6 +79,10 @@ private:
     void Accept();
     std::wstring TextOfKey(const std::wstring& key) const;
     std::wstring AvailableText(int index) const;
+    const wchar_t* ClassName() const;
+    std::wstring Title() const;
+    std::wstring AvailableLabel() const;
+    std::wstring CurrentLabel() const;
 
     HWND                            owner_ = nullptr;
     HWND                            hwnd_ = nullptr;
@@ -87,6 +95,7 @@ private:
     bool                            useDefault_ = false;
     bool                            done_ = false;
     bool                            accepted_ = false;
+    Target                          target_ = Target::Toolbar;
 };
 
 int ToolbarDialog::Scale(int value) const {
@@ -124,6 +133,30 @@ std::wstring ToolbarDialog::AvailableText(int index) const {
         }
     }
     return text;
+}
+
+const wchar_t* ToolbarDialog::ClassName() const {
+    return target_ == Target::ContextMenu ? kContextMenuWindowClass : kWindowClass;
+}
+
+std::wstring ToolbarDialog::Title() const {
+    return target_ == Target::ContextMenu
+               ? core::Tr(L"dialog.contextmenu.title", L"自定义右键菜单")
+               : core::Tr(L"dialog.toolbar.title", L"自定义工具栏");
+}
+
+std::wstring ToolbarDialog::AvailableLabel() const {
+    return target_ == Target::ContextMenu
+               ? core::Tr(L"dialog.contextmenu.available", L"可用命令（双击加进右键菜单）")
+               : core::Tr(L"dialog.toolbar.available", L"可用命令（双击加进工具栏）");
+}
+
+std::wstring ToolbarDialog::CurrentLabel() const {
+    return target_ == Target::ContextMenu
+               ? core::Tr(L"dialog.contextmenu.current",
+                          L"右键菜单里的命令（顺序就是显示顺序）")
+               : core::Tr(L"dialog.toolbar.current",
+                          L"工具栏上的按钮（顺序就是显示顺序）");
 }
 
 void ToolbarDialog::FillLists() {
@@ -325,10 +358,11 @@ void ToolbarDialog::Layout() {
 }
 
 bool ToolbarDialog::Show(HWND owner, const core::CommandRegistry& registry,
-                         const core::ToolbarItems& current, ToolbarPicks& out) {
+                         const core::ToolbarItems& current, Target target, ToolbarPicks& out) {
     owner_ = owner;
     registry_ = &registry;
     current_ = current;
+    target_ = target;
 
     // 候选：注册表里所有不是"隐藏"的命令，按类别分组、组内按注册顺序。
     // 已经在工具栏上的不再列（要拿下来去右边点"移除"就行）
@@ -355,7 +389,7 @@ bool ToolbarDialog::Show(HWND owner, const core::CommandRegistry& registry,
     wc.hInstance = ::GetModuleHandleW(nullptr);
     wc.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_BTNFACE + 1));
-    wc.lpszClassName = kWindowClass;
+    wc.lpszClassName = ClassName();
     ::RegisterClassExW(&wc);
 
     RECT ownerRect{};
@@ -364,8 +398,9 @@ bool ToolbarDialog::Show(HWND owner, const core::CommandRegistry& registry,
     const int height = Scale(430);
     const int x = ownerRect.left + ((ownerRect.right - ownerRect.left) - width) / 2;
     const int y = ownerRect.top + ((ownerRect.bottom - ownerRect.top) - height) / 2;
-    const std::wstring title = core::Tr(L"dialog.toolbar.title", L"自定义工具栏");
-    hwnd_ = ::CreateWindowExW(WS_EX_DLGMODALFRAME, kWindowClass, title.c_str(),
+    const std::wstring title = Title();
+    // 类名必须用 ClassName()：注册的是它，两种目标各注册各的类
+    hwnd_ = ::CreateWindowExW(WS_EX_DLGMODALFRAME, ClassName(), title.c_str(),
                               WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, width, height, owner,
                               nullptr, ::GetModuleHandleW(nullptr), this);
     if (hwnd_ == nullptr) {
@@ -383,14 +418,12 @@ bool ToolbarDialog::Show(HWND owner, const core::CommandRegistry& registry,
     }
     font_ = ::CreateFontIndirectW(&logFont);
 
-    Make(L"STATIC", core::Tr(L"dialog.toolbar.available", L"可用命令（双击加进工具栏）").c_str(),
-         WS_VISIBLE | SS_LEFT, kIdAvailableLabel);
+    Make(L"STATIC", AvailableLabel().c_str(), WS_VISIBLE | SS_LEFT, kIdAvailableLabel);
     availableBox_ = Make(WC_LISTBOXW, L"",
                          WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | WS_BORDER | LBS_NOTIFY |
                              LBS_NOINTEGRALHEIGHT,
                          kIdAvailable);
-    Make(L"STATIC", core::Tr(L"dialog.toolbar.current", L"工具栏上的按钮（顺序就是显示顺序）").c_str(),
-         WS_VISIBLE | SS_LEFT, kIdCurrentLabel);
+    Make(L"STATIC", CurrentLabel().c_str(), WS_VISIBLE | SS_LEFT, kIdCurrentLabel);
     currentBox_ = Make(WC_LISTBOXW, L"",
                        WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | WS_BORDER | LBS_NOTIFY |
                            LBS_NOINTEGRALHEIGHT,
@@ -460,7 +493,8 @@ bool ToolbarDialog::Show(HWND owner, const core::CommandRegistry& registry,
     }
     out.custom = !useDefault_;
     if (useDefault_) {
-        out.items = core::DefaultToolbarItems();
+        out.items = target_ == Target::ContextMenu ? core::DefaultContextMenuItems()
+                                                   : core::DefaultToolbarItems();
     } else {
         out.items = current_;
     }
@@ -472,7 +506,13 @@ bool ToolbarDialog::Show(HWND owner, const core::CommandRegistry& registry,
 bool CustomizeToolbar(HWND owner, const core::CommandRegistry& registry,
                       const core::ToolbarItems& current, ToolbarPicks& out) {
     ToolbarDialog dialog;
-    return dialog.Show(owner, registry, current, out);
+    return dialog.Show(owner, registry, current, Target::Toolbar, out);
+}
+
+bool CustomizeContextMenu(HWND owner, const core::CommandRegistry& registry,
+                          const core::ToolbarItems& current, ToolbarPicks& out) {
+    ToolbarDialog dialog;
+    return dialog.Show(owner, registry, current, Target::ContextMenu, out);
 }
 
 }  // namespace npcc::shell

@@ -304,6 +304,24 @@ bool ConfigCenter::Load(std::wstring* error) {
         }
     }
 
+    // 右键菜单：同样要区分"没配过（用代码里的默认表）"与"配成了空表
+    // （右键不再弹菜单）"——不区分的话，删空之后下次启动又会悄悄退回默认表
+    const infra::XmlElement* contextMenu = Section(root, L"contextmenu");
+    if (contextMenu != nullptr) {
+        const std::vector<const infra::XmlElement*> items = contextMenu->Children(L"Item");
+        const std::wstring* empty = contextMenu->Attribute(L"empty");
+        if (!items.empty() || (empty != nullptr && *empty == L"yes")) {
+            contextMenu_.custom = true;
+            contextMenu_.items.clear();
+            for (const infra::XmlElement* item : items) {
+                const std::wstring* key = item->Attribute(L"command");
+                if (key != nullptr && !key->empty()) {
+                    contextMenu_.items.push_back(*key);
+                }
+            }
+        }
+    }
+
     for (const std::wstring& warning : warnings_) {
         infra::LogWarn(L"config", L"配置项已回退默认值: " + warning);
     }
@@ -388,6 +406,17 @@ bool ConfigCenter::Save(bool force, std::wstring* error) {
         }
         for (const std::wstring& key : toolbar_.items) {
             toolbar->AddChild(L"Item")->SetAttribute(L"command", key);
+        }
+    }
+
+    // 右键菜单同理：没配过就不写这一节（默认表在代码里，见上面的注释）
+    if (contextMenu_.custom) {
+        infra::XmlElementPtr contextMenu = root->AddChild(L"contextmenu");
+        if (contextMenu_.items.empty()) {
+            contextMenu->SetAttribute(L"empty", L"yes");
+        }
+        for (const std::wstring& key : contextMenu_.items) {
+            contextMenu->AddChild(L"Item")->SetAttribute(L"command", key);
         }
     }
 
