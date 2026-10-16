@@ -1,5 +1,6 @@
 // notepadcc 单元测试：只覆盖不依赖窗口的纯逻辑（设计文档 9.1 的单元测试层）。
 #include <cstdint>
+#include <cstring>
 #include <cstdio>
 #include <algorithm>
 #include <filesystem>
@@ -34,7 +35,6 @@
 #include "core/XPath.h"
 #include "core/ScriptEngine.h"
 #include "core/Localization.h"
-#include "core/Sha256.h"
 #include "core/UpdateKey.h"
 #include "core/UpdateManifest.h"
 #include "core/UpdateVerify.h"
@@ -42,6 +42,7 @@
 #include "shell/FolderPanel.h"
 #include "shell/FunctionListPanel.h"
 #include "core/SnapshotStore.h"
+#include "infra/Crypto.h"
 #include "infra/SingleInstance.h"
 #include "infra/FileAssociation.h"
 #include "edit/DocBuffer.h"
@@ -7155,10 +7156,10 @@ int main() {
               "命中停在 5000 并标出 truncated");
     }
 
-    Section("SHA-256（FIPS 向量 / 流式分块 / 边界）");
+    Section("SHA-256（infra::Crypto：FIPS 向量 / 流式分块 / 边界）");
     {
-        using npcc::core::Sha256;
-        using npcc::core::Sha256Stream;
+        using npcc::infra::Sha256;
+        using npcc::infra::Sha256Stream;
 
         const auto hexOf = [](const std::string& text) {
             return Sha256(text.data(), text.size()).Hex();
@@ -7210,12 +7211,30 @@ int main() {
                    "Digest() 可以反复取，不破坏内部状态");
         twice.Update(pattern.data(), pattern.size());
         CheckEqual(twice.Digest().Hex(), hexOf(pattern + pattern), "取完摘要还能继续 Update");
-        const npcc::core::Sha256Digest a = Sha256("abc", 3);
-        const npcc::core::Sha256Digest b = Sha256("abd", 3);
+        const npcc::infra::Sha256Digest a = Sha256("abc", 3);
+        const npcc::infra::Sha256Digest b = Sha256("abd", 3);
         Check(a == a && a != b, "摘要的比较运算符");
         CheckEqual(a.Hex(), a.Hex(), "Hex() 是纯函数（两次调用一致）");
         Check(a.Hex().size() == 64 && a.Hex().find_first_of("ABCDEF") == std::string::npos,
               "Hex() 是小写 64 位十六进制");
+    }
+
+    Section("随机字节（infra::Crypto：BCryptGenRandom）");
+    {
+        using npcc::infra::RandomBytes;
+
+        std::uint8_t first[32] = {};
+        std::uint8_t second[32] = {};
+        Check(RandomBytes(first, sizeof(first)), "32 字节随机数生成成功");
+        Check(RandomBytes(second, sizeof(second)), "再抽一次也成功");
+        Check(std::memcmp(first, second, sizeof(first)) != 0,
+              "两次抽取不相同（不是把固定内容原样返回）");
+        bool allZero = true;
+        for (const std::uint8_t byte : first) {
+            allZero = allZero && byte == 0;
+        }
+        Check(!allZero, "32 个字节全零的概率可以忽略（钉住\"根本没写\"这类实现错误）");
+        Check(RandomBytes(nullptr, 0), "长度为 0 不惊动系统、直接成功");
     }
 
     Section("更新清单（解析 / 版本比较 / 下载源策略）");
@@ -7316,7 +7335,7 @@ int main() {
     {
         using npcc::core::DescribeTrustError;
         using npcc::core::VerifyAuthenticode;
-        using npcc::core::VerifyRsaSha256Signature;
+        using npcc::infra::RsaVerifyPkcs1Sha256;
 
         // 固定清单 + 固定签名（用 tools/make_update_key.ps1 那把开发钥匙签的）。
         // 私钥不在仓库里：smoke 脚本要用它签测试清单，这里只验"正的能过、动的过不了"
@@ -7324,30 +7343,30 @@ int main() {
             R"json({"version":"1.0.1","notes":"a small fix","url":"https://example.invalid/notepadcc/pkg.zip","sha256":"0000000000000000000000000000000000000000000000000000000000000000"})json";
         const std::string signature = "AZZvsoFUrkiTdd6BNV4vz3SAITaNkAztLqT6y93zLtJfXSIWPNNHCpWc6W5pOBzIG1lm1nDkZGUTET1yop0MAkP5FN9L0CtVr4yBtHxGiqS72V5YNj4clT0lEhlK86Qbp1ZiTsb+aelaaxpzMV4pMoUCPMEWheuCP2q7hq8YH68joO8BkFbZe7sK6wyGnCeuQ7YLeIbu6UJ6JXcw1vfHPuqcJkSBVd4KKWGwC8uI+F+wygB/O1pmQVW3gfLSmFctTHIJCgHJV+vJKfs/lL7LE2oAmvWRjtl/2qG/umA4VxPlmtj3679hVsEkKRPBFn3F/Xiky9LpK6WUSp6JVtaiRQ==";
         std::wstring error;
-        Check(VerifyRsaSha256Signature(signedContent.data(), signedContent.size(), signature,
-                                       npcc::core::kUpdatePublicKeyBase64, &error),
+        Check(RsaVerifyPkcs1Sha256(signedContent.data(), signedContent.size(), signature,
+                                   npcc::core::kUpdatePublicKeyBase64, &error),
               "固定签名能通过验签");
         Check(error.empty(), "通过时 error 不被写脏");
         error.clear();
         std::string tampered = signedContent;
         tampered[12] = '2';   // "1.0.1" → "1.0.2"：长度不变，内容变了
-        Check(!VerifyRsaSha256Signature(tampered.data(), tampered.size(), signature,
-                                        npcc::core::kUpdatePublicKeyBase64, &error) &&
+        Check(!RsaVerifyPkcs1Sha256(tampered.data(), tampered.size(), signature,
+                                    npcc::core::kUpdatePublicKeyBase64, &error) &&
                   error.find(L"签名") != std::wstring::npos,
               "改一个字节就验不过（签名覆盖原始字节）");
         error.clear();
-        Check(!VerifyRsaSha256Signature(signedContent.data(), signedContent.size(),
-                                        signature + "AA==",
-                                        npcc::core::kUpdatePublicKeyBase64, &error),
+        Check(!RsaVerifyPkcs1Sha256(signedContent.data(), signedContent.size(),
+                                    signature + "AA==",
+                                    npcc::core::kUpdatePublicKeyBase64, &error),
               "长度不对的签名被拒");
         error.clear();
-        Check(!VerifyRsaSha256Signature(signedContent.data(), signedContent.size(), "!!!",
-                                        npcc::core::kUpdatePublicKeyBase64, &error) &&
+        Check(!RsaVerifyPkcs1Sha256(signedContent.data(), signedContent.size(), "!!!",
+                                    npcc::core::kUpdatePublicKeyBase64, &error) &&
                   error.find(L"base64") != std::wstring::npos,
               "坏 base64 被拒并说清楚");
         error.clear();
-        Check(!VerifyRsaSha256Signature(signedContent.data(), signedContent.size(), signature,
-                                        "AAAA", &error),
+        Check(!RsaVerifyPkcs1Sha256(signedContent.data(), signedContent.size(), signature,
+                                    "AAAA", &error),
               "坏公钥被拒");
 
         Check(DescribeTrustError(static_cast<long>(0x800B0100u)).find(L"没有数字签名") !=

@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <unordered_set>
 
+#include "infra/Crypto.h"
+
 namespace npcc::edit {
 namespace {
 
@@ -446,94 +448,11 @@ std::string ToLowerCase(std::string_view text, std::uint32_t codePage) {
 }
 
 std::string Base64Encode(std::string_view bytes) {
-    static const char* alphabet =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string out;
-    out.reserve(((bytes.size() + 2) / 3) * 4);
-    std::size_t i = 0;
-    while (i + 2 < bytes.size()) {
-        const unsigned triple = (static_cast<unsigned char>(bytes[i]) << 16) |
-                                (static_cast<unsigned char>(bytes[i + 1]) << 8) |
-                                static_cast<unsigned char>(bytes[i + 2]);
-        out.push_back(alphabet[(triple >> 18) & 0x3F]);
-        out.push_back(alphabet[(triple >> 12) & 0x3F]);
-        out.push_back(alphabet[(triple >> 6) & 0x3F]);
-        out.push_back(alphabet[triple & 0x3F]);
-        i += 3;
-    }
-    const std::size_t rest = bytes.size() - i;
-    if (rest == 1) {
-        const unsigned value = static_cast<unsigned char>(bytes[i]) << 16;
-        out.push_back(alphabet[(value >> 18) & 0x3F]);
-        out.push_back(alphabet[(value >> 12) & 0x3F]);
-        out += "==";
-    } else if (rest == 2) {
-        const unsigned value = (static_cast<unsigned char>(bytes[i]) << 16) |
-                               (static_cast<unsigned char>(bytes[i + 1]) << 8);
-        out.push_back(alphabet[(value >> 18) & 0x3F]);
-        out.push_back(alphabet[(value >> 12) & 0x3F]);
-        out.push_back(alphabet[(value >> 6) & 0x3F]);
-        out.push_back('=');
-    }
-    return out;
+    return infra::Base64Encode(bytes);
 }
 
 bool Base64Decode(std::string_view text, std::string& out) {
-    auto valueOf = [](char ch) -> int {
-        if (ch >= 'A' && ch <= 'Z') return ch - 'A';
-        if (ch >= 'a' && ch <= 'z') return ch - 'a' + 26;
-        if (ch >= '0' && ch <= '9') return ch - '0' + 52;
-        if (ch == '+') return 62;
-        if (ch == '/') return 63;
-        return -1;
-    };
-    std::string filtered;
-    filtered.reserve(text.size());
-    for (const char ch : text) {
-        if (IsAsciiSpace(ch)) {
-            continue;   // 换行与空格只是排版，不算内容
-        }
-        filtered.push_back(ch);
-    }
-    if (filtered.size() % 4 != 0) {
-        return false;   // 长度不是 4 的倍数：多半是把残缺的内容粘进来了
-    }
-    std::string decoded;
-    decoded.reserve(filtered.size() / 4 * 3);
-    for (std::size_t i = 0; i < filtered.size(); i += 4) {
-        int values[4] = {0, 0, 0, 0};
-        int padding = 0;
-        for (int k = 0; k < 4; ++k) {
-            const char ch = filtered[i + static_cast<std::size_t>(k)];
-            if (ch == '=') {
-                if (k < 2 || i + 4 != filtered.size()) {
-                    return false;   // 填充只能出现在末尾，且最多两个
-                }
-                ++padding;
-                continue;
-            }
-            if (padding > 0) {
-                return false;       // 填充之后又出现内容
-            }
-            values[k] = valueOf(ch);
-            if (values[k] < 0) {
-                return false;
-            }
-        }
-        const unsigned triple = (static_cast<unsigned>(values[0]) << 18) |
-                                (static_cast<unsigned>(values[1]) << 12) |
-                                (static_cast<unsigned>(values[2]) << 6) |
-                                static_cast<unsigned>(values[3]);
-        decoded.push_back(static_cast<char>((triple >> 16) & 0xFF));
-        if (padding < 2) {
-            decoded.push_back(static_cast<char>((triple >> 8) & 0xFF));
-        }
-        if (padding < 1) {
-            decoded.push_back(static_cast<char>(triple & 0xFF));
-        }
-    }
-    out = std::move(decoded);
-    return true;
+    return infra::Base64Decode(text, out);
 }
 
 std::string UrlEncode(std::string_view text) {

@@ -148,7 +148,6 @@ set(NPCC_CORE_SOURCES
     src/core/RunCommand.cpp
     src/core/ScriptEngine.cpp
     src/core/ToolbarItems.cpp
-    src/core/Sha256.cpp
     src/core/UpdateManifest.cpp
     src/core/UpdateVerify.cpp
     src/core/RemoteSite.cpp
@@ -167,6 +166,7 @@ set(NPCC_CORE_SOURCES
     src/edit/UdlDefinition.cpp
     src/edit/UdlLexer.cpp
     src/edit/UdlStyles.cpp
+    src/infra/Crypto.cpp
     src/infra/Log.cpp
     src/infra/Paths.cpp
     src/infra/SingleInstance.cpp

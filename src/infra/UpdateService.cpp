@@ -10,10 +10,10 @@
 #include <fstream>
 #include <vector>
 
-#include "core/Sha256.h"
 #include "core/UpdateKey.h"
 #include "core/UpdateManifest.h"
 #include "core/UpdateVerify.h"
+#include "infra/Crypto.h"
 #include "infra/Log.h"
 #include "infra/Paths.h"
 
@@ -361,8 +361,9 @@ UpdateCheckReport RunUpdateCheck(const UpdateCheckOptions& options) {
 
     // 先验签**原始字节**，再谈字段内容：签名字节顺序绝不能反过来
     const std::string signatureText(signatureBytes.bytes.begin(), signatureBytes.bytes.end());
-    if (!core::VerifyRsaSha256Signature(manifestBytes.bytes.data(), manifestBytes.bytes.size(),
-                                        signatureText, core::kUpdatePublicKeyBase64, &why)) {
+    if (!RsaVerifyPkcs1Sha256(manifestBytes.bytes.data(), manifestBytes.bytes.size(),
+                             
+signatureText, core::kUpdatePublicKeyBase64, &why)) {
         return MakeError(L"清单签名无效：" + why);
     }
 
@@ -398,8 +399,7 @@ UpdateCheckReport RunUpdateCheck(const UpdateCheckOptions& options) {
     if (!packageBytes.ok) {
         return MakeError(L"下载更新包失败：" + packageBytes.error);
     }
-    const core::Sha256Digest digest =
-        core::Sha256(packageBytes.bytes.data(), packageBytes.bytes.size());
+    const Sha256Digest digest = Sha256(packageBytes.bytes.data(), packageBytes.bytes.size());
     if (digest.Hex() != manifest.sha256) {
         return MakeError(L"更新包 SHA-256 不匹配（期望 " + WideFromUtf8(manifest.sha256) +
                          L"，实际 " + WideFromUtf8(digest.Hex()) + L"）");
