@@ -36,6 +36,7 @@
 #include "shell/Clipboard.h"
 #include "shell/ComparePickDialog.h"
 #include "shell/ToolbarDialog.h"
+#include "shell/UpdateDialog.h"
 #include "core/Diff.h"
 #include "core/ExportHtml.h"
 #include "core/ExportRtf.h"
@@ -44,6 +45,7 @@
 #include "core/XmlTree.h"
 #include "core/RunCommand.h"
 #include "core/Localization.h"
+#include "core/Version.h"
 #include "core/PrintText.h"
 #include "core/PrintPaging.h"
 #include "shell/PluginAdminDialog.h"
@@ -66,6 +68,7 @@ constexpr UINT_PTR kTimerRunCommand = 4;     // 轮询后台命令有没有跑�
 constexpr UINT_PTR kTimerMarkdownPreview = 5;   // Markdown 预览的节流定时器（一次性）
 constexpr UINT_PTR kTimerJsonTree = 6;          // JSON 树面板的节流定时器（一次性）
 constexpr UINT_PTR kTimerXmlTree = 7;           // XML 树面板的节流定时器（一次性）
+constexpr UINT_PTR kTimerUpdateCheck = 8;       // 启动后的延迟更新检查（一次性）
 
 enum : npcc::core::CmdId {
     kCmdFileNew     = npcc::core::MakeCmdId(1, 1),
@@ -213,6 +216,7 @@ enum : npcc::core::CmdId {
     kLanguageCommandBase        = 128,
 
     kCmdHelpAbout = npcc::core::MakeCmdId(12, 1),
+    kCmdHelpCheckUpdate = npcc::core::MakeCmdId(12, 2),
 
     // Scintilla 原生命令：不新增语义，直接转发
     kSciRedo      = 2011,
@@ -513,6 +517,13 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             RefreshRescueSlots();
 
             ScheduleAutosave();
+            // 启动后的延迟更新检查（M3 第十块）：默认 30 秒，<update> 节里可改
+            // 延迟或整个关掉。到期后走与手动检查同一条后台路径——只有"确实有
+            // 新版本"才会露面，其它情况只留状态栏与日志
+            if (config_.Update().checkOnStartup) {
+                const UINT delay = config_.Update().startupDelaySeconds * 1000u;
+                ::SetTimer(hwnd_, kTimerUpdateCheck, delay, nullptr);
+            }
             if (crashTest_) {
                 // 自检开关：给脚本留几秒钟制造"未保存的改动"，然后再崩
                 ::SetTimer(hwnd_, kTimerCrashTest, 6000, nullptr);
@@ -763,6 +774,15 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
         case core::kMsgStartupNotice:
             AnnounceActiveLoadWarning();
             return 0;
+        case core::kMsgUpdateResult: {
+            // 启动自动检查的结果（手动检查的结果投给对话框自己，不走这里）
+            std::unique_ptr<infra::UpdateCheckReport> report(
+                reinterpret_cast<infra::UpdateCheckReport*>(lParam));
+            if (report != nullptr) {
+                HandleBackgroundUpdateResult(*report);
+            }
+            return 0;
+        }
         case core::kMsgOpenFiles: {
             // 别的实例把文件交过来了（或者刚启动时被双击了文件）
             const std::vector<std::wstring> pending = infra::TakePendingFiles();
@@ -824,6 +844,11 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             if (wParam == kTimerXmlTree) {
                 ::KillTimer(hwnd_, kTimerXmlTree);    // 一次性
                 RefreshXmlTree();
+                return 0;
+            }
+            if (wParam == kTimerUpdateCheck) {
+                ::KillTimer(hwnd_, kTimerUpdateCheck);   // 一次性
+                StartBackgroundUpdateCheck();
                 return 0;
             }
             break;
@@ -1375,6 +1400,9 @@ void MainWindow::RegisterCommands() {
         [this](const CmdContext&) { CommandShowRunDialog(); });
 
     // ---- 帮助 ----
+    add(kCmdHelpCheckUpdate, CmdCategory::Help, L"cmd.help.checkUpdate", L"检查更新(&U)...",
+        core::kCmdNone, [this](const CmdContext&) { CommandCheckUpdate(); });
+    addSeparator(L"cmd.help.sepUpdate");
     add(kCmdHelpAbout, CmdCategory::Help, L"cmd.help.about", L"关于 notepadcc(&A)",
         core::kCmdNone, [this](const CmdContext&) { CommandAbout(); });
 
@@ -5369,6 +5397,67 @@ void MainWindow::CommandCustomizeContextMenu() {
     statusBar_.SetMessage(core::Tr(L"status.contextMenuUpdated", L"右键菜单已更新"));
 }
 
+void MainWindow::CommandCheckUpdate() {
+    if (updateBusy_->exchange(true)) {
+        // 已有的那次多半是启动自动检查：不叠第二次，明说一句而不是"点了没反应"
+        statusBar_.SetMessage(L"已有一次更新检查在进行，请稍候…");
+        ::MessageBoxW(hwnd_, L"已经有一次更新检查在进行，请稍候。", L"检查更新",
+                      MB_ICONINFORMATION);
+        return;
+    }
+    // 标志已置位：ShowChecking 提交的任务跑完会把它清掉（对话框提前被关也一样）
+    UpdateDialog::ShowChecking(hwnd_, UpdatePool(), updateBusy_,
+                               infra::Utf8FromWide(config_.Update().sourceUrl),
+                               core::kAppVersionAscii);
+}
+
+void MainWindow::StartBackgroundUpdateCheck() {
+    if (updateBusy_->exchange(true)) {
+        return;   // 手动检查正在跑：这一次自动检查跳过（下次启动再说）
+    }
+    const HWND target = hwnd_;
+    auto busy = updateBusy_;
+    infra::UpdateCheckOptions options;
+    options.sourceUrl = infra::Utf8FromWide(config_.Update().sourceUrl);
+    options.currentVersion = core::kAppVersionAscii;
+    // 与函数列表同一条约定：结果用消息递回 UI 线程，指针所有权一并转移
+    UpdatePool().Submit([target, busy, options]() mutable {
+        auto report =
+            std::make_unique<infra::UpdateCheckReport>(infra::RunUpdateCheck(options));
+        busy->store(false);
+        if (::PostMessageW(target, core::kMsgUpdateResult, 0,
+                           reinterpret_cast<LPARAM>(report.get())) == 0) {
+            return;   // 窗口没了：指针随 unique_ptr 释放
+        }
+        report.release();
+    });
+}
+
+void MainWindow::HandleBackgroundUpdateResult(const infra::UpdateCheckReport& report) {
+    using Status = infra::UpdateCheckReport::Status;
+    switch (report.status) {
+        case Status::UpToDate:
+            statusBar_.SetMessage(report.summary);
+            break;
+        case Status::Available:
+            statusBar_.SetMessage(report.summary + L"：已下载并通过签名校验");
+            // 找到新版本要让人看见；对话框里能一键打开下载目录
+            UpdateDialog::ShowAvailable(hwnd_, report);
+            break;
+        case Status::Error:
+            // 自动检查失败不打扰用户（这台机器可能就没联网），日志里留痕
+            infra::LogWarn(L"update", L"自动更新检查失败：" + report.detail);
+            break;
+    }
+}
+
+infra::ThreadPool& MainWindow::UpdatePool() {
+    if (!updatePool_) {
+        updatePool_ = std::make_unique<infra::ThreadPool>(1);
+    }
+    return *updatePool_;
+}
+
 void MainWindow::ShowEditorContextMenu(POINT screenPoint) {
     if (contextMenuItems_.empty()) {
         return;   // 用户把项全删了：右键不弹菜单（配置说了算）
@@ -5921,12 +6010,13 @@ void MainWindow::CommandManageShortcuts() {
 }
 
 void MainWindow::CommandAbout() {
-    ::MessageBoxW(hwnd_,
-                  L"notepadcc 1.0.0（M0 + 多标签）\n\n"
-                  L"原生 Win32 + Scintilla 的轻量文本 / 源码编辑器。\n"
-                  L"已完成：多标签与标签栏（拖拽排序、中键关闭、右键菜单、脏标记）、"
-                  L"多编码打开与保存、原子写盘、语法着色、命令注册表与可重绑快捷键。",
-                  L"关于 notepadcc", MB_ICONINFORMATION);
+    const std::wstring text =
+        std::wstring(L"notepadcc ") + core::kAppVersion +
+        L"（M0 + 多标签）\n\n"
+        L"原生 Win32 + Scintilla 的轻量文本 / 源码编辑器。\n"
+        L"已完成：多标签与标签栏（拖拽排序、中键关闭、右键菜单、脏标记）、"
+        L"多编码打开与保存、原子写盘、语法着色、命令注册表与可重绑快捷键。";
+    ::MessageBoxW(hwnd_, text.c_str(), L"关于 notepadcc", MB_ICONINFORMATION);
 }
 
 }  // namespace npcc::shell

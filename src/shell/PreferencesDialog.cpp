@@ -9,7 +9,9 @@
 
 #include "core/ConfigCenter.h"
 #include "core/Localization.h"
+#include "core/UpdateManifest.h"
 #include "infra/Log.h"
+#include "infra/UpdateService.h"
 
 namespace npcc::shell {
 namespace {
@@ -55,6 +57,8 @@ enum PrefControl : int {
     kPrefRefuseMB       = 1045,
     kPrefAdvancedNote   = 1046,
     kPrefUiLanguage     = 1048,
+    kPrefUpdateCheck    = 1049,
+    kPrefUpdateUrl      = 1050,
 
     kPrefOk     = 1060,
     kPrefCancel = 1061,
@@ -128,6 +132,7 @@ private:
     HWND         Ctrl(int id) const { return ::GetDlgItem(hwnd_, id); }
     std::wstring TextOf(int id) const;
     void         SetInt(int id, int value) const;
+    void         SetText(int id, const std::wstring& text) const;
     bool         IsChecked(int id) const;
     void         SetChecked(int id, bool checked) const;
     void         SetComboIndex(int id, int index) const;
@@ -298,6 +303,10 @@ void PreferencesDialog::BuildAdvancedPage() {
         Edit(kPrefTier2MB, L"64"), Scale(90));
     Row(page, Label(core::Tr(L"prefs.refuse", L"拒绝阈值（MB，超过不再打开）：")),
         Edit(kPrefRefuseMB, L"512"), Scale(90));
+    Row(page, nullptr,
+        Check(kPrefUpdateCheck, core::Tr(L"prefs.updateCheck", L"启动后自动检查更新")));
+    Row(page, Label(core::Tr(L"prefs.updateUrl", L"更新源 URL（必须是 https）：")),
+        Edit(kPrefUpdateUrl, L"", true), Scale(320));
     noteLabel_ = Label(core::Tr(
         L"prefs.advancedNote",
         L"说明：三个阈值必须严格递增，保存后立即生效。未保存的内容按上面的间隔定时写入"
@@ -428,6 +437,12 @@ void PreferencesDialog::SetInt(int id, int value) const {
     }
 }
 
+void PreferencesDialog::SetText(int id, const std::wstring& text) const {
+    if (HWND control = Ctrl(id); control != nullptr) {
+        ::SetWindowTextW(control, text.c_str());
+    }
+}
+
 bool PreferencesDialog::IsChecked(int id) const {
     const HWND control = Ctrl(id);
     return control != nullptr &&
@@ -511,6 +526,9 @@ void PreferencesDialog::LoadFromConfig() {
     SetInt(kPrefTier1MB, static_cast<int>(large.tier1MaxBytes / (1024 * 1024)));
     SetInt(kPrefTier2MB, static_cast<int>(large.tier2MaxBytes / (1024 * 1024)));
     SetInt(kPrefRefuseMB, static_cast<int>(large.refuseAboveBytes / (1024 * 1024)));
+
+    SetChecked(kPrefUpdateCheck, config.Update().checkOnStartup);
+    SetText(kPrefUpdateUrl, config.Update().sourceUrl);
 }
 
 bool PreferencesDialog::StoreToConfig(std::wstring& error, int& badControlId) {
@@ -630,6 +648,25 @@ bool PreferencesDialog::StoreToConfig(std::wstring& error, int& badControlId) {
     config.LargeFile().tier1MaxBytes = static_cast<std::uint64_t>(tier1) * 1024 * 1024;
     config.LargeFile().tier2MaxBytes = static_cast<std::uint64_t>(tier2) * 1024 * 1024;
     config.LargeFile().refuseAboveBytes = static_cast<std::uint64_t>(refuse) * 1024 * 1024;
+
+    // 更新源：在这里就用与检查时同一个策略函数验一遍——输错了当场说清楚，
+    // 而不是等 30 秒后的自动检查在日志里失败（日志普通用户不会看）
+    {
+        std::wstring url = TextOf(kPrefUpdateUrl);
+        const std::size_t first = url.find_first_not_of(L" \t");
+        const std::size_t last = url.find_last_not_of(L" \t");
+        url = first == std::wstring::npos ? std::wstring() : url.substr(first, last - first + 1);
+        std::wstring why;
+        if (!core::IsAllowedUpdateUrl(infra::Utf8FromWide(url), &why)) {
+            error = core::Tr(L"prefs.error.updateUrl",
+                             L"更新源不合规：{0}（要求 https://，本机 http://127.0.0.1 仅供测试）",
+                             {why});
+            badControlId = kPrefUpdateUrl;
+            return false;
+        }
+        config.Update().checkOnStartup = IsChecked(kPrefUpdateCheck);
+        config.Update().sourceUrl = url;
+    }
 
     config.RequestSave();   // 合并写盘：真正落盘可能延后到下一次请求或退出时
     return true;

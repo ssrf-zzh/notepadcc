@@ -322,6 +322,16 @@ bool ConfigCenter::Load(std::wstring* error) {
         }
     }
 
+    const infra::XmlElement* update = Section(root, L"update");
+    if (update != nullptr) {
+        update_.checkOnStartup =
+            ReadBool(update, L"checkOnStartup", update_.checkOnStartup, warnings_, L"update");
+        update_.sourceUrl = ReadString(update, L"sourceUrl", update_.sourceUrl);
+        update_.startupDelaySeconds = static_cast<std::uint32_t>(ReadIntInRange(
+            update, L"startupDelaySeconds", static_cast<int>(update_.startupDelaySeconds), 1,
+            3600, warnings_, L"update"));
+    }
+
     for (const std::wstring& warning : warnings_) {
         infra::LogWarn(L"config", L"配置项已回退默认值: " + warning);
     }
@@ -419,6 +429,12 @@ bool ConfigCenter::Save(bool force, std::wstring* error) {
             contextMenu->AddChild(L"Item")->SetAttribute(L"command", key);
         }
     }
+
+    infra::XmlElementPtr update = root->AddChild(L"update");
+    update->SetAttributeBool(L"checkOnStartup", update_.checkOnStartup);
+    update->SetAttribute(L"sourceUrl", update_.sourceUrl);
+    update->SetAttributeInt(L"startupDelaySeconds",
+                            static_cast<int>(update_.startupDelaySeconds));
 
     const bool ok = io::SaveXmlFile(Path().wstring(), document, error);
     if (ok) {

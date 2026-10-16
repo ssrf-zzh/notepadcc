@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <functional>
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -22,6 +23,7 @@
 #include "edit/StyleScheme.h"
 #include "infra/CrashGuard.h"
 #include "infra/ThreadPool.h"
+#include "infra/UpdateService.h"
 #include "shell/StatusBar.h"
 #include "shell/TabBar.h"
 #include "shell/ToolBar.h"
@@ -131,6 +133,11 @@ private:
     void CommandToggleToolbar();
     void CommandCustomizeToolbar();
     void CommandCustomizeContextMenu();
+    // 检查更新（M3 第十块）：手动入口起一次对话框；启动延迟检查走同一条后台路径
+    void CommandCheckUpdate();
+    void StartBackgroundUpdateCheck();
+    void HandleBackgroundUpdateResult(const infra::UpdateCheckReport& report);
+    infra::ThreadPool& UpdatePool();
     void ShowEditorContextMenu(POINT screenPoint);
     void CommandToggleSplit();
     void CommandCyclePane();
@@ -349,6 +356,11 @@ private:
     std::unique_ptr<infra::ThreadPool> functionPool_;
     std::uint64_t              functionRequestId_ = 0;
     bool                       functionListVisible_ = false;
+    // 更新检查：线程池单独一个（函数列表忙的时候不该把检查也堵住）；
+    // updateBusy_ 是"已有一次检查在跑"的共享标志——手动检查与启动自动检查共用
+    std::unique_ptr<infra::ThreadPool> updatePool_;
+    std::shared_ptr<std::atomic<bool>> updateBusy_ =
+        std::make_shared<std::atomic<bool>>(false);
     StatusBar                  statusBar_;
     FindBar                    findBar_;
     SearchPanel                searchPanel_;

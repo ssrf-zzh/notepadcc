@@ -22,6 +22,7 @@ enum : UINT {
     kMsgCrashTest       = WM_APP + 14,  // 自检开关：等窗口就绪后故意崩一次
     kMsgFunctionListReady = WM_APP + 15, // 函数列表后台解析结果（指针所有权转移给 UI 线程）
     kMsgStartupNotice   = WM_APP + 16,  // 窗口显示后再露面一次的打开提示（二进制、大文件档等）
+    kMsgUpdateResult    = WM_APP + 17,  // 更新检查结果（指针所有权转移给接手的窗口）
     kMsgUserRangeStart  = WM_APP + 100, // 以下保留给外壳内部
 };
 

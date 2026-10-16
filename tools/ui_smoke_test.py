@@ -6,11 +6,15 @@
 """
 import ctypes
 import base64
+import hashlib
+import http.server
+import json
 import os
 import quopri
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import winreg
 import zipfile
@@ -362,6 +366,33 @@ VK_RETURN = 0x0D
 STATUS_CLASS = "msctls_statusbar32"
 SB_GETTEXTLENGTHW = 0x040C            # WM_USER + 12
 SB_GETTEXTW = 0x040D                  # WM_USER + 13
+
+# ---- 自动更新检查（M3 第十块）----
+CMD_HELP_CHECK_UPDATE = (12 << 12) | 2   # 帮助 → 检查更新…
+UPDATE_DIALOG_CLASS = "notepadccUpdateCheck"
+UPDATE_STATUS = 1701        # 状态行（STATIC，WM_GETTEXT 跨进程可读）
+UPDATE_OPEN = 1710          # 打开下载目录
+UPDATE_CLOSE = 1711         # 关闭
+# 给测试清单签名的开发钥匙（对应 src/core/UpdateKey.h 里内嵌的公钥）。
+# 正式发布的私钥绝不进仓库——这两行只服务于回归；换正式钥匙时与 UpdateKey.h 一起换。
+UPDATE_TEST_KEY_N = int(
+    "abbb8a5c1ae5a66104194a1836e738563d9b8535a446e796d4948f1ed817e3b8"
+    "a400c3463fe44292652b6ddd397d9f7d551566ef6b17a628b1b63957c281ed74"
+    "d941764e03eb32a2deb3055d74eccc4f2c2de1dfd6a2a57de80bfb97e0af50"
+    "af0d01c6bec769d483602a1f6ebcca3ffd443a1a9747cb49ed6a944da8923794"
+    "56ee0fe82fefdb10f27801650a388507aa9817e4692981fa4a6423f2c7389edf"
+    "ab7a2bd0b0a028947e948baed202a0b33b9525ae7f3c6dc5f70a5c323f6d7d1c"
+    "5006c0eee93d77aebb474a73a97bbab402de1bfff386573e2674cb5a539f2c1041"
+    "b253fb5d80580321ded302ead3702d5d0066b3db9d9308c65045477bfbeac15d", 16)
+UPDATE_TEST_KEY_D = int(
+    "67fd7f71f8a3999563cb00901b26f6795a83032e11551245c662532c25448a13"
+    "b3d3f66b62a31120defc6661b0bf7e4581b11d0cdb778d9954cb787bc8ffae4f"
+    "b4832c655f801bc07e443f7a7124372fb61bee8c01c7a998cd5bfc34e2cca679"
+    "e9d16a8cf9e9fed2b2f7aee2fa952a1c6e25151708557465bcc5232571ad1038"
+    "79014fdb6a260779b2ffa087b1a62d790fb587481b0e8177f31ada4e5041e707"
+    "6fc6a642df36c9503b2523ecc575d83d4e991b53012d3572ba932ac074fe1a13d"
+    "40c0d5b4a6f4d27c817dd28ae0e4ab4dc182fedcc610b336bbb32ca415abe4c9a"
+    "20d38827ed00e9a25ea4cd687f97f5126b1fe7351b8cc81abc44a877eeb3ad", 16)
 PROCESS_VM_OPERATION = 0x0008
 PROCESS_VM_READ = 0x0010
 PROCESS_VM_WRITE = 0x0020
@@ -4506,6 +4537,8 @@ def run():
         failed = True
     if not test_portable_package(root):
         failed = True
+    if not test_update_check(root):
+        failed = True
 
     if failed:
         print("FAIL: 界面回归未通过")
@@ -4517,7 +4550,8 @@ def run():
           "运行命令 + 界面语言 + 十六进制查看 + 复制为富文本 + Markdown 预览 + 对话框文案 + "
           "比较 + JSON 树视图 + 括号匹配与摘要与全屏 + 工具栏 + 右键菜单定制 + 自动完成 + "
           "文件关联 + "
-          "文件类型识别与 MIME 工具 + 护眼模式 + XML 树视图与校验 + XPath 查询 + 绿色打包）")
+          "文件类型识别与 MIME 工具 + 护眼模式 + XML 树视图与校验 + XPath 查询 + "
+          "自动更新检查 + 绿色打包）")
     return 0
 
 
@@ -7511,6 +7545,212 @@ def test_run_command(root):
           "保存成命名命令能立刻用也能重启后读回来、起不来的命令被挡下且不留空文档")
     return True
 
+def update_sign_manifest(content):
+    """按 RSA-2048 + SHA-256 + PKCS#1 v1.5 给清单原始字节签名（纯 Python，不引第三方库）。
+
+    与 src/core/UpdateVerify.cpp 里验签的公式严格对应：EMSA-PKCS1-v1_5 编码后的
+    大整数做一次 RSA 私钥运算就是签名。换正式钥匙时，这一对常量与 UpdateKey.h 一起换。
+    """
+    digest = hashlib.sha256(content).digest()
+    digest_info = bytes.fromhex("3031300d060960864801650304020105000420") + digest
+    modulus_bytes = (UPDATE_TEST_KEY_N.bit_length() + 7) // 8
+    encoded = (b"\x00\x01" + b"\xff" * (modulus_bytes - 3 - len(digest_info))
+               + b"\x00" + digest_info)
+    signature = pow(int.from_bytes(encoded, "big"), UPDATE_TEST_KEY_D, UPDATE_TEST_KEY_N)
+    return base64.b64encode(signature.to_bytes(modulus_bytes, "big")).decode("ascii")
+
+
+def test_update_check(root):
+    """自动更新检查与签名（M3 第十块）：本地源上真的发 HTTP 请求，签名 / SHA-256 /
+    Authenticode 三道闸门真的会拦，启动延迟检查也真的自己跑起来。
+
+    四个用例共用同一个源地址，只换服务端上的文件：
+      A 启动自动检查（配置里 delay=2 秒）：签名合法、版本与当前相同 → 状态栏"已是最新"；
+      B 手点"检查更新…"：签名被改一个字符 → 对话框写明"签名无效"；
+      C 版本更新但包哈希对不上 → "SHA-256 不匹配"；
+      D 哈希对得上但包里的 exe 没有签名 → "Authenticode 校验失败"，且包确实解压过。
+    下载源明文 http 只放行 127.0.0.1（回归用白名单），外部明文源被策略拒绝这条由单元测试覆盖。
+    """
+    work = os.path.join(root, "build", "update_test")
+    shutil.rmtree(work, ignore_errors=True)
+    source = os.path.join(work, "source")
+    os.makedirs(source)
+
+    cfg = os.path.join(root, "build", "bin", "config")
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    requests = []
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=source, **kwargs)
+
+        def log_message(self, fmt, *args):
+            requests.append(self.path)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    source_url = f"http://127.0.0.1:{port}/"
+
+    def write_manifest(version, sha256_hex, tamper_signature=False, notes="测试用更新"):
+        manifest = json.dumps({"version": version, "notes": notes,
+                               "url": source_url + "pkg.zip", "sha256": sha256_hex},
+                              ensure_ascii=False).encode("utf-8")
+        with open(os.path.join(source, "update.json"), "wb") as handle:
+            handle.write(manifest)
+        signature = update_sign_manifest(manifest)
+        if tamper_signature:
+            # 改签名中间一个字符（仍是长度合法的 base64），验签必须失败
+            middle = len(signature) // 2
+            signature = (signature[:middle] + ("A" if signature[middle] != "A" else "B")
+                         + signature[middle + 1:])
+        with open(os.path.join(source, "update.json.sig"), "w", encoding="ascii") as handle:
+            handle.write(signature)
+
+    def make_package(name="bin/notepadcc.exe", data=b"not a real pe file"):
+        path = os.path.join(source, "pkg.zip")
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(name, data)
+        with open(path, "rb") as handle:
+            return hashlib.sha256(handle.read()).hexdigest()
+
+    # 清掉上一段的配置与更新缓存：这一段的 config 把更新源指向本地服务器
+    for name in ("config.xml", "session.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+    shutil.rmtree(os.path.join(cfg, "update"), ignore_errors=True)
+    with open(os.path.join(cfg, "config.xml"), "w", encoding="utf-8", newline="") as handle:
+        handle.write('<?xml version="1.0" encoding="utf-8"?>\n'
+                     '<NotepadccConfig schemaVersion="1">\n'
+                     f'  <update checkOnStartup="yes" sourceUrl="{source_url}" '
+                     'startupDelaySeconds="2"/>\n'
+                     '</NotepadccConfig>\n')
+
+    doc = os.path.join(work, "a.txt")
+    with open(doc, "w", encoding="utf-8", newline="") as handle:
+        handle.write("update check\n")
+
+    # 用例 A 的清单必须在启动之前就位：自动检查 2 秒后就来取
+    write_manifest("1.0.0", hashlib.sha256(b"placeholder").hexdigest())
+
+    def dialog():
+        return user32.FindWindowW(UPDATE_DIALOG_CLASS, None)
+
+    def wait_dialog(timeout=8.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            box = dialog()
+            if box:
+                return box
+            time.sleep(0.2)
+        return None
+
+    def read_status(box):
+        return window_text(user32.GetDlgItem(box, UPDATE_STATUS))
+
+    def run_manual_case(want, timeout=25.0):
+        if dialog():
+            print("  FAIL: 上一个检查更新对话框没有关掉")
+            return "", False
+        user32.PostMessageW(window, WM_COMMAND, CMD_HELP_CHECK_UPDATE, 0)
+        box = wait_dialog()
+        if not box:
+            print("  FAIL: 检查更新对话框没有出现")
+            return "", False
+        deadline = time.time() + timeout
+        text = ""
+        while time.time() < deadline:
+            text = read_status(box)
+            if want in text:
+                break
+            time.sleep(0.2)
+        close_button = user32.GetDlgItem(box, UPDATE_CLOSE)
+        if not close_button:
+            print("  FAIL: 对话框里找不到「关闭」按钮")
+            return text, False
+        user32.PostMessageW(close_button, 0x00F5, 0, 0)   # BM_CLICK，投递不阻塞
+        deadline = time.time() + 6.0
+        while time.time() < deadline and dialog():
+            time.sleep(0.2)
+        if dialog():
+            send_bounded(dialog(), WM_CLOSE)
+        return text, want in text
+
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", doc], cwd=root)
+    window = wait_for_main_window("notepadcc - a.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+
+        # ---- A) 启动 2 秒后的自动检查：合法签名 + 同版本 → 状态栏"已是最新" ----
+        got = None
+        deadline = time.time() + 45.0
+        while time.time() < deadline:
+            text = read_status_bar(window)
+            if "最新" in text:
+                got = text
+                break
+            time.sleep(0.5)
+        if got is None:
+            print(f"  FAIL: 等启动自动检查的结果超时，状态栏是 {read_status_bar(window)!r}")
+            return False
+        if dialog():
+            print("  FAIL: “已是最新”不该弹对话框")
+            return False
+
+        # ---- B) 手点"检查更新…"：签名被改一个字符 → "签名无效" ----
+        write_manifest("1.0.1", hashlib.sha256(b"placeholder").hexdigest(),
+                       tamper_signature=True)
+        text, ok = run_manual_case("签名无效")
+        if not ok:
+            print(f"  FAIL: 篡改过的签名应被拒，对话框写的是 {text!r}")
+            return False
+
+        # ---- C) 版本更新但包哈希对不上 → "SHA-256 不匹配" ----
+        make_package()
+        write_manifest("1.0.1", "0" * 64)
+        text, ok = run_manual_case("SHA-256")
+        if not ok:
+            print(f"  FAIL: 哈希不匹配应被拒，对话框写的是 {text!r}")
+            return False
+
+        # ---- D) 哈希对得上但包里的 exe 没签名 → "Authenticode 校验失败"，包已解压 ----
+        digest = make_package()
+        write_manifest("1.0.1", digest)
+        text, ok = run_manual_case("Authenticode")
+        if not ok:
+            print(f"  FAIL: 未签名的 exe 应被 Authenticode 拦下，对话框写的是 {text!r}")
+            return False
+        extracted = os.path.join(cfg, "update", "downloads", "1.0.1", "package", "bin",
+                                 "notepadcc.exe")
+        if not os.path.exists(extracted):
+            print(f"  FAIL: 包应当先被解压到 {extracted}")
+            return False
+        if not any(path.endswith("pkg.zip") for path in requests):
+            print(f"  FAIL: 服务端没看到 pkg.zip 的请求：{requests}")
+            return False
+        if sum(1 for path in requests if path.endswith("update.json.sig")) < 4:
+            print(f"  FAIL: 每次检查都该取签名，请求记录是 {requests}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        server.shutdown()
+        for name in ("config.xml", "session.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+        shutil.rmtree(os.path.join(cfg, "update"), ignore_errors=True)
+
+    print("  自动更新检查：启动延迟检查拿到“已是最新”，篡改签名 / 错哈希 / 未签名 exe "
+          "三道闸门各拦一次，包确实下载并解压到 update/downloads/<版本>/package")
+    return True
 
 if __name__ == "__main__":
     sys.exit(run())

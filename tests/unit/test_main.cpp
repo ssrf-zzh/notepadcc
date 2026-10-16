@@ -33,6 +33,10 @@
 #include "core/XmlTree.h"
 #include "core/XPath.h"
 #include "core/Localization.h"
+#include "core/Sha256.h"
+#include "core/UpdateKey.h"
+#include "core/UpdateManifest.h"
+#include "core/UpdateVerify.h"
 #include "core/ExportRtf.h"
 #include "shell/FolderPanel.h"
 #include "shell/FunctionListPanel.h"
@@ -64,6 +68,7 @@
 #include "search/RegexEngine.h"
 #include "search/Wildcard.h"
 #include "infra/Paths.h"
+#include "infra/UpdateService.h"
 #include "infra/Xml.h"
 
 // 只用它拿风格号常量（STYLE_DEFAULT / STYLE_LINENUMBER），不碰任何窗口逻辑
@@ -7134,6 +7139,254 @@ int main() {
         Check(hugeResult.truncated &&
                   hugeResult.matches.size() == npcc::core::kMaxXPathMatches,
               "命中停在 5000 并标出 truncated");
+    }
+
+    Section("SHA-256（FIPS 向量 / 流式分块 / 边界）");
+    {
+        using npcc::core::Sha256;
+        using npcc::core::Sha256Stream;
+
+        const auto hexOf = [](const std::string& text) {
+            return Sha256(text.data(), text.size()).Hex();
+        };
+        CheckEqual(hexOf(std::string("")),
+                   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                   "空串的 SHA-256");
+        CheckEqual(hexOf(std::string("abc")),
+                   "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                   "abc（FIPS 180-4 示例）的 SHA-256");
+        CheckEqual(hexOf(std::string("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")),
+                   "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+                   "FIPS 长示例（56 字节）的 SHA-256");
+        CheckEqual(hexOf(std::string("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")),
+                   "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318",
+                   "55 字节（补位后正好 56）的 SHA-256");
+        CheckEqual(hexOf(std::string("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")),
+                   "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a",
+                   "56 字节（补位必须多开一块）的 SHA-256");
+        CheckEqual(hexOf(std::string("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")),
+                   "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+                   "64 字节（正好一整块）的 SHA-256");
+        CheckEqual(hexOf(std::string("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")),
+                   "24da1b81d0b16df6428eee73c69fcb2a93c76bc6df706f0c6670fe6bfe800464",
+                   "128 字节（两块）的 SHA-256");
+        CheckEqual(hexOf(std::string(1000000, 'a')),
+                   "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0",
+                   "一百万字节的 SHA-256（分块循环的真正压力）");
+
+        // 流式与一次性必须给出同一个结果：分块边界正好落在 64 字节块的多个位置
+        const std::string pattern = "abcdefghijklmnopqrstuvwxyz0123456789";
+        std::string repeated;
+        for (int index = 0; index < 500; ++index) {
+            repeated += pattern;
+        }
+        const std::string whole = hexOf(repeated);
+        for (const std::size_t chunk : {std::size_t(1), std::size_t(3), std::size_t(63),
+                                        std::size_t(64), std::size_t(65)}) {
+            Sha256Stream stream;
+            for (std::size_t offset = 0; offset < repeated.size(); offset += chunk) {
+                stream.Update(repeated.data() + offset,
+                              std::min(chunk, repeated.size() - offset));
+            }
+            CheckEqual(stream.Digest().Hex(), whole, "分块流式摘要与一次性一致");
+        }
+        Sha256Stream twice;
+        twice.Update(pattern.data(), pattern.size());
+        CheckEqual(twice.Digest().Hex(), twice.Digest().Hex(),
+                   "Digest() 可以反复取，不破坏内部状态");
+        twice.Update(pattern.data(), pattern.size());
+        CheckEqual(twice.Digest().Hex(), hexOf(pattern + pattern), "取完摘要还能继续 Update");
+        const npcc::core::Sha256Digest a = Sha256("abc", 3);
+        const npcc::core::Sha256Digest b = Sha256("abd", 3);
+        Check(a == a && a != b, "摘要的比较运算符");
+        CheckEqual(a.Hex(), a.Hex(), "Hex() 是纯函数（两次调用一致）");
+        Check(a.Hex().size() == 64 && a.Hex().find_first_of("ABCDEF") == std::string::npos,
+              "Hex() 是小写 64 位十六进制");
+    }
+
+    Section("更新清单（解析 / 版本比较 / 下载源策略）");
+    {
+        using npcc::core::CompareVersions;
+        using npcc::core::IsAllowedUpdateUrl;
+        using npcc::core::IsNewerVersion;
+        using npcc::core::IsValidSha256Hex;
+        using npcc::core::ParseUpdateManifest;
+        using npcc::core::UpdateManifest;
+
+        const std::string good =
+            R"json({"version":"1.0.1","notes":"修复了小问题","url":"https://example.invalid/pkg.zip","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789ABCDEF"})json";
+        UpdateManifest manifest;
+        std::wstring error;
+        Check(ParseUpdateManifest(good, manifest, &error), "合法清单能解析");
+        CheckEqual(manifest.version, "1.0.1", "版本字段");
+        CheckEqual(manifest.notes, "修复了小问题", "说明字段保留 UTF-8 原文");
+        CheckEqual(manifest.sha256,
+                   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                   "sha256 统一成小写");
+
+        error.clear();
+        Check(!ParseUpdateManifest(
+                  R"json({"version":"1.0a","notes":"","url":"https://x/y","sha256":")json"
+                  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}",
+                  manifest, &error) && error.find(L"数字点分") != std::wstring::npos,
+              "版本号带字母被挡下（宁可不给结论）");
+        error.clear();
+        Check(!ParseUpdateManifest(
+                  R"json({"version":"1.0.1","notes":"","url":"https://x/y","sha256":"abc"})json",
+                  manifest, &error) && error.find(L"sha256") != std::wstring::npos,
+              "sha256 长度不对被挡下");
+        error.clear();
+        Check(!ParseUpdateManifest(
+                  R"json({"version":"1.0.1","url":"https://x/y","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"})json",
+                  manifest, &error) && error.find(L"notes") != std::wstring::npos,
+              "缺字段被点名");
+        error.clear();
+        Check(!ParseUpdateManifest(
+                  R"json({"version":"1.0.1","notes":"","url":"https://x/y","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","extra":"x"})json",
+                  manifest, &error) && error.find(L"四个字段") != std::wstring::npos,
+              "多出来的字段也报错（不猜一半）");
+        error.clear();
+        Check(!ParseUpdateManifest(
+                  R"json({"version":1.01,"notes":"","url":"https://x/y","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"})json",
+                  manifest, &error) && error.find(L"不是字符串") != std::wstring::npos,
+              "字段类型不对被挡下");
+        error.clear();
+        Check(!ParseUpdateManifest(
+                  R"json({"version":"1.0.1","notes":"\u4e2d","url":"https://x/y","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"})json",
+                  manifest, &error) && error.find(L"不是合法 JSON") != std::wstring::npos,
+              "\\uXXXX 转义按不支持处理（与 JsonFlat 的边界一致，写文档里）");
+
+        bool valid = false;
+        Check(CompareVersions("1.0.0", "1.0.0", &valid) == 0 && valid, "相同版本等于 0");
+        Check(CompareVersions("1.0.1", "1.0.0", &valid) == 1 && valid, "补丁号更大");
+        Check(CompareVersions("1.10", "1.9", &valid) == 1 && valid, "按整数比而不是字符串");
+        Check(CompareVersions("1.0", "1.0.0", &valid) == 0 && valid, "缺的段当 0");
+        Check(CompareVersions("2", "1.9.9", &valid) == 1 && valid, "段数不同也能比");
+        Check(CompareVersions("01.0", "1.0", &valid) == 0 && valid, "前导零不影响大小");
+        valid = true;
+        CompareVersions("1..0", "1.0", &valid);
+        Check(!valid, "空段算非法版本");
+        valid = true;
+        CompareVersions("1.0", "1.0.", &valid);
+        Check(!valid, "尾点算非法版本");
+        valid = true;
+        Check(!IsNewerVersion("1.0.0", "1.0.0", &valid) && valid, "同版本不算新");
+        valid = false;
+        Check(IsNewerVersion("1.0.1", "1.0.0", &valid) && valid, "1.0.1 比 1.0.0 新");
+        valid = true;
+        IsNewerVersion("1.0a", "1.0.0", &valid);
+        Check(!valid, "非法版本不给出“谁新”的结论");
+
+        std::wstring why;
+        Check(IsAllowedUpdateUrl("https://example.invalid/notepadcc/", &why), "https 放行");
+        Check(IsAllowedUpdateUrl("http://127.0.0.1:8123/pkg.zip", &why), "本机回环 http 放行（回归用）");
+        Check(IsAllowedUpdateUrl("http://localhost/update.json", &why), "localhost 放行");
+        Check(IsAllowedUpdateUrl("HTTPS://Example.INVALID/x", &why), "协议与主机名大小写不敏感");
+        why.clear();
+        Check(!IsAllowedUpdateUrl("http://example.com/pkg.zip", &why) &&
+                  why.find(L"https") != std::wstring::npos,
+              "外部明文 http 拒绝");
+        Check(!IsAllowedUpdateUrl("ftp://example.com/x", &why), "非 http(s) 拒绝");
+        Check(!IsAllowedUpdateUrl("https:/example.com", &why), "缺一个斜杠的写法也拒绝");
+        Check(IsValidSha256Hex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+              "64 位小写十六进制合法");
+        Check(IsValidSha256Hex("0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"),
+              "大写也合法（比对前会统一小写）");
+        Check(!IsValidSha256Hex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde"),
+              "63 位不合法");
+        Check(!IsValidSha256Hex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg"),
+              "非十六进制字符不合法");
+    }
+
+    Section("更新验签（RSA-2048 PKCS#1 v1.5 / Authenticode / 错误码文案）");
+    {
+        using npcc::core::DescribeTrustError;
+        using npcc::core::VerifyAuthenticode;
+        using npcc::core::VerifyRsaSha256Signature;
+
+        // 固定清单 + 固定签名（用 tools/make_update_key.ps1 那把开发钥匙签的）。
+        // 私钥不在仓库里：smoke 脚本要用它签测试清单，这里只验"正的能过、动的过不了"
+        const std::string signedContent =
+            R"json({"version":"1.0.1","notes":"a small fix","url":"https://example.invalid/notepadcc/pkg.zip","sha256":"0000000000000000000000000000000000000000000000000000000000000000"})json";
+        const std::string signature = "AZZvsoFUrkiTdd6BNV4vz3SAITaNkAztLqT6y93zLtJfXSIWPNNHCpWc6W5pOBzIG1lm1nDkZGUTET1yop0MAkP5FN9L0CtVr4yBtHxGiqS72V5YNj4clT0lEhlK86Qbp1ZiTsb+aelaaxpzMV4pMoUCPMEWheuCP2q7hq8YH68joO8BkFbZe7sK6wyGnCeuQ7YLeIbu6UJ6JXcw1vfHPuqcJkSBVd4KKWGwC8uI+F+wygB/O1pmQVW3gfLSmFctTHIJCgHJV+vJKfs/lL7LE2oAmvWRjtl/2qG/umA4VxPlmtj3679hVsEkKRPBFn3F/Xiky9LpK6WUSp6JVtaiRQ==";
+        std::wstring error;
+        Check(VerifyRsaSha256Signature(signedContent.data(), signedContent.size(), signature,
+                                       npcc::core::kUpdatePublicKeyBase64, &error),
+              "固定签名能通过验签");
+        Check(error.empty(), "通过时 error 不被写脏");
+        error.clear();
+        std::string tampered = signedContent;
+        tampered[12] = '2';   // "1.0.1" → "1.0.2"：长度不变，内容变了
+        Check(!VerifyRsaSha256Signature(tampered.data(), tampered.size(), signature,
+                                        npcc::core::kUpdatePublicKeyBase64, &error) &&
+                  error.find(L"签名") != std::wstring::npos,
+              "改一个字节就验不过（签名覆盖原始字节）");
+        error.clear();
+        Check(!VerifyRsaSha256Signature(signedContent.data(), signedContent.size(),
+                                        signature + "AA==",
+                                        npcc::core::kUpdatePublicKeyBase64, &error),
+              "长度不对的签名被拒");
+        error.clear();
+        Check(!VerifyRsaSha256Signature(signedContent.data(), signedContent.size(), "!!!",
+                                        npcc::core::kUpdatePublicKeyBase64, &error) &&
+                  error.find(L"base64") != std::wstring::npos,
+              "坏 base64 被拒并说清楚");
+        error.clear();
+        Check(!VerifyRsaSha256Signature(signedContent.data(), signedContent.size(), signature,
+                                        "AAAA", &error),
+              "坏公钥被拒");
+
+        Check(DescribeTrustError(static_cast<long>(0x800B0100u)).find(L"没有数字签名") !=
+                  std::wstring::npos,
+              "未签名错误码有名字");
+        Check(DescribeTrustError(static_cast<long>(0x80096010u)).find(L"摘要") !=
+                  std::wstring::npos,
+              "摘要不匹配错误码有名字");
+        Check(DescribeTrustError(static_cast<long>(0x12345678u)).find(L"0x12345678") !=
+                  std::wstring::npos,
+              "不认识的错误码给十六进制");
+
+        // 正的用系统 DLL：它的证书链在本机缓存里，cache-only 也能过。
+        // 反面教训（附录 B）：System32 下的命令行 exe（cmd/notepad/ping）只是带签名的壳，
+        // cache-only 下实测报"没有数字签名"，所以正例选 DLL、不选 exe
+        wchar_t systemDir[MAX_PATH] = {};
+        ::GetSystemDirectoryW(systemDir, MAX_PATH);
+        const wchar_t* const candidates[] = {L"kernel32.dll", L"user32.dll", L"shell32.dll"};
+        int trustedCount = 0;
+        std::wstring firstError;
+        for (const wchar_t* name : candidates) {
+            error.clear();
+            if (VerifyAuthenticode(std::wstring(systemDir) + L"\\" + name, &error)) {
+                ++trustedCount;
+            } else if (firstError.empty()) {
+                firstError = std::wstring(name) + L"：" + error;
+            }
+        }
+        if (trustedCount == 0) {
+            std::printf("    [NOTE] 候选系统 DLL 都没过信任校验，首条原因：%s\n",
+                        QuoteForLog(ToUtf8(firstError)).c_str());
+        }
+        Check(trustedCount > 0, "至少一个系统 DLL 通过 Authenticode（本机缓存链）");
+        // 负的用本测试程序自己：一个货真价实、没有签名的 PE
+        wchar_t selfPath[MAX_PATH] = {};
+        ::GetModuleFileNameW(nullptr, selfPath, MAX_PATH);
+        error.clear();
+        Check(!VerifyAuthenticode(selfPath, &error) &&
+                  error.find(L"数字签名") != std::wstring::npos,
+              "没签名的 PE（本测试程序自己）被拒，原因是「没有数字签名」");
+        error.clear();
+        Check(!VerifyAuthenticode(std::wstring(systemDir) + L"\\no_such_file_xyz.exe", &error),
+              "不存在的文件被拒而不是崩掉");
+
+        // UTF-8 ↔ UTF-16 小工具（更新服务与界面之间全靠它）
+        const std::wstring chinese = L"更新检查：中文与 ASCII 混排";
+        CheckEqual(npcc::infra::Utf8FromWide(chinese),
+                   "更新检查：中文与 ASCII 混排",
+                   "宽字符转 UTF-8");
+        Check(npcc::infra::WideFromUtf8(npcc::infra::Utf8FromWide(chinese)) == chinese,
+              "UTF-8 往返回到原字符串");
+        Check(npcc::infra::Utf8FromWide(L"") == "" && npcc::infra::WideFromUtf8("") == L"",
+              "空串往返不炸");
     }
 
     FinishSections();

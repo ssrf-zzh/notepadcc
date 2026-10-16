@@ -164,6 +164,7 @@ std::vector<LangPack> MakeBuiltin() {
         // 故意不翻译：语言名要用它自己的语言写，用户才找得到
         // ---- 帮助 ----
         Entry(L"cmd.help.about", L"About notepadcc", L"A"),
+        Entry(L"cmd.help.checkUpdate", L"Check for Updates...", L"U"),
         // ---- 菜单类别 ----
         Entry(L"cat.file", L"File"),
         Entry(L"cat.edit", L"Edit"),
@@ -219,6 +220,8 @@ std::vector<LangPack> MakeBuiltin() {
         Entry(L"prefs.tier1", L"Large-file threshold (MB, above this use mapped loading):"),
         Entry(L"prefs.tier2", L"Read-only threshold (MB, above this open read-only):"),
         Entry(L"prefs.refuse", L"Refuse threshold (MB, above this do not open):"),
+        Entry(L"prefs.updateCheck", L"Check for updates on startup"),
+        Entry(L"prefs.updateUrl", L"Update source URL (https required):"),
         Entry(L"prefs.advancedNote",
               L"Note: the three thresholds must increase strictly and take effect right after "
               L"saving. Unsaved content is written periodically to the backup folder under the "
@@ -240,6 +243,9 @@ std::vector<LangPack> MakeBuiltin() {
         Entry(L"prefs.error.tiers",
               L"The large-file thresholds must increase strictly: large-file < read-only < "
               L"refuse."),
+        Entry(L"prefs.error.updateUrl",
+              L"Update source is not allowed: {0} (https:// required; plain http://127.0.0.1 "
+              L"is for local testing only)"),
     };
     std::vector<LangPack> packs;
     packs.push_back(std::move(english));

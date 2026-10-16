@@ -97,6 +97,15 @@ struct ContextMenuConfig {
     bool         custom = false;       // 区分"没配过"与"配成了空表"
 };
 
+// 自动更新检查（M3 第十块）：开关、源地址与启动延迟。
+// 源地址在这里只存字符串；合规性（https / 本机回环白名单）由检查时的
+// core::IsAllowedUpdateUrl 判定——配错了要给出看得见的错误，而不是悄悄改用默认源。
+struct UpdateConfig {
+    bool          checkOnStartup = true;
+    std::wstring  sourceUrl = L"https://example.invalid/notepadcc/";
+    std::uint32_t startupDelaySeconds = 30;   // 启动后多久开始检查（1~3600 秒）
+};
+
 // 配置中心（设计文档 4.5 / 7.2）。
 //
 // 三条硬性要求，都是"别让配置把程序搞挂"：
@@ -132,6 +141,7 @@ public:
     SearchDefaults& Search() noexcept { return search_; }
     ToolbarConfig&  Toolbar() noexcept { return toolbar_; }
     ContextMenuConfig& ContextMenu() noexcept { return contextMenu_; }
+    UpdateConfig&   Update() noexcept { return update_; }
 
     const GeneralConfig&  General() const noexcept { return general_; }
     const EditConfig&     Edit() const noexcept { return edit_; }
@@ -141,6 +151,7 @@ public:
     const SearchDefaults& Search() const noexcept { return search_; }
     const ToolbarConfig&  Toolbar() const noexcept { return toolbar_; }
     const ContextMenuConfig& ContextMenu() const noexcept { return contextMenu_; }
+    const UpdateConfig&   Update() const noexcept { return update_; }
 
     // 加载过程中被回退的属性名，供"关于/诊断"展示
     const std::vector<std::wstring>& Warnings() const noexcept { return warnings_; }
@@ -154,6 +165,7 @@ private:
     SearchDefaults  search_;
     ToolbarConfig   toolbar_;
     ContextMenuConfig contextMenu_;
+    UpdateConfig    update_;
     std::vector<std::wstring> warnings_;
     long long       lastSaveTick_ = 0;
     bool            dirty_ = false;
