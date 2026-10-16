@@ -9,6 +9,7 @@
 #include "core/CommandRegistry.h"
 #include "core/DocumentManager.h"
 #include "core/Macro.h"
+#include "core/Messages.h"
 #include "core/ShortcutStore.h"
 #include "core/ConfigCenter.h"
 #include "core/SessionManager.h"
@@ -18,9 +19,11 @@
 #include "edit/LanguageRegistry.h"
 #include "edit/StyleScheme.h"
 #include "infra/CrashGuard.h"
+#include "infra/ThreadPool.h"
 #include "shell/StatusBar.h"
 #include "shell/TabBar.h"
 #include "shell/FolderPanel.h"
+#include "shell/FunctionListPanel.h"
 #include "shell/FindBar.h"
 #include "shell/SearchPanel.h"
 #include "search/CrossFileSearch.h"
@@ -134,6 +137,13 @@ private:
     void CommandOpenWorkspaceSelection();   // 打开树里选中的文件（双击/回车也走它）
     void ApplyWorkspace(const std::wstring& folder, bool persist);
     void HandleFolderNotify(const FolderNotify& notification);
+    // ---- 函数列表（设计文档 2.6 第 5 条）----
+    void CommandToggleFunctionList();
+    void ScheduleFunctionParse();          // 节流之后的解析请求
+    void StartFunctionParse();             // 真正提交后台解析（由 WM_TIMER 触发）
+    void HandleFunctionNotify(const FunctionNotify& notification);
+    void ApplyFunctionSymbols(std::uint64_t requestId,
+                              std::vector<core::FunctionSymbol> symbols);
     // 打开一个具体路径（工作区双击、单实例转交都用它，免得两处各写一遍）
     bool OpenDocumentPath(const std::wstring& path);
     void ApplyStyleSchemeToAllViews();
@@ -193,6 +203,10 @@ private:
     std::unique_ptr<core::DocumentManager> documents_;
     TabBar                     tabBar_;
     FolderPanel                folderPanel_;
+    FunctionListPanel          functionListPanel_;
+    std::unique_ptr<infra::ThreadPool> functionPool_;
+    std::uint64_t              functionRequestId_ = 0;
+    bool                       functionListVisible_ = false;
     StatusBar                  statusBar_;
     FindBar                    findBar_;
     SearchPanel                searchPanel_;

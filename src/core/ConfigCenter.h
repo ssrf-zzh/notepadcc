@@ -21,6 +21,9 @@ struct GeneralConfig {
     // 文件夹工作区的根目录（空 = 不用工作区）。放配置里而不是会话里：
     // "我常在这个目录下干活"是使用偏好，不该因为某次没保存会话就丢掉。
     std::wstring workspaceFolder;
+    // 函数列表面板是否显示（设计文档 2.6 第 5 条）。默认关：它占左侧一条，
+    // 第一次用的用户不该莫名其妙少一块编辑区
+    bool functionListVisible = false;
 };
 
 struct EditConfig {

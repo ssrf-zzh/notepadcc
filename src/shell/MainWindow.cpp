@@ -42,6 +42,7 @@ namespace {
 // 定时器 ID
 constexpr UINT_PTR kTimerAutosave = 1;
 constexpr UINT_PTR kTimerCrashTest = 2;
+constexpr UINT_PTR kTimerFunctionList = 3;   // 函数列表的节流定时器（一次性）
 
 enum : npcc::core::CmdId {
     kCmdFileNew     = npcc::core::MakeCmdId(1, 1),
@@ -90,6 +91,8 @@ enum : npcc::core::CmdId {
     kCmdViewWorkspaceClose   = npcc::core::MakeCmdId(4, 16),
     kCmdViewWorkspaceRefresh = npcc::core::MakeCmdId(4, 17),
     kCmdViewWorkspaceOpenSel = npcc::core::MakeCmdId(4, 18),
+    kCmdViewFunctionList     = npcc::core::MakeCmdId(4, 19),
+    kCmdViewFunctionJump     = npcc::core::MakeCmdId(4, 20),
 
     // 宏（8 类）
     kCmdMacroRecord       = npcc::core::MakeCmdId(8, 1),
@@ -160,6 +163,7 @@ enum : npcc::core::CmdId {
     kSciCut       = 2177,
     kSciCopy      = 2178,
     kSciPaste     = 2179,
+    kSciGotoLine  = 2024,   // SCI_GOTOLINE（函数列表跳转用）
 };
 
 void CopyTextToClipboard(HWND owner, const std::wstring& text) {
@@ -263,6 +267,9 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             statusBar_.Create(hwnd_, 2);
             FolderPanel::RegisterWindowClass(::GetModuleHandleW(nullptr));
             folderPanel_.Create(hwnd_, 3);
+            FunctionListPanel::RegisterWindowClass(::GetModuleHandleW(nullptr));
+            functionListPanel_.Create(hwnd_, 4);
+            functionPool_ = std::make_unique<infra::ThreadPool>();
             findBar_.Create(hwnd_);
             searchPanel_.Create(hwnd_);
             documents_ = std::make_unique<core::DocumentManager>(hwnd_);
@@ -314,6 +321,9 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             // 宏也要在菜单建出来之前注册好，否则宏菜单里空空如也
             // （读文件时的警告由 ShortcutStore 自己记日志，这里不重复）
             RegisterMacroCommands();
+            // 函数列表面板：开关记在配置里
+            functionListVisible_ = config_.General().functionListVisible;
+            functionListPanel_.SetVisible(functionListVisible_);
             // 工作区目录来自配置：目录不在了就当"没有工作区"，配置留着不动
             if (!config_.General().workspaceFolder.empty()) {
                 std::error_code ec;
@@ -472,6 +482,10 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
                 HandleFolderNotify(*reinterpret_cast<const FolderNotify*>(lParam));
                 return 0;
             }
+            if (header->hwndFrom == functionListPanel_.Handle()) {
+                HandleFunctionNotify(*reinterpret_cast<const FunctionNotify*>(lParam));
+                return 0;
+            }
             if (DocumentOfView(header->hwndFrom) != nullptr) {
                 HandleEditorNotify(*header);
                 return 0;
@@ -488,6 +502,15 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
         case core::kMsgSearchWakeup:
             UpdateSearchProgress();
             return 0;
+        case core::kMsgFunctionListReady: {
+            // 后台解析的结果：指针所有权在这里接过来（与跨文件搜索同一约定）
+            std::unique_ptr<std::vector<core::FunctionSymbol>> symbols(
+                reinterpret_cast<std::vector<core::FunctionSymbol>*>(lParam));
+            if (symbols != nullptr) {
+                ApplyFunctionSymbols(static_cast<std::uint64_t>(wParam), std::move(*symbols));
+            }
+            return 0;
+        }
         case core::kMsgSearchFinished: {
             std::unique_ptr<search::SearchProgress> progress(
                 reinterpret_cast<search::SearchProgress*>(lParam));
@@ -558,6 +581,10 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
                 infra::LogInfo(L"app", L"自检开关：现在故意触发一次访问违例");
                 infra::crashguard::RaiseTestCrash();   // 自检开关：这里之后不会再返回
                 infra::LogWarn(L"app", L"自检开关：异常没有发生（RaiseTestCrash 返回了）");
+                return 0;
+            }
+            if (wParam == kTimerFunctionList) {
+                StartFunctionParse();   // 里面会 KillTimer：这是一次性定时器
                 return 0;
             }
             break;
@@ -836,6 +863,11 @@ void MainWindow::RegisterCommands() {
     add(kCmdViewWorkspaceOpenSel, CmdCategory::View, L"cmd.view.workspaceOpenSelected",
         L"打开选中的文件(&O)", core::kCmdNone,
         [this](const CmdContext&) { CommandOpenWorkspaceSelection(); });
+    add(kCmdViewFunctionList, CmdCategory::View, L"cmd.view.functionList", L"函数列表(&F)",
+        core::kCmdCheckable, [this](const CmdContext&) { CommandToggleFunctionList(); });
+    add(kCmdViewFunctionJump, CmdCategory::View, L"cmd.view.functionJump",
+        L"跳到选中的符号(&J)", core::kCmdNone,
+        [this](const CmdContext&) { functionListPanel_.ActivateSelection(); });
 
     // ---- 格式（行尾转换）----
     add(kCmdFormatEolCrlf, CmdCategory::Format, L"cmd.format.eolCrlf", L"转为 Windows 行尾（CRLF）",
@@ -1039,6 +1071,8 @@ void MainWindow::RegisterCommands() {
     bindChecked(kCmdMacroRecord, [this] { return macroRecorder_.Recording(); });
     bindChecked(kCmdViewWorkspaceClose, [this] { return !folderPanel_.Root().empty(); });
     bindChecked(kCmdViewWorkspaceOpenSel, [this] { return !folderPanel_.SelectedPath().empty(); });
+    bindChecked(kCmdViewFunctionList, [this] { return functionListVisible_; });
+    bindChecked(kCmdViewFunctionJump, [this] { return functionListPanel_.SelectedLine() >= 0; });
 
     // ---- 默认快捷键 ----
     const uint8_t ctrl = core::kModCtrl;
@@ -1173,16 +1207,34 @@ void MainWindow::LayoutChildren() const {
         bottomInset += findHeight;
     }
 
-    // 文件夹工作区：向左停靠，占住客户区左侧一条。编辑区（含分屏）在剩下的区域里排
-    const int panelWidth = folderPanel_.Width();
-    if (panelWidth > 0 && folderPanel_.Handle() != nullptr) {
-        RECT panelRect{};
-        panelRect.left = 0;
-        panelRect.top = tabHeight;
-        panelRect.right = panelWidth;
-        panelRect.bottom = client.bottom - bottomInset;
-        if (panelRect.bottom > panelRect.top) {
-            folderPanel_.Resize(panelRect);
+    // 左侧一列：文件夹工作区在上、函数列表在下（两个都开就各占一半）。
+    // 编辑区（含分屏）在剩下的区域里排。没有真正的 DockHost，所以这里是"固定左栏"，
+    // 宽度与分割方式都写死——见设计说明书 2.4 第 5 条记的差异
+    const bool folderShown = folderPanel_.Width() > 0 && folderPanel_.Handle() != nullptr;
+    const bool functionsShown = functionListVisible_ && functionListPanel_.Handle() != nullptr;
+    // 宽度问面板自己（它按自己的 DPI 缩放）；两个都开时用左边的那个值
+    const int panelWidth = folderShown ? folderPanel_.Width()
+                                       : (functionsShown ? functionListPanel_.Width() : 0);
+    if (panelWidth > 0) {
+        RECT column{};
+        column.left = 0;
+        column.top = tabHeight;
+        column.right = panelWidth;
+        column.bottom = client.bottom - bottomInset;
+        if (column.bottom > column.top) {
+            if (folderShown && functionsShown) {
+                const int split = column.top + (column.bottom - column.top) / 2;
+                RECT top = column;
+                top.bottom = split;
+                RECT bottom = column;
+                bottom.top = split + 1;
+                folderPanel_.Resize(top);
+                functionListPanel_.Resize(bottom);
+            } else if (folderShown) {
+                folderPanel_.Resize(column);
+            } else {
+                functionListPanel_.Resize(column);
+            }
         }
     }
 
@@ -1662,6 +1714,8 @@ void MainWindow::ActivateDocument(core::BufferId id) {
     UpdateStatus();
     // 兜底检查：目录通知可能因为缓冲区溢出而漏掉，切到某个标签时再确认一次
     CheckActiveDocumentForExternalChange();
+    // 换标签之后函数列表要跟着换（节流：连续切标签只解析最后一个）
+    ScheduleFunctionParse();
 }
 
 void MainWindow::EnsureAtLeastOneDocument() {
@@ -1965,6 +2019,10 @@ void MainWindow::HandleEditorNotify(const NMHDR& header) {
             break;
         case edit::EditorEvent::SavePointLeft:
             document->buffer.isModified = true;
+            // 文档变了：函数列表要重算（节流 300 ms，见 ScheduleFunctionParse）
+            if (document == documents_->Active()) {
+                ScheduleFunctionParse();
+            }
             // 崩溃抢救只看"有没有未保存的改动"，所以这一刻必须同步刷新槽位：
             // 否则刚打完字就崩，抢救会以为这个文档是干净的，直接跳过。
             RefreshRescueSlots();
@@ -3228,6 +3286,99 @@ void MainWindow::HandleFolderNotify(const FolderNotify& notification) {
     if (notification.action == FolderAction::OpenFile) {
         OpenDocumentPath(notification.path);
     }
+}
+
+void MainWindow::HandleFunctionNotify(const FunctionNotify& notification) {
+    if (notification.action != FunctionAction::JumpToLine) {
+        return;
+    }
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr) {
+        return;
+    }
+    document->view->Send(kSciGotoLine, static_cast<uintptr_t>(notification.line));
+    // 焦点交回编辑器：从列表点一下跳过去，接着就要打字了
+    ::SetFocus(document->view->Handle());
+    UpdateStatus();
+}
+
+void MainWindow::CommandToggleFunctionList() {
+    functionListVisible_ = !functionListVisible_;
+    functionListPanel_.SetVisible(functionListVisible_);
+    config_.General().functionListVisible = functionListVisible_;
+    config_.RequestSave();
+    LayoutChildren();
+    if (functionListVisible_) {
+        // 开面板就立刻解析一次，不用等用户打字
+        StartFunctionParse();
+    }
+}
+
+void MainWindow::ScheduleFunctionParse() {
+    if (!functionListVisible_) {
+        return;
+    }
+    // 节流：每次改动都重置这个一次性定时器，停手 300 ms 才真的解析（设计文档 2.6 第 5 条）
+    ::SetTimer(hwnd_, kTimerFunctionList, 300, nullptr);
+}
+
+void MainWindow::StartFunctionParse() {
+    ::KillTimer(hwnd_, kTimerFunctionList);
+    if (!functionListVisible_ || documents_ == nullptr) {
+        return;
+    }
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr) {
+        functionListPanel_.SetSymbols({});
+        return;
+    }
+    // 大文件档不列函数（设计文档 6.1 的 T2/T3：那一档要省的正是"扫全文"）
+    if (document->buffer.tier != edit::FileTier::Normal) {
+        functionListPanel_.SetSymbols({});
+        statusBar_.SetMessage(L"函数列表：大文件档不列函数");
+        return;
+    }
+    const std::wstring language = document->view->LanguageName();
+    if (!core::HasFunctionExtractor(language)) {
+        functionListPanel_.SetSymbols({});
+        statusBar_.SetMessage(L"函数列表：这种语言列不出符号");
+        return;
+    }
+    std::string text = document->view->GetAllText();
+    // 与自动完成同一个理由：解析放在后台线程，但**不能把整个文档原样搬两份**。
+    // 这里给一个上限（4 MB），超过就当"太大不列"——真要看结构也是先把文件拆开
+    constexpr std::size_t kMaxParseBytes = 4ull * 1024 * 1024;
+    if (text.size() > kMaxParseBytes) {
+        functionListPanel_.SetSymbols({});
+        statusBar_.SetMessage(L"函数列表：文件超过 4 MB，不列符号");
+        return;
+    }
+    const std::uint64_t requestId = ++functionRequestId_;
+    HWND target = hwnd_;
+    // 解析在后台线程：Scintilla 只能在 UI 线程访问，所以文本是**一份拷贝**；
+    // 结果用一条消息递回来，指针所有权一并转移（与跨文件搜索同一条约定）
+    functionPool_->Submit([language, text = std::move(text), requestId, target]() mutable {
+        auto symbols = std::make_unique<std::vector<core::FunctionSymbol>>(
+            core::ExtractFunctionList(language, text));
+        if (::PostMessageW(target, core::kMsgFunctionListReady,
+                           static_cast<WPARAM>(requestId),
+                           reinterpret_cast<LPARAM>(symbols.get())) == 0) {
+            return;   // 窗口没了：指针随 unique_ptr 一起释放
+        }
+        symbols.release();   // 所有权交给 UI 线程
+    });
+}
+
+void MainWindow::ApplyFunctionSymbols(std::uint64_t requestId,
+                                      std::vector<core::FunctionSymbol> symbols) {
+    // 迟到的结果直接丢：用户可能已经改了文件或者换了标签
+    if (requestId != functionRequestId_ || !functionListVisible_) {
+        return;
+    }
+    const std::size_t count = symbols.size();
+    functionListPanel_.SetSymbols(symbols);
+    statusBar_.SetMessage(count == 0 ? L"函数列表：没有找到符号"
+                                     : L"函数列表：" + std::to_wstring(count) + L" 个符号");
 }
 
 void MainWindow::CommandToggleDarkMode() {

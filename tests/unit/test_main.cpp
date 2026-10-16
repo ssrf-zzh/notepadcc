@@ -16,7 +16,9 @@
 #include "core/ShortcutStore.h"
 #include "core/Macro.h"
 #include "core/FolderTree.h"
+#include "core/FunctionList.h"
 #include "shell/FolderPanel.h"
+#include "shell/FunctionListPanel.h"
 #include "core/SnapshotStore.h"
 #include "infra/SingleInstance.h"
 #include "infra/FileAssociation.h"
@@ -165,6 +167,8 @@ LRESULT CALLBACK TestHostProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPa
 // 文件夹工作区面板向外壳发的那种通知，测试里需要一个能把它收下来的宿主窗口
 std::wstring g_lastFolderNotifyPath;
 int          g_folderNotifyCount = 0;
+int          g_functionNotifyLine = -1;
+int          g_functionNotifyCount = 0;
 
 LRESULT CALLBACK NotifyHostProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     if (message == WM_NOTIFY) {
@@ -173,6 +177,11 @@ LRESULT CALLBACK NotifyHostProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
             const auto* notification = reinterpret_cast<const npcc::shell::FolderNotify*>(lParam);
             g_lastFolderNotifyPath = notification->path;
             ++g_folderNotifyCount;
+        } else if (header != nullptr && header->code == npcc::shell::kFunctionNotifyCode) {
+            const auto* notification =
+                reinterpret_cast<const npcc::shell::FunctionNotify*>(lParam);
+            g_functionNotifyLine = notification->line;
+            ++g_functionNotifyCount;
         }
     }
     return ::DefWindowProcW(hwnd, message, wParam, lParam);
@@ -2607,6 +2616,191 @@ int main() {
             const std::vector<npcc::core::ShortcutBinding> bindings = registry.BindingsOf(command.id);
             Check(bindings.size() == 1 && bindings[0].keyCode == 'K', "快捷键改动也生效了");
             std::filesystem::remove(path, ec);
+        }
+    }
+
+    // ---------------------------------------------------------------- 函数列表
+    // 提取器是**纯函数**：给语言与文本、返回符号表。所以这一段直接造源码比对
+    // 名字/行号/层级，不涉及任何窗口——"结构提取"错了就是错了，不该靠看界面发现。
+    Section("函数列表（结构提取）");
+    {
+        using npcc::core::ExtractFunctionList;
+        using npcc::core::FunctionSymbol;
+        using npcc::core::HasFunctionExtractor;
+
+        // 1) C 家族：函数、类、层级，注释与字符串里的括号不能把层级带歪
+        {
+            const std::string source =
+                "#include <cstdio>\n"                         // 0
+                "\n"                                          // 1
+                "int helper(int x) {\n"                       // 2
+                "    return x + 1;\n"                         // 3
+                "}\n"                                         // 4
+                "\n"                                          // 5
+                "class Widget {\n"                            // 6
+                "public:\n"                                   // 7
+                "    void draw() {\n"                         // 8
+                "        printf(\"}\");\n"                    // 9 字符串里有个 }
+                "    }\n"                                     // 10
+                "    // } 注释里的也不该算\n"                  // 11
+                "};\n"                                        // 12
+                "\n"                                          // 13
+                "int main() {\n"                              // 14
+                "    if (1) { return 0; }\n"                  // 15 控制流不算函数
+                "}\n";                                        // 16
+            const std::vector<FunctionSymbol> symbols =
+                ExtractFunctionList(L"cpp", source);
+            Check(symbols.size() == 4, "cpp：找到 4 个符号（helper / Widget / draw / main）");
+            if (symbols.size() == 4) {
+                Check(symbols[0].name == L"helper" && symbols[0].line == 2 &&
+                          symbols[0].depth == 0 && symbols[0].kind == L"函数",
+                      "helper 在第 3 行、顶层、算函数");
+                Check(symbols[1].name == L"Widget" && symbols[1].line == 6 && symbols[1].kind == L"类",
+                      "Widget 是类");
+                Check(symbols[2].name == L"draw" && symbols[2].line == 8 && symbols[2].depth == 1,
+                      "draw 在类里面（层级 1）");
+                Check(symbols[3].name == L"main" && symbols[3].line == 14 && symbols[3].depth == 0,
+                      "main 回到顶层（字符串与注释里的 } 没有把层级带歪）");
+            }
+            Check(!HasFunctionExtractor(L"json"), "json 没有提取器");
+        }
+
+        // 2) Python：靠缩进分层，async def 与嵌套 def 都对
+        {
+            const std::string source =
+                "import os\n"                    // 0
+                "\n"                             // 1
+                "def top():\n"                   // 2
+                "    pass\n"                     // 3
+                "\n"                             // 4
+                "class Service:\n"               // 5
+                "    def handle(self):\n"        // 6
+                "        def inner():\n"         // 7
+                "            pass\n"             // 8
+                "\n"                             // 9
+                "async def fetch():\n"           // 10
+                "    pass\n";                    // 11
+            const std::vector<FunctionSymbol> symbols = ExtractFunctionList(L"python", source);
+            Check(symbols.size() == 5, "python：找到 5 个符号（含 async def）");
+            if (symbols.size() == 5) {
+                Check(symbols[0].name == L"top" && symbols[0].line == 2 && symbols[0].depth == 0,
+                      "顶层函数 depth 0");
+                Check(symbols[1].name == L"Service" && symbols[1].kind == L"类", "class 也列出来");
+                Check(symbols[2].name == L"handle" && symbols[2].depth == 1,
+                      "类里的方法 depth 1");
+                Check(symbols[3].name == L"inner" && symbols[3].depth == 2,
+                      "方法里的嵌套函数 depth 2");
+                Check(symbols[4].name == L"fetch" && symbols[4].depth == 0,
+                      "async def 也认，缩进回到顶层");
+            }
+        }
+
+        // 3) Markdown：标题层级，代码块里的 # 不算
+        {
+            const std::string source =
+                "# 标题一\n"                      // 0
+                "正文\n"                          // 1
+                "## 标题二\n"                     // 2
+                "```\n"                           // 3
+                "# 这是代码里的井号\n"            // 4
+                "```\n"                           // 5
+                "### 标题三 ###\n"                // 6
+                "#没有空格不是标题\n";            // 7
+            const std::vector<FunctionSymbol> symbols = ExtractFunctionList(L"markdown", source);
+            Check(symbols.size() == 3, "markdown：三个标题（代码块里那个不算）");
+            if (symbols.size() == 3) {
+                Check(symbols[0].name == L"标题一" && symbols[0].depth == 0, "一级标题");
+                Check(symbols[1].name == L"标题二" && symbols[1].depth == 1, "二级标题");
+                Check(symbols[2].name == L"标题三" && symbols[2].depth == 2,
+                      "三级标题（结尾的 # 会被去掉）");
+            }
+        }
+
+        // 4) CSS：选择器
+        {
+            const std::string source =
+                "body {\n"                        // 0
+                "  color: red;\n"                 // 1
+                "}\n"                             // 2
+                ".card > .title {\n"              // 3
+                "  font-weight: bold;\n"          // 4
+                "}\n"                             // 5
+                "@media screen {\n"               // 6
+                "  .inner { color: blue; }\n"     // 7
+                "}\n";                            // 8
+            const std::vector<FunctionSymbol> symbols = ExtractFunctionList(L"css", source);
+            Check(symbols.size() == 3, "css：两个选择器 + 一个嵌套选择器（@media 不算）");
+            if (symbols.size() == 3) {
+                Check(symbols[0].name == L"body" && symbols[0].depth == 0, "body");
+                Check(symbols[1].name == L".card > .title" && symbols[1].depth == 0,
+                      "组合选择器整段显示");
+                Check(symbols[2].name == L".inner" && symbols[2].depth == 1,
+                      "媒体查询里的选择器层级为 1");
+            }
+        }
+
+        // 5) 边界：不认识的语言、空文本、CRLF、中文名
+        {
+            Check(ExtractFunctionList(L"json", "{\"a\": 1}").empty(), "不认识的语言返回空");
+            Check(ExtractFunctionList(L"cpp", "").empty(), "空文本返回空");
+            Check(!HasFunctionExtractor(L"我自己的语言"), "UDL 语言默认没有提取器");
+            const std::string crlf = "int a() {\r\n    return 1;\r\n}\r\nint b() {\r\n}\r\n";
+            const std::vector<FunctionSymbol> symbols = ExtractFunctionList(L"cpp", crlf);
+            Check(symbols.size() == 2 && symbols[1].line == 3, "CRLF 文档的行号也对");
+            const std::string chinese = "// 中文注释\nint 中文函数() {\n    return 0;\n}\n";
+            const std::vector<FunctionSymbol> named = ExtractFunctionList(L"cpp", chinese);
+            Check(named.size() == 1 && named[0].name == L"中文函数", "中文标识符也能提出来");
+        }
+
+        // 6) 面板：把符号表填进树，层级按 depth 建；选中 → 通知外壳跳转
+        {
+            const HWND host = CreateNotifyHost();
+            if (host == nullptr) {
+                Check(false, "创建通知宿主失败");
+            } else {
+                Check(npcc::shell::FunctionListPanel::RegisterWindowClass(
+                          ::GetModuleHandleW(nullptr)),
+                      "注册函数面板窗口类");
+                npcc::shell::FunctionListPanel panel;
+                Check(panel.Create(host, 910), "创建函数面板");
+                std::vector<FunctionSymbol> symbols = {
+                    {L"helper", 2, 0, L"函数"},
+                    {L"Widget", 6, 0, L"类"},
+                    {L"draw", 8, 1, L"函数"},
+                    {L"main", 14, 0, L"函数"},
+                };
+                panel.SetSymbols(symbols);
+                const HWND tree = panel.Tree();
+                Check(tree != nullptr && ::SendMessageW(tree, TVM_GETCOUNT, 0, 0) == 4,
+                      "树里 4 个符号");
+                // 顶层第一个是 helper；Widget 下面挂着 draw（层级 1）
+                const HTREEITEM first = reinterpret_cast<HTREEITEM>(
+                    ::SendMessageW(tree, TVM_GETNEXTITEM, TVGN_ROOT, 0));
+                Check(first != nullptr, "有顶层节点");
+                Check(reinterpret_cast<HTREEITEM>(::SendMessageW(
+                          tree, TVM_GETNEXTITEM, TVGN_CHILD,
+                          reinterpret_cast<LPARAM>(first))) == nullptr,
+                      "顶层第一个符号没有子节点");
+                const HTREEITEM widget = reinterpret_cast<HTREEITEM>(::SendMessageW(
+                    tree, TVM_GETNEXTITEM, TVGN_NEXT, reinterpret_cast<LPARAM>(first)));
+                const HTREEITEM draw = reinterpret_cast<HTREEITEM>(::SendMessageW(
+                    tree, TVM_GETNEXTITEM, TVGN_CHILD, reinterpret_cast<LPARAM>(widget)));
+                Check(draw != nullptr, "Widget 下面挂着 draw（层级关系建对了）");
+
+                // 选中 draw（层级 1，先展开）→ 通知里应当带着它的行号
+                ::SendMessageW(tree, TVM_EXPAND, TVE_EXPAND, reinterpret_cast<LPARAM>(widget));
+                ::SendMessageW(tree, TVM_SELECTITEM, TVGN_CARET, reinterpret_cast<LPARAM>(draw));
+                Check(panel.SelectedLine() == 8, "选中项的选中行号读得回来");
+                g_functionNotifyLine = -1;
+                g_functionNotifyCount = 0;
+                panel.ActivateSelection();
+                Check(g_functionNotifyCount == 1 && g_functionNotifyLine == 8,
+                      "跳转通知带上了正确的行号");
+
+                panel.SetSymbols({});
+                Check(::SendMessageW(tree, TVM_GETCOUNT, 0, 0) == 0, "清空之后树也空了");
+                ::DestroyWindow(host);
+            }
         }
     }
 

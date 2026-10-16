@@ -126,6 +126,7 @@ set(NPCC_CORE_SOURCES
     src/core/ConfigCenter.cpp
     src/core/DocumentManager.cpp
     src/core/FolderTree.cpp
+    src/core/FunctionList.cpp
     src/core/Macro.cpp
     src/core/SessionManager.cpp
     src/core/ShortcutStore.cpp
@@ -165,6 +166,7 @@ set(NPCC_CORE_SOURCES
     src/search/Wildcard.cpp
     src/shell/MainWindow.cpp
     src/shell/MenuBuilder.cpp
+    src/shell/FunctionListPanel.cpp
     src/shell/FolderPanel.cpp
     src/shell/MacroDialog.cpp
     src/shell/FindBar.cpp

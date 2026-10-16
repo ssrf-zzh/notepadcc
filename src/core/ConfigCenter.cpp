@@ -187,6 +187,8 @@ bool ConfigCenter::Load(std::wstring* error) {
     // 工作区目录：不在这里校验"存在不存在"——目录可能只是暂时不在（U 盘、网络盘），
     // 启动时打不开就当空工作区，配置保留着，等人把盘接回来
     general_.workspaceFolder = ReadString(general, L"workspaceFolder", general_.workspaceFolder);
+    general_.functionListVisible = ReadBool(general, L"functionList", general_.functionListVisible,
+                                            warnings_, L"general");
 
     const infra::XmlElement* editor = Section(root, L"edit");
     if (editor != nullptr) {
@@ -299,6 +301,7 @@ bool ConfigCenter::Save(bool force, std::wstring* error) {
     general->SetAttributeInt(L"recentFileCount", static_cast<int>(general_.recentFileCount));
     general->SetAttribute(L"theme", general_.theme);
     general->SetAttribute(L"workspaceFolder", general_.workspaceFolder);
+    general->SetAttributeBool(L"functionList", general_.functionListVisible);
 
     infra::XmlElementPtr editor = root->AddChild(L"edit");
     editor->SetAttributeBool(L"tabToSpaces", edit_.tabToSpaces);

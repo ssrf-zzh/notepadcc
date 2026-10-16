@@ -137,6 +137,8 @@ CMD_MACRO_FIRST_SAVED = (8 << 12) | 128   # 已保存的宏在菜单里的命令
 CMD_WORKSPACE_CLOSE = (4 << 12) | 16
 CMD_WORKSPACE_REFRESH = (4 << 12) | 17
 FOLDER_PANEL_CLASS = "notepadccFolderPanel"
+FUNCTION_PANEL_CLASS = "notepadccFunctionPanel"
+CMD_FUNCTION_JUMP = (4 << 12) | 20
 TREE_CLASS = "SysTreeView32"
 TVM_GETCOUNT = 0x1105
 
@@ -1753,6 +1755,117 @@ def test_workspace(root):
 
     print("  文件夹工作区：配置里的目录启动即展开（7 个节点）、在文件中查找默认用它、"
           "键盘选中回车真的打开了文件、刷新看到外部新增、关闭后配置清空且重启不再出现")
+    return True
+
+
+def test_function_list(root):
+    """函数列表：面板列出符号与层级、键盘选中之后跳到那个函数、改代码之后自动重算。
+
+    节流（300 ms）与后台线程都由"等一下再看"来验证：改完代码之后立刻读到的还是旧的，
+    稍微等一下才更新——这正是节流该有的行为，所以断言要等。
+    """
+    work = os.path.join(root, "build", "func_test")
+    os.makedirs(work, exist_ok=True)
+    source = os.path.join(work, "sample.cpp")
+    with open(source, "w", encoding="utf-8", newline="") as handle:
+        handle.write("#include <cstdio>\n"
+                     "\n"
+                     "int helper(int x) {\n"
+                     "    return x + 1;\n"
+                     "}\n"
+                     "\n"
+                     "class Widget {\n"
+                     "public:\n"
+                     "    void draw() {\n"
+                     "        printf(\"}\");\n"
+                     "    }\n"
+                     "};\n"
+                     "\n"
+                     "int main() {\n"
+                     "    return 0;\n"
+                     "}\n")
+
+    cfg = os.path.join(root, "build", "bin", "config")
+    config = os.path.join(cfg, "config.xml")
+    for name in ("config.xml", "session.xml", "stylers.xml", "langs.xml", "userlangs.xml",
+                 "shortcuts.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+    # 面板开关记在配置里：启动即打开（不用去点菜单，跨进程点菜单只能发命令号）
+    with open(config, "w", encoding="utf-8", newline="") as handle:
+        handle.write('<?xml version="1.0" encoding="UTF-8"?>\n'
+                     '<NotepadccConfig schemaVersion="1">\n'
+                     '  <general uiLanguage="zh-CN" restoreSessionOnStart="yes"\n'
+                     '           multiInstance="no" recentFileCount="20" theme="light"\n'
+                     '           functionList="yes"/>\n'
+                     '</NotepadccConfig>\n')
+
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", source], cwd=root)
+    window = wait_for_main_window("notepadcc - sample.cpp")
+    try:
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到可见的编辑控件")
+            return False
+        panel = user32.FindWindowExW(window, None, FUNCTION_PANEL_CLASS, None)
+        if not panel or not user32.IsWindowVisible(panel):
+            print("  FAIL: 配置里开了函数列表，面板却没有出现")
+            return False
+        tree = user32.FindWindowExW(panel, None, TREE_CLASS, None)
+        if not tree:
+            print("  FAIL: 面板里没有树控件")
+            return False
+        # 解析是后台线程 + 300 ms 节流，所以这里等它出现（不是固定睡一觉就走）
+        deadline = time.time() + 8.0
+        count = 0
+        while time.time() < deadline:
+            count = user32.SendMessageW(tree, TVM_GETCOUNT, 0, 0)
+            if count >= 4:
+                break
+            time.sleep(0.2)
+        if count != 4:
+            print(f"  FAIL: 应当列出 4 个符号（helper/Widget/draw/main），实际 {count}")
+            return False
+
+        # 键盘选到第 2 个符号（helper → Widget），执行"跳到选中的符号"
+        user32.PostMessageW(tree, WM_KEYDOWN, 0x28, 0)
+        time.sleep(0.3)
+        user32.PostMessageW(tree, WM_KEYDOWN, 0x28, 0)
+        time.sleep(0.3)
+        user32.PostMessageW(window, WM_COMMAND, CMD_FUNCTION_JUMP, 0)
+        time.sleep(0.8)
+        position = user32.SendMessageW(scinti, SCI_GETCURRENTPOS, 0, 0)
+        line = user32.SendMessageW(scinti, SCI_LINEFROMPOSITION, position, 0)
+        if line != 6:
+            print(f"  FAIL: 跳到 Widget 应当落在第 7 行（0 起 6），实际第 {line} 行")
+            return False
+
+        # 在第 1 行插一个新函数：节流之后列表应当自己变长（5 个符号）
+        user32.SendMessageW(scinti, SCI_GOTOPOS, 0, 0)
+        typed = "int fresh() {\n    return 1;\n}\n\n"
+        for ch in typed:
+            user32.PostMessageW(scinti, WM_CHAR_INPUT, ord(ch), 0)
+        time.sleep(2.0)   # 打字之后等节流 + 后台解析
+        updated = user32.SendMessageW(tree, TVM_GETCOUNT, 0, 0)
+        if updated != 5:
+            print(f"  FAIL: 加了一个函数之后应当列出 5 个符号，实际 {updated}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        for name in ("config.xml", "session.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    print("  函数列表：面板列出 4 个符号（含类里的方法）、键盘选中后跳到对应行、"
+          "改了代码之后节流到期自动重算（4 → 5）")
     return True
 
 
@@ -3600,6 +3713,8 @@ def run():
         failed = True
     if not test_workspace(root):
         failed = True
+    if not test_function_list(root):
+        failed = True
     if not test_auto_complete(root):
         failed = True
     if not test_associated_commands(root):
@@ -3613,7 +3728,7 @@ def run():
     print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + "
           "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + "
           "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + UDL + 暗色模式 + "
-          "宏 + 文件夹工作区 + 自动完成 + 文件关联 + 绿色打包）")
+          "宏 + 文件夹工作区 + 函数列表 + 自动完成 + 文件关联 + 绿色打包）")
     return 0
 
 
