@@ -156,6 +156,11 @@ CMD_EDIT_COPY_AS_RTF = (2 << 12) | 34
 CMD_VIEW_PREVIEW_BROWSER = (4 << 12) | 23
 CMD_VIEW_MARKDOWN_PREVIEW = (4 << 12) | 24
 MD_PREVIEW_CLASS = "notepadccMarkdownPreview"
+PREF_DIALOG_CLASS = "notepadccPreferences"
+PREF_UI_LANGUAGE_COMBO = 1048
+PREF_CANCEL = 1061
+CB_GETCOUNT = 0x0146
+CB_SETCURSEL = 0x014E
 CF_UNICODETEXT = 13
 SCI_SETSEL = 2160
 HEX_VIEW_CLASS = "notepadccHexView"
@@ -4027,6 +4032,8 @@ def run():
         failed = True
     if not test_markdown_preview(root):
         failed = True
+    if not test_dialog_localization(root):
+        failed = True
     if not test_auto_complete(root):
         failed = True
     if not test_associated_commands(root):
@@ -4041,8 +4048,8 @@ def run():
           "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + "
           "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + UDL + 暗色模式 + "
           "宏 + 文件夹工作区 + 函数列表 + 导出与打印 + 插件宿主 + JSON/XML 格式化 + "
-          "运行命令 + 界面语言 + 十六进制查看 + 复制为富文本 + Markdown 预览 + 自动完成 + "
-          "文件关联 + 绿色打包）")
+          "运行命令 + 界面语言 + 十六进制查看 + 复制为富文本 + Markdown 预览 + 对话框文案 + "
+          "自动完成 + 文件关联 + 绿色打包）")
     return 0
 
 
@@ -4244,6 +4251,172 @@ def has_cjk(text):
         if "\u3000" <= ch <= "\u9fff" or "\uff00" <= ch <= "\uffef":
             return True
     return False
+
+def wait_menu_first_text(window, expected, timeout=6.0):
+    """等主菜单第一个弹出菜单的第一项变成某个前缀（判据是"挂在窗口上的菜单"，
+    不是配置文件里写了什么——配置写对了而界面没换正是这类功能最容易出的问题）。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        texts = menu_texts(window)
+        if texts and texts[0].startswith(expected):
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def dialog_texts(dialog):
+    """把一个自建对话框里所有子控件的文本读出来（跨进程发 WM_GETTEXT，系统消息会封送）。
+
+    页签（Tab）里的标题读不到——那要 TCM_GETITEM 传指针，跨进程拿不到；所以这一段
+    核对的是标签、复选框、输入框与按钮，页签名由单元测试与人工核对兜着。
+    """
+    found = []
+    for child in children(dialog):
+        text = window_text(child)
+        if text:
+            found.append(text)
+    return found
+
+
+def test_dialog_localization(root):
+    """对话框文案进语言包：英文界面里打开首选项，一条中文都不该有。
+
+    这是"文案进语言包"唯一的**可信**核对方式：命令能拿注册表逐条查，对话框文案没有
+    静态表——只能真的把框打开、把每个控件的文本读回来。顺带验证两个机制：
+    缺键自报（英文下开一遍首选项，日志里不该出现"缺键（用到时发现）"）与
+    首选项里的界面语言下拉（选了就当场换语言，不重启）。
+    """
+    work = os.path.join(root, "build", "dlglang_test")
+    os.makedirs(work, exist_ok=True)
+    cfg = os.path.join(root, "build", "bin", "config")
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    config_file = os.path.join(cfg, "config.xml")
+
+    target = os.path.join(work, "sample.txt")
+    with open(target, "w", encoding="utf-8", newline="") as handle:
+        handle.write("hello\n")
+
+    for name in ("config.xml", "session.xml"):
+        path = os.path.join(cfg, name)
+        if os.path.exists(path):
+            os.remove(path)
+    # 上一段的"导出语言包模板"会在配置目录留下一份 en-US.lang.xml。它会逐条覆盖内置的
+    # 同名条目（这是约定），但本段要核对的是**内置**英文包的覆盖情况，所以先清干净
+    stale_pack = os.path.join(cfg, "langs", "en-US.lang.xml")
+    if os.path.exists(stale_pack):
+        os.remove(stale_pack)
+    log_file = remove_log_with_retry(root)
+
+    def open_preferences(window):
+        user32.PostMessageW(window, WM_COMMAND, CMD_PREFERENCES, 0)
+        deadline = time.time() + 8.0
+        while time.time() < deadline:
+            dialog = user32.FindWindowW(PREF_DIALOG_CLASS, None)
+            if dialog:
+                time.sleep(0.5)
+                return dialog
+            time.sleep(0.2)
+        return None
+
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", target], cwd=root)
+    window = wait_for_main_window("notepadcc - sample.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        time.sleep(0.8)
+
+        # 1) 先切成英文（与界面语言那一段同一条路：设置菜单里的语言命令）
+        user32.PostMessageW(window, WM_COMMAND, LANGUAGE_BASE + 1, 0)
+        if not wait_menu_first_text(window, "New"):
+            print("  FAIL: 切到英文失败")
+            return False
+
+        # 2) 打开首选项：每条控件文案都应当是英文
+        dialog = open_preferences(window)
+        if not dialog:
+            print("  FAIL: 没弹出首选项对话框")
+            return False
+        texts = dialog_texts(dialog)
+        if len(texts) < 15:
+            print(f"  FAIL: 读回来的控件文案太少（{len(texts)} 条），可能是没找对控件")
+            return False
+        chinese = [text for text in texts if has_cjk(text)]
+        if chinese:
+            print(f"  FAIL: 英文界面下首选项里还有中文文案：{chinese[:6]}")
+            return False
+        joined = " | ".join(texts)
+        # 标题不是子控件文本，单独读
+        if window_text(dialog) != "Preferences":
+            print(f"  FAIL: 英文界面的首选项标题应当是 Preferences，实际 "
+                  f"{window_text(dialog)!r}")
+            return False
+        for expected in ("Restore the last session", "Tab width", "Default encoding",
+                         "Snapshot interval", "OK", "Cancel"):
+            if expected not in joined:
+                print(f"  FAIL: 英文首选项里没有 {expected!r}\n{joined}")
+                return False
+        # 关掉（取消）：不改配置，但文案已经用过一遍了——缺键自报正是靠这个
+        user32.PostMessageW(dialog, WM_COMMAND, PREF_CANCEL, 0)
+        time.sleep(0.8)
+
+        # 3) 缺键自报：英文包里没有的键会被记下来并写进日志。首选项的文案刚全用过一遍，
+        #    所以这里没有记录就说明英文包覆盖住了那个框的全部文案
+        if os.path.exists(log_file):
+            with open(log_file, "r", encoding="utf-8", errors="replace") as handle:
+                log = handle.read()
+            missed = [line for line in log.splitlines() if "缺键（用到时发现）" in line]
+            if missed:
+                print(f"  FAIL: 英文包里缺对话框文案：{missed[:6]}")
+                return False
+
+        # 4) 首选项里的界面语言下拉：选中文 → 确定 → 菜单当场变回中文
+        dialog = open_preferences(window)
+        if not dialog:
+            print("  FAIL: 第二次没弹出首选项对话框")
+            return False
+        combo = user32.GetDlgItem(dialog, PREF_UI_LANGUAGE_COMBO)
+        if not combo:
+            print("  FAIL: 首选项里没有界面语言下拉")
+            return False
+        if user32.SendMessageW(combo, CB_GETCOUNT, 0, 0) < 2:
+            print("  FAIL: 界面语言下拉里应当至少有中文与英文两项")
+            return False
+        user32.SendMessageW(combo, CB_SETCURSEL, 0, 0)   # 0 = 简体中文
+        time.sleep(0.3)
+        user32.PostMessageW(dialog, WM_COMMAND, PREF_OK, 0)
+        if not wait_menu_first_text(window, "新建"):
+            print(f"  FAIL: 在首选项里选中文并确定之后菜单应当变成中文，实际 "
+                  f"{menu_texts(window)[0]!r}")
+            return False
+        deadline = time.time() + 8.0
+        wrote_back = False
+        while time.time() < deadline:
+            if os.path.exists(config_file):
+                with open(config_file, "r", encoding="utf-8", errors="replace") as handle:
+                    if 'uiLanguage="zh-CN"' in handle.read():
+                        wrote_back = True
+                        break
+            time.sleep(0.3)
+        if not wrote_back:
+            print("  FAIL: 在首选项里换语言之后 config.xml 应当写回 zh-CN")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        for name in ("config.xml", "session.xml"):
+            path = os.path.join(cfg, name)
+            if os.path.exists(path):
+                os.remove(path)
+
+    print("  对话框文案：英文界面下首选项里没有一条中文、日志里没有缺键、"
+          "首选项里的界面语言下拉能当场把界面换回中文并写进配置")
+    return True
+
 
 def test_markdown_preview(root):
     """Markdown 预览：面板里渲染出来的**就是**解析结果，而且跟着改动实时更新。

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "core/ConfigCenter.h"
+#include "core/Localization.h"
 #include "infra/Log.h"
 
 namespace npcc::shell {
@@ -53,6 +54,7 @@ enum PrefControl : int {
     kPrefTier2MB        = 1044,
     kPrefRefuseMB       = 1045,
     kPrefAdvancedNote   = 1046,
+    kPrefUiLanguage     = 1048,
 
     kPrefOk     = 1060,
     kPrefCancel = 1061,
@@ -84,7 +86,11 @@ struct PrefRow {
     int  windowExtraHeight = 0;
 };
 
-const wchar_t* const kPageTitles[kPageCount] = {
+// 页签名与它们的语言包键（文案在 BuildPages 里取，见那里的说明）
+const wchar_t* const kPageTitleKeys[kPageCount] = {
+    L"prefs.page.general", L"prefs.page.edit", L"prefs.page.newFile", L"prefs.page.advanced",
+};
+const wchar_t* const kPageTitleTexts[kPageCount] = {
     L"常规", L"编辑", L"新建文件", L"高级",
 };
 
@@ -100,9 +106,11 @@ private:
     HWND Make(const wchar_t* cls, const wchar_t* text, DWORD style, int id,
               DWORD exStyle = 0);
     void Row(int page, HWND label, HWND field, int fieldWidth = 0, int extraHeight = 0);
-    HWND Label(const wchar_t* text);
+    // 文案都走语言包：调用点写 Tr(键, 中文默认文本)，两个参数都在原地看得见，
+    // 键名（prefs.*）与默认文本挨着写，改文案时不容易漏掉一半
+    HWND Label(const std::wstring& text);
     HWND Edit(int id, const wchar_t* text, bool allowNegative = false);
-    HWND Check(int id, const wchar_t* text);
+    HWND Check(int id, const std::wstring& text);
     HWND Combo(int id, const wchar_t* const* items, int count);
 
     void BuildPages();
@@ -133,6 +141,8 @@ private:
     npcc::core::ConfigCenter* config_ = nullptr;
     HWND                      noteLabel_ = nullptr;
     std::vector<PrefRow>      rows_[kPageCount];
+    // 界面语言下拉里每一项对应的 locale（取值时按下标查回来）
+    std::vector<std::wstring> uiLanguageIds_;
 };
 
 int PreferencesDialog::Scale(int value) const {
@@ -158,8 +168,8 @@ void PreferencesDialog::Row(int page, HWND label, HWND field, int fieldWidth, in
     rows_[page].push_back(row);
 }
 
-HWND PreferencesDialog::Label(const wchar_t* text) {
-    return Make(L"STATIC", text, WS_VISIBLE, -1);
+HWND PreferencesDialog::Label(const std::wstring& text) {
+    return Make(L"STATIC", text.c_str(), WS_VISIBLE, -1);
 }
 
 HWND PreferencesDialog::Edit(int id, const wchar_t* text, bool allowNegative) {
@@ -170,8 +180,8 @@ HWND PreferencesDialog::Edit(int id, const wchar_t* text, bool allowNegative) {
     return Make(L"EDIT", text, style, id);
 }
 
-HWND PreferencesDialog::Check(int id, const wchar_t* text) {
-    return Make(L"BUTTON", text, WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, id);
+HWND PreferencesDialog::Check(int id, const std::wstring& text) {
+    return Make(L"BUTTON", text.c_str(), WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, id);
 }
 
 HWND PreferencesDialog::Combo(int id, const wchar_t* const* items, int count) {
@@ -188,54 +198,111 @@ HWND PreferencesDialog::Combo(int id, const wchar_t* const* items, int count) {
 
 void PreferencesDialog::BuildGeneralPage() {
     const int page = 0;
-    Row(page, nullptr, Check(kPrefRestoreSession, L"启动时恢复上次打开的会话"));
     Row(page, nullptr,
-        Check(kPrefMultiInstance, L"允许同时运行多个实例（默认关闭：再启动会把文件交给已在跑的实例）"));
-    Row(page, Label(L"最近文件条数（0~100）："), Edit(kPrefRecentCount, L"20"), Scale(90));
+        Check(kPrefRestoreSession,
+              core::Tr(L"prefs.restoreSession", L"启动时恢复上次打开的会话")));
+    Row(page, nullptr,
+        Check(kPrefMultiInstance,
+              core::Tr(L"prefs.multiInstance",
+                       L"允许同时运行多个实例（默认关闭：再启动会把文件交给已在跑的实例）")));
+    Row(page, Label(core::Tr(L"prefs.recentCount", L"最近文件条数（0~100）：")),
+        Edit(kPrefRecentCount, L"20"), Scale(90));
+    // 界面语言：与别的项一样，点"确定"时写进配置；外壳发现它变了就当场换语言
+    //（不在这里直接切：对话框不该反过来驱动外壳）
+    {
+        const std::vector<std::pair<std::wstring, std::wstring>> available =
+            core::Localization::Ui().Available();
+        std::vector<std::wstring>        names;
+        std::vector<const wchar_t*>      pointers;
+        names.reserve(available.size());
+        pointers.reserve(available.size());
+        uiLanguageIds_.clear();
+        for (const std::pair<std::wstring, std::wstring>& item : available) {
+            uiLanguageIds_.push_back(item.first);
+            names.push_back(item.second);
+        }
+        for (const std::wstring& name : names) {
+            pointers.push_back(name.c_str());
+        }
+        Row(page, Label(core::Tr(L"prefs.uiLanguage", L"界面语言：")),
+            Combo(kPrefUiLanguage, pointers.data(), static_cast<int>(pointers.size())),
+            Scale(220), Scale(kRow) * 5);
+    }
 }
 
 void PreferencesDialog::BuildEditPage() {
     const int page = 1;
-    Row(page, Label(L"制表符宽度（1~64）："), Edit(kPrefTabWidth, L"4"), Scale(70));
-    Row(page, nullptr, Check(kPrefTabToSpaces, L"用空格代替制表符"));
-    Row(page, nullptr, Check(kPrefAutoIndent, L"自动缩进"));
-    Row(page, nullptr, Check(kPrefSmartIndent, L"智能缩进（跟随上一行语义）"));
-    Row(page, nullptr, Check(kPrefShowWhitespace, L"显示空白符号"));
-    Row(page, nullptr, Check(kPrefShowEol, L"显示行尾符"));
-    Row(page, nullptr, Check(kPrefShowLineNumbers, L"显示行号"));
-    Row(page, nullptr, Check(kPrefIndentGuide, L"显示缩进引导线"));
-    Row(page, nullptr, Check(kPrefCaretLine, L"高亮光标所在行"));
-    Row(page, nullptr, Check(kPrefWrap, L"自动换行"));
-    Row(page, Label(L"缩放级别（-20~40）："), Edit(kPrefZoom, L"0", true), Scale(70));
+    Row(page, Label(core::Tr(L"prefs.tabWidth", L"制表符宽度（1~64）：")),
+        Edit(kPrefTabWidth, L"4"), Scale(70));
+    Row(page, nullptr, Check(kPrefTabToSpaces, core::Tr(L"prefs.tabToSpaces", L"用空格代替制表符")));
+    Row(page, nullptr, Check(kPrefAutoIndent, core::Tr(L"prefs.autoIndent", L"自动缩进")));
+    Row(page, nullptr,
+        Check(kPrefSmartIndent,
+              core::Tr(L"prefs.smartIndent", L"智能缩进（跟随上一行语义）")));
+    Row(page, nullptr,
+        Check(kPrefShowWhitespace, core::Tr(L"prefs.showWhitespace", L"显示空白符号")));
+    Row(page, nullptr, Check(kPrefShowEol, core::Tr(L"prefs.showEol", L"显示行尾符")));
+    Row(page, nullptr,
+        Check(kPrefShowLineNumbers, core::Tr(L"prefs.showLineNumbers", L"显示行号")));
+    Row(page, nullptr,
+        Check(kPrefIndentGuide, core::Tr(L"prefs.indentGuide", L"显示缩进引导线")));
+    Row(page, nullptr,
+        Check(kPrefCaretLine, core::Tr(L"prefs.caretLine", L"高亮光标所在行")));
+    Row(page, nullptr, Check(kPrefWrap, core::Tr(L"prefs.wrap", L"自动换行")));
+    Row(page, Label(core::Tr(L"prefs.zoom", L"缩放级别（-20~40）：")),
+        Edit(kPrefZoom, L"0", true), Scale(70));
 }
 
 void PreferencesDialog::BuildNewFilePage() {
     const int page = 2;
-    static const wchar_t* const kEncodingItems[] = {
-        L"UTF-8", L"UTF-8（带 BOM）", L"ANSI（按代码页）", L"UTF-16 LE", L"UTF-16 BE",
+    // 编码/行尾那几项的显示文本也走语言包（键与默认文本一一对应，顺序即下拉顺序）
+    const std::wstring encodingItems[] = {
+        L"UTF-8",
+        core::Tr(L"prefs.enc.utf8Bom", L"UTF-8（带 BOM）"),
+        core::Tr(L"prefs.enc.ansi", L"ANSI（按代码页）"),
+        L"UTF-16 LE",
+        L"UTF-16 BE",
     };
-    static const wchar_t* const kEolItems[] = {L"CRLF（Windows）", L"LF（Unix）", L"CR（Mac）"};
+    const std::wstring eolItems[] = {
+        core::Tr(L"prefs.eol.crlf", L"CRLF（Windows）"),
+        core::Tr(L"prefs.eol.lf", L"LF（Unix）"),
+        core::Tr(L"prefs.eol.cr", L"CR（Mac）"),
+    };
+    const wchar_t* encodingPointers[5] = {encodingItems[0].c_str(), encodingItems[1].c_str(),
+                                          encodingItems[2].c_str(), encodingItems[3].c_str(),
+                                          encodingItems[4].c_str()};
+    const wchar_t* eolPointers[3] = {eolItems[0].c_str(), eolItems[1].c_str(),
+                                     eolItems[2].c_str()};
 
-    Row(page, Label(L"默认编码："), Combo(kPrefDefaultEncoding, kEncodingItems, 5), Scale(220),
-        Scale(kRow) * 7);
-    Row(page, Label(L"默认代码页（仅 ANSI 用）："), Edit(kPrefDefaultCodePage, L"936"), Scale(90));
-    Row(page, Label(L"默认行尾："), Combo(kPrefDefaultEol, kEolItems, 3), Scale(220),
-        Scale(kRow) * 5);
+    Row(page, Label(core::Tr(L"prefs.defaultEncoding", L"默认编码：")),
+        Combo(kPrefDefaultEncoding, encodingPointers, 5), Scale(220), Scale(kRow) * 7);
+    Row(page, Label(core::Tr(L"prefs.defaultCodePage", L"默认代码页（仅 ANSI 用）：")),
+        Edit(kPrefDefaultCodePage, L"936"), Scale(90));
+    Row(page, Label(core::Tr(L"prefs.defaultEol", L"默认行尾：")),
+        Combo(kPrefDefaultEol, eolPointers, 3), Scale(220), Scale(kRow) * 5);
 }
 
 void PreferencesDialog::BuildAdvancedPage() {
     const int page = 3;
-    Row(page, nullptr, Check(kPrefBackupEnabled, L"启用崩溃恢复快照"));
-    Row(page, Label(L"快照间隔（秒，5~3600）："), Edit(kPrefBackupInterval, L"30"), Scale(90));
-    Row(page, Label(L"保留崩溃快照数（1~100）："), Edit(kPrefBackupKeep, L"10"), Scale(90));
-    Row(page, nullptr, Check(kPrefConvertBackup, L"转换编码前给文件留一份 .bak 备份"));
-    Row(page, Label(L"降级阈值（MB，超过改用映射装载）："), Edit(kPrefTier1MB, L"8"), Scale(90));
-    Row(page, Label(L"只读阈值（MB，超过只读打开）："), Edit(kPrefTier2MB, L"64"), Scale(90));
-    Row(page, Label(L"拒绝阈值（MB，超过不再打开）："), Edit(kPrefRefuseMB, L"512"), Scale(90));
-    noteLabel_ = Label(
+    Row(page, nullptr, Check(kPrefBackupEnabled, core::Tr(L"prefs.backupEnabled", L"启用崩溃恢复快照")));
+    Row(page, Label(core::Tr(L"prefs.backupInterval", L"快照间隔（秒，5~3600）：")),
+        Edit(kPrefBackupInterval, L"30"), Scale(90));
+    Row(page, Label(core::Tr(L"prefs.backupKeep", L"保留崩溃快照数（1~100）：")),
+        Edit(kPrefBackupKeep, L"10"), Scale(90));
+    Row(page, nullptr,
+        Check(kPrefConvertBackup,
+              core::Tr(L"prefs.convertBackup", L"转换编码前给文件留一份 .bak 备份")));
+    Row(page, Label(core::Tr(L"prefs.tier1", L"降级阈值（MB，超过改用映射装载）：")),
+        Edit(kPrefTier1MB, L"8"), Scale(90));
+    Row(page, Label(core::Tr(L"prefs.tier2", L"只读阈值（MB，超过只读打开）：")),
+        Edit(kPrefTier2MB, L"64"), Scale(90));
+    Row(page, Label(core::Tr(L"prefs.refuse", L"拒绝阈值（MB，超过不再打开）：")),
+        Edit(kPrefRefuseMB, L"512"), Scale(90));
+    noteLabel_ = Label(core::Tr(
+        L"prefs.advancedNote",
         L"说明：三个阈值必须严格递增，保存后立即生效。未保存的内容按上面的间隔定时写入"
         L"配置目录的 backup 下；超过降级阈值的文档不做定时快照（仍会在崩溃时抢救），"
-        L"异常退出时另会生成一份崩溃报告与内存转储。");
+        L"异常退出时另会生成一份崩溃报告与内存转储。"));
     Row(page, noteLabel_, nullptr);
 }
 
@@ -245,7 +312,9 @@ void PreferencesDialog::BuildPages() {
         for (int i = 0; i < kPageCount; ++i) {
             TCITEMW item{};
             item.mask = TCIF_TEXT;
-            item.pszText = const_cast<wchar_t*>(kPageTitles[i]);
+            // TCM_INSERTITEMW 会把文本拷走，所以临时字符串在这里是安全的
+            const std::wstring title = core::Tr(kPageTitleKeys[i], kPageTitleTexts[i]);
+            item.pszText = const_cast<wchar_t*>(title.c_str());
             ::SendMessageW(tab, TCM_INSERTITEMW, static_cast<WPARAM>(i),
                            reinterpret_cast<LPARAM>(&item));
         }
@@ -257,8 +326,10 @@ void PreferencesDialog::BuildPages() {
     BuildNewFilePage();
     BuildAdvancedPage();
 
-    Make(L"BUTTON", L"确定", WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, kPrefOk);
-    Make(L"BUTTON", L"取消", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, kPrefCancel);
+    const std::wstring ok = core::Tr(L"prefs.ok", L"确定");
+    const std::wstring cancel = core::Tr(L"prefs.cancel", L"取消");
+    Make(L"BUTTON", ok.c_str(), WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, kPrefOk);
+    Make(L"BUTTON", cancel.c_str(), WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, kPrefCancel);
     (void)::SendMessageW(hwnd_, DM_SETDEFID, kPrefOk, 0);
 }
 
@@ -390,6 +461,16 @@ void PreferencesDialog::LoadFromConfig() {
     SetChecked(kPrefRestoreSession, config.General().restoreSessionOnStart);
     SetChecked(kPrefMultiInstance, config.General().multiInstance);
     SetInt(kPrefRecentCount, static_cast<int>(config.General().recentFileCount));
+    {
+        int index = 0;
+        for (std::size_t slot = 0; slot < uiLanguageIds_.size(); ++slot) {
+            if (uiLanguageIds_[slot] == config.General().uiLanguage) {
+                index = static_cast<int>(slot);
+                break;
+            }
+        }
+        SetComboIndex(kPrefUiLanguage, index);
+    }
 
     const core::EditConfig& edit = config.Edit();
     SetInt(kPrefTabWidth, static_cast<int>(edit.tabWidth));
@@ -433,14 +514,16 @@ void PreferencesDialog::LoadFromConfig() {
 }
 
 bool PreferencesDialog::StoreToConfig(std::wstring& error, int& badControlId) {
-    auto readInt = [this, &error, &badControlId](int id, const wchar_t* name, long long low,
+    auto readInt = [this, &error, &badControlId](int id, const std::wstring& name, long long low,
                                                  long long high, long long& out) -> bool {
         const std::wstring text = TextOf(id);
         wchar_t*           end = nullptr;
         const long long    value = text.empty() ? 0 : std::wcstoll(text.c_str(), &end, 10);
         if (text.empty() || end == nullptr || *end != L'\0' || value < low || value > high) {
-            error = std::wstring(L"“") + name + L"”必须是 " + std::to_wstring(low) + L" 到 " +
-                    std::to_wstring(high) + L" 之间的整数，当前输入「" + text + L"」。";
+            // 整句交给语言包 + {0}{1}{2}{3}：分段拼接在英文里读不通（语序、冠词都不同）
+            error = core::Tr(L"prefs.error.range",
+                             L"「{0}」必须是 {1} 到 {2} 之间的整数，当前输入「{3}」。",
+                             {name, std::to_wstring(low), std::to_wstring(high), text});
             badControlId = id;
             return false;
         }
@@ -451,28 +534,33 @@ bool PreferencesDialog::StoreToConfig(std::wstring& error, int& badControlId) {
     core::ConfigCenter& config = *config_;
     long long           value = 0;
 
-    if (!readInt(kPrefRecentCount, L"最近文件列表保留条数", 0, 100, value)) {
+    if (!readInt(kPrefRecentCount, core::Tr(L"prefs.field.recentCount", L"最近文件列表保留条数"),
+                 0, 100, value)) {
         return false;
     }
     const std::uint32_t recentCount = static_cast<std::uint32_t>(value);
 
-    if (!readInt(kPrefTabWidth, L"制表符宽度", 1, 64, value)) {
+    if (!readInt(kPrefTabWidth, core::Tr(L"prefs.field.tabWidth", L"制表符宽度"), 1, 64,
+                 value)) {
         return false;
     }
     const std::uint32_t tabWidth = static_cast<std::uint32_t>(value);
-    if (!readInt(kPrefZoom, L"缩放级别", -20, 40, value)) {
+    if (!readInt(kPrefZoom, core::Tr(L"prefs.field.zoom", L"缩放级别"), -20, 40, value)) {
         return false;
     }
     const int zoom = static_cast<int>(value);
-    if (!readInt(kPrefDefaultCodePage, L"默认代码页", 1, 65535, value)) {
+    if (!readInt(kPrefDefaultCodePage, core::Tr(L"prefs.field.codePage", L"默认代码页"), 1,
+                 65535, value)) {
         return false;
     }
     const std::uint32_t codePage = static_cast<std::uint32_t>(value);
-    if (!readInt(kPrefBackupInterval, L"快照间隔", 5, 3600, value)) {
+    if (!readInt(kPrefBackupInterval, core::Tr(L"prefs.field.backupInterval", L"快照间隔"), 5,
+                 3600, value)) {
         return false;
     }
     const std::uint32_t interval = static_cast<std::uint32_t>(value);
-    if (!readInt(kPrefBackupKeep, L"保留快照数量", 1, 100, value)) {
+    if (!readInt(kPrefBackupKeep, core::Tr(L"prefs.field.backupKeep", L"保留快照数量"), 1, 100,
+                 value)) {
         return false;
     }
     const std::uint32_t keep = static_cast<std::uint32_t>(value);
@@ -480,14 +568,16 @@ bool PreferencesDialog::StoreToConfig(std::wstring& error, int& badControlId) {
     long long tier1 = 0;
     long long tier2 = 0;
     long long refuse = 0;
-    if (!readInt(kPrefTier1MB, L"大文件阈值", 1, 4096, tier1) ||
-        !readInt(kPrefTier2MB, L"只读阈值", 1, 4096, tier2) ||
-        !readInt(kPrefRefuseMB, L"拒绝打开阈值", 1, 65536, refuse)) {
+    if (!readInt(kPrefTier1MB, core::Tr(L"prefs.field.tier1", L"大文件阈值"), 1, 4096, tier1) ||
+        !readInt(kPrefTier2MB, core::Tr(L"prefs.field.tier2", L"只读阈值"), 1, 4096, tier2) ||
+        !readInt(kPrefRefuseMB, core::Tr(L"prefs.field.refuse", L"拒绝打开阈值"), 1, 65536,
+                 refuse)) {
         return false;
     }
     if (!(tier1 < tier2 && tier2 < refuse)) {
         // 三个阈值必须严格递增，否则整组不采纳，避免出现"只读阈值小于降级阈值"这种自相矛盾的状态
-        error = L"大文件阈值必须严格递增：降级阈值 < 只读阈值 < 拒绝打开阈值。";
+        error = core::Tr(L"prefs.error.tiers",
+                         L"大文件阈值必须严格递增：降级阈值 < 只读阈值 < 拒绝打开阈值。");
         badControlId = kPrefTier1MB;
         infra::LogWarn(L"config", L"首选项：大文件阈值不满足递增要求，已放弃本次大文件设置");
         return false;
@@ -496,6 +586,13 @@ bool PreferencesDialog::StoreToConfig(std::wstring& error, int& badControlId) {
     config.General().restoreSessionOnStart = IsChecked(kPrefRestoreSession);
     config.General().multiInstance = IsChecked(kPrefMultiInstance);
     config.General().recentFileCount = recentCount;
+    {
+        // 界面语言写进配置；**换语言的动作由外壳做**（它要重建菜单），这里只管存值
+        const int index = ComboIndex(kPrefUiLanguage);
+        if (index >= 0 && index < static_cast<int>(uiLanguageIds_.size())) {
+            config.General().uiLanguage = uiLanguageIds_[static_cast<std::size_t>(index)];
+        }
+    }
 
     core::EditConfig& edit = config.Edit();
     edit.tabWidth = tabWidth;
@@ -559,7 +656,8 @@ bool PreferencesDialog::Show(HWND owner, npcc::core::ConfigCenter& config) {
     const int x = ownerRect.left + ((ownerRect.right - ownerRect.left) - width) / 2;
     const int y = ownerRect.top + ((ownerRect.bottom - ownerRect.top) - height) / 2;
 
-    hwnd_ = ::CreateWindowExW(WS_EX_DLGMODALFRAME, kWindowClass, L"首选项",
+    const std::wstring title = core::Tr(L"prefs.title", L"首选项");
+    hwnd_ = ::CreateWindowExW(WS_EX_DLGMODALFRAME, kWindowClass, title.c_str(),
                               WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, width, height, owner,
                               nullptr, ::GetModuleHandleW(nullptr), this);
     if (hwnd_ == nullptr) {

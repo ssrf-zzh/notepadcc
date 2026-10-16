@@ -3024,8 +3024,25 @@ void MainWindow::JumpToSearchResult() {
 
 void MainWindow::CommandPreferences() {
     if (!ShowPreferencesDialog(hwnd_, config_)) {
+        // 用户取消：配置与视图都不动。但**对话框刚刚把它的文案都用过一遍**，
+        // 缺键正是要在这种时候记账（见 ReportMissingLanguageKeys）
+        ReportMissingLanguageKeys();
         return;   // 用户取消，配置与视图都不动
     }
+
+    // 首选项里改了"界面语言"就当场换（不重启）：与"设置"菜单里那几条命令走同一套
+    core::Localization& localization = core::Localization::Ui();
+    if (config_.General().uiLanguage != localization.Locale()) {
+        if (localization.SetLocale(config_.General().uiLanguage)) {
+            ApplyUiLanguage();
+            infra::LogInfo(L"lang", L"界面语言已切换为 " + localization.Locale());
+        } else {
+            // 选不到就退回原来那套，并把配置改回去，免得留下一个无效值
+            infra::LogWarn(L"lang", L"配置里的界面语言不可用: " + config_.General().uiLanguage);
+            config_.General().uiLanguage = localization.Locale();
+        }
+    }
+    ReportMissingLanguageKeys();
 
     // 配置变了就把运行期状态、大文件策略、新建文档默认值和新视图开关全部重算一遍。
     ApplyConfigToRuntime();
@@ -3749,6 +3766,9 @@ void MainWindow::ApplyUiLanguage() {
         if (command.defaultText.empty()) {
             continue;   // 动态文本（宏名、运行命令名、插件命令、语言名）：不跟着语言走
         }
+        if (command.defaultText == L"-") {
+            continue;   // 菜单分隔线：它没有文案，也不该被算成"缺键"
+        }
         updates.emplace_back(command.id, core::Tr(command.key, command.defaultText));
     }
     for (const std::pair<core::CmdId, std::wstring>& item : updates) {
@@ -3813,6 +3833,19 @@ void MainWindow::ReportMissingLanguageKeys() {
     if (missing > 0) {
         infra::LogWarn(L"lang", L"语言包 " + localization.Locale() + L" 一共缺 " +
                                    std::to_wstring(missing) + L" 个键（界面会中英混排）");
+    }
+    // 对话框里的文案没有一张静态表可查（命令那边能拿注册表逐条核对），
+    // 只能靠"真用到的时候记一笔"：凡是 Tr 时包没盖住的键都记在 Localization 里。
+    // 打开一遍首选项再按确定/取消，这一段就能把那个框的文案覆盖情况报出来
+    const std::vector<std::wstring>& missed = localization.MissedKeys();
+    for (const std::wstring& key : missed) {
+        infra::LogWarn(L"lang", L"语言包 " + localization.Locale() + L" 缺键（用到时发现）: " +
+                                    key);
+    }
+    if (!missed.empty()) {
+        infra::LogWarn(L"lang", L"语言包 " + localization.Locale() + L" 另外缺 " +
+                                    std::to_wstring(missed.size()) +
+                                    L" 个键（会话中用到过的）");
     }
 }
 

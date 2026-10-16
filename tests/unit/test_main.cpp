@@ -5309,8 +5309,12 @@ int main() {
                 if (entry.key.empty() || entry.value.empty()) {
                     wellFormed = false;
                 }
-                // 键一律是 cmd.* / cat.* 两种前缀：写错前缀的键永远不会被查到
-                if (entry.key.compare(0, 4, L"cmd.") != 0 && entry.key.compare(0, 4, L"cat.") != 0) {
+                // 键的前缀就那么几种：写错前缀的键永远不会被查到（cat.* 是菜单类别、
+                // cmd.* 是命令、prefs.* 是首选项对话框）
+                const bool knownPrefix = entry.key.compare(0, 4, L"cmd.") == 0 ||
+                                         entry.key.compare(0, 4, L"cat.") == 0 ||
+                                         entry.key.compare(0, 6, L"prefs.") == 0;
+                if (!knownPrefix) {
                     wellFormed = false;
                 }
                 for (std::size_t j = i + 1; j < packs[0].entries.size(); ++j) {
@@ -5414,6 +5418,25 @@ int main() {
             Check(ui.Covers(L"cmd.file.save"), "包里的键算被覆盖");
             Check(!ui.Covers(L"cmd.nonexistent"), "包外的键不算被覆盖");
             Check(!ui.ChineseDefault(), "en-US 不是中文默认");
+            // 占位符：整句交给语言包，参数按 {0} {1} 替换
+            CheckWide(ui.Tr(L"cmd.file.save", L"保存(&S)", {}), L"Save(&S)",
+                      "不带参数的调用与单参版本一致");
+            ui.Load(L"zh-CN", {}, nullptr);
+            CheckWide(ui.Tr(L"prefs.error.range", L"「{0}」必须是 {1} 到 {2} 之间的整数，"
+                                                L"当前输入「{3}」。",
+                            {L"制表符宽度", L"1", L"64", L"0"}),
+                      L"「制表符宽度」必须是 1 到 64 之间的整数，当前输入「0」。",
+                      "中文默认文本里的占位符被替换");
+            ui.Load(L"en-US", {}, nullptr);
+            CheckWide(ui.Tr(L"prefs.error.range", L"「{0}」必须是 {1} 到 {2} 之间的整数。",
+                            {L"Tab width", L"1", L"64", L"0"}),
+                      L"\"Tab width\" must be a whole number between 1 and 64; the current "
+                      L"input is \"0\".",
+                      "英文包里的整句也照样替换（语序由译文决定）");
+            CheckWide(ui.Tr(L"cmd.file.save", L"保存", {L"多余参数"}),
+                      L"Save(&S)", "没有占位符时多余参数被忽略");
+            CheckWide(ui.Tr(L"test.placeholder.only", L"{0}和{1}", {L"甲"}),
+                      L"甲和{1}", "参数不够时没替换的占位符原样保留（看得见才好修）");
             // 类别名也走这里（菜单栏那一排）
             CheckWide(npcc::core::CategoryText(npcc::core::CmdCategory::File), L"File",
                       "en-US 下类别名是英文");
@@ -5471,10 +5494,29 @@ int main() {
                 "</LangPack>\n";
             Check(WriteFileDirect(langDir / L"en-US.lang.xml", custom), "写入覆盖 en-US 的包");
             Localization& ui = Localization::Ui();
-            ui.Load(L"en-US", langDir, nullptr);
+            std::vector<std::wstring> warnings;
+            ui.Load(L"en-US", langDir, &warnings);
             CheckWide(ui.Tr(L"cmd.file.save", L"保存(&S)"), L"Store", "外置的同名包盖住了内置那套");
-            CheckWide(ui.Tr(L"cmd.file.open", L"打开(&O)..."), L"打开(&O)...",
-                      "盖住的是整套包：内置那条键也没有了");
+            // 覆盖是**逐条**的：用户改过的行以他为准，没动过的行跟着程序升级走。
+            // 整体替换的话，用户一旦留了一份旧模板，每个版本新增的键都会被它挡住
+            CheckWide(ui.Tr(L"cmd.file.open", L"打开(&O)..."), L"Open(&O)...",
+                      "没写在外置包里的键仍然来自内置包（逐条覆盖，不是整体替换）");
+            CheckWide(ui.Tr(L"prefs.title", L"首选项"), L"Preferences",
+                      "内置包里新增的键不会被旧的外置包挡住");
+            // 缺键自报：真用到过、而当前语言包没盖住的键会被记下来
+            ui.ClearMissedKeys();
+            Check(ui.MissedKeys().empty(), "清空之后没有记录");
+            (void)ui.Tr(L"prefs.not.translated.yet", L"还没翻的文案");
+            Check(ui.MissedKeys().size() == 1 &&
+                      ui.MissedKeys()[0] == L"prefs.not.translated.yet",
+                  "包没盖住的键被记下来（英文界面里冒出中文时靠它定位）");
+            (void)ui.Tr(L"prefs.not.translated.yet", L"还没翻的文案");
+            Check(ui.MissedKeys().size() == 1, "同一个键只记一次");
+            ui.Load(L"zh-CN", {}, nullptr);
+            ui.ClearMissedKeys();
+            (void)ui.Tr(L"prefs.whatever", L"中文默认文本");
+            Check(ui.MissedKeys().empty(), "中文那一档没有包，也不该记成缺键");
+            ui.Load(L"en-US", {}, nullptr);
             std::filesystem::remove(langDir / L"en-US.lang.xml", langEc);
         }
         {

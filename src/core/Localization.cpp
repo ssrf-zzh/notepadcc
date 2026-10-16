@@ -141,11 +141,38 @@ std::wstring Localization::Tr(std::wstring_view key, std::wstring_view fallback)
         if (const LangEntry* entry = pack->Find(key); entry != nullptr) {
             return WithAccel(*entry);
         }
+        // 装了包却没有这一条：记一笔。中文那一档没有包（默认文本就是中文），
+        // 所以只在"真的在讲别的语言"时才记账
+        RecordMissedKey(key);
     }
     if (!fallback.empty()) {
         return std::wstring(fallback);
     }
     return std::wstring(key);   // 回退链的最后一档：把键本身显示出来
+}
+
+void Localization::RecordMissedKey(std::wstring_view key) const {
+    const std::wstring text(key);
+    for (const std::wstring& seen : missedSet_) {
+        if (seen == text) {
+            return;
+        }
+    }
+    missedSet_.push_back(text);
+    missedKeys_.push_back(text);
+}
+
+std::wstring Localization::Tr(std::wstring_view key, std::wstring_view fallback,
+                              const std::vector<std::wstring>& args) const {
+    std::wstring text = Tr(key, fallback);
+    for (std::size_t index = 0; index < args.size(); ++index) {
+        const std::wstring placeholder = L"{" + std::to_wstring(index) + L"}";
+        for (std::size_t at = text.find(placeholder); at != std::wstring::npos;
+             at = text.find(placeholder, at + args[index].size())) {
+            text.replace(at, placeholder.size(), args[index]);
+        }
+    }
+    return text;
 }
 
 bool Localization::Covers(std::wstring_view key) const {
@@ -204,16 +231,38 @@ void Localization::Load(const std::wstring& locale, const std::filesystem::path&
                 const std::size_t dot = stem.find(L'.');
                 pack.locale = dot == std::wstring::npos ? stem : stem.substr(0, dot);
             }
-            bool replaced = false;
-            for (LangPack& existing : packs_) {
-                if (existing.locale == pack.locale) {
-                    existing = pack;   // 外部的盖住内置的
-                    replaced = true;
+            // 外置包**逐条**覆盖同 locale 的内置包（不是整体替换）。
+            //
+            // 整体替换看起来更"干净"，但它有个很难受的后果：用户一旦"导出模板"留了一份，
+            // 之后每个版本**新增**的键都会被那份旧文件挡住——表现是"新功能一片中文"，
+            // 而用户手里那份文件里根本没有那些键。逐条覆盖之后，用户改过的行以他的为准，
+            // 没动过的行跟着程序升级走，两全。
+            LangPack* existing = nullptr;
+            for (LangPack& candidate : packs_) {
+                if (candidate.locale == pack.locale) {
+                    existing = &candidate;
                     break;
                 }
             }
-            if (!replaced) {
-                packs_.push_back(pack);
+            if (existing == nullptr) {
+                packs_.push_back(std::move(pack));
+                continue;
+            }
+            if (!pack.name.empty() && pack.name != existing->locale) {
+                existing->name = pack.name;   // 显示名以用户文件为准
+            }
+            for (const LangEntry& entry : pack.entries) {
+                bool overwritten = false;
+                for (LangEntry& slot : existing->entries) {
+                    if (slot.key == entry.key) {
+                        slot = entry;
+                        overwritten = true;
+                        break;
+                    }
+                }
+                if (!overwritten) {
+                    existing->entries.push_back(entry);
+                }
             }
         }
     }
@@ -260,6 +309,11 @@ std::vector<std::pair<std::wstring, std::wstring>> Localization::Available() con
 
 std::wstring Tr(std::wstring_view key, std::wstring_view fallback) {
     return Localization::Ui().Tr(key, fallback);
+}
+
+std::wstring Tr(std::wstring_view key, std::wstring_view fallback,
+                const std::vector<std::wstring>& args) {
+    return Localization::Ui().Tr(key, fallback, args);
 }
 
 }  // namespace npcc::core
