@@ -40,6 +40,7 @@
 #include "core/ExportRtf.h"
 #include "core/JsonFormat.h"
 #include "core/XmlFormat.h"
+#include "core/XmlTree.h"
 #include "core/RunCommand.h"
 #include "core/Localization.h"
 #include "core/PrintText.h"
@@ -63,6 +64,7 @@ constexpr UINT_PTR kTimerFunctionList = 3;   // 函数列表的节流定时器�
 constexpr UINT_PTR kTimerRunCommand = 4;     // 轮询后台命令有没有跑完（捕获输出时才用）
 constexpr UINT_PTR kTimerMarkdownPreview = 5;   // Markdown 预览的节流定时器（一次性）
 constexpr UINT_PTR kTimerJsonTree = 6;          // JSON 树面板的节流定时器（一次性）
+constexpr UINT_PTR kTimerXmlTree = 7;           // XML 树面板的节流定时器（一次性）
 
 enum : npcc::core::CmdId {
     kCmdFileNew     = npcc::core::MakeCmdId(1, 1),
@@ -130,6 +132,7 @@ enum : npcc::core::CmdId {
     kCmdViewSummary          = npcc::core::MakeCmdId(4, 28),
     kCmdViewToolbar          = npcc::core::MakeCmdId(4, 29),
     kCmdViewEyeCare          = npcc::core::MakeCmdId(4, 30),
+    kCmdViewXmlTree          = npcc::core::MakeCmdId(4, 31),
     // 宏（8 类）
     kCmdMacroRecord       = npcc::core::MakeCmdId(8, 1),
     kCmdMacroPlayLast     = npcc::core::MakeCmdId(8, 3),
@@ -188,6 +191,7 @@ enum : npcc::core::CmdId {
     kCmdToolCompareDisk     = npcc::core::MakeCmdId(14, 37),
     kCmdToolQuotedPrintableEncode = npcc::core::MakeCmdId(14, 38),
     kCmdToolQuotedPrintableDecode = npcc::core::MakeCmdId(14, 39),
+    kCmdToolValidateXml     = npcc::core::MakeCmdId(14, 40),
     // 运行类（9）：第 1 号是 F5 那个对话框，第 kRunCommandBase 号起是用户存的命令
     kCmdRunDialog           = npcc::core::MakeCmdId(9, npcc::core::kRunCommandDialogIndex),
     kCmdEditAutoComplete = npcc::core::MakeCmdId(2, 33),
@@ -354,11 +358,11 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             MarkdownPreview::RegisterWindowClass(::GetModuleHandleW(nullptr));
             markdownPreview_.Create(hwnd_, 6);
             markdownPreview_.SetDark(darkMode_);
-            JsonTreePanel::RegisterWindowClass(::GetModuleHandleW(nullptr));
-            jsonTreePanel_.Create(hwnd_, 7);
-            jsonTreePanel_.SetDark(darkMode_);
+            StructureTreePanel::RegisterWindowClass(::GetModuleHandleW(nullptr));
+            structureTreePanel_.Create(hwnd_, 7);
+            structureTreePanel_.SetDark(darkMode_);
             // 点了树里的标量 → 跳到源码里那一行（这就是树视图真正的用处）
-            jsonTreePanel_.SetJumpCallback([this](int line) {
+            structureTreePanel_.SetJumpCallback([this](int line) {
                 if (edit::Document* document = ActiveDocument();
                     document != nullptr && document->view != nullptr && line > 0) {
                     // PositionFromLine 返回 int64（Scintilla 的位置类型），这里按 int32 收
@@ -434,14 +438,20 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             // Markdown 预览面板的开关同样来自配置（打开时整块内容在文档打开之后就有了）
             markdownPreviewVisible_ = config_.General().markdownPreviewVisible;
             markdownPreview_.SetVisible(markdownPreviewVisible_);
-    // JSON 树面板同理。两者都用右侧那一栏，配置里同时为真时以 JSON 树为准
-    // （互斥规则见 CommandToggleJsonTree）
+    // 结构树面板（JSON / XML 共用）同理。三个面板都用右侧那一栏，配置里同时为真时
+    // 按"XML 树 > JSON 树 > Markdown 预览"的顺序只留最先的那个（互斥规则见
+    // CommandToggleJsonTree / CommandToggleXmlTree）
     jsonTreeVisible_ = config_.General().jsonTreeVisible;
-    if (jsonTreeVisible_) {
+    xmlTreeVisible_ = config_.General().xmlTreeVisible;
+    if (xmlTreeVisible_) {
+        jsonTreeVisible_ = false;
+        markdownPreviewVisible_ = false;
+        markdownPreview_.SetVisible(false);
+    } else if (jsonTreeVisible_) {
         markdownPreviewVisible_ = false;
         markdownPreview_.SetVisible(false);
     }
-    jsonTreePanel_.SetVisible(jsonTreeVisible_);
+    structureTreePanel_.SetVisible(xmlTreeVisible_ || jsonTreeVisible_);
             // 工作区目录来自配置：目录不在了就当"没有工作区"，配置留着不动
             if (!config_.General().workspaceFolder.empty()) {
                 std::error_code ec;
@@ -797,6 +807,11 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
                 RefreshJsonTree();
                 return 0;
             }
+            if (wParam == kTimerXmlTree) {
+                ::KillTimer(hwnd_, kTimerXmlTree);    // 一次性
+                RefreshXmlTree();
+                return 0;
+            }
             break;
         case WM_DROPFILES: {
             const HDROP drop = reinterpret_cast<HDROP>(wParam);
@@ -1078,6 +1093,8 @@ void MainWindow::RegisterCommands() {
         [this](const CmdContext&) { CommandToggleMarkdownPreview(); });
     add(kCmdViewJsonTree, CmdCategory::View, L"cmd.view.jsonTree", L"JSON 树视图(&J)",
         core::kCmdCheckable, [this](const CmdContext&) { CommandToggleJsonTree(); });
+    add(kCmdViewXmlTree, CmdCategory::View, L"cmd.view.xmlTree", L"XML 树视图(&X)",
+        core::kCmdCheckable, [this](const CmdContext&) { CommandToggleXmlTree(); });
 
     // ---- 宏 ----
     add(kCmdMacroRecord, CmdCategory::Macro, L"cmd.macro.record", L"开始/停止录制宏(&R)",
@@ -1305,6 +1322,8 @@ void MainWindow::RegisterCommands() {
         needsWritable, [this](const CmdContext&) { CommandFormatStructured(true, true); });
     add(kCmdToolFormatXml, CmdCategory::Tools, L"cmd.tool.formatXml", L"美化 XML(&X)",
         needsWritable, [this](const CmdContext&) { CommandFormatStructured(false, false); });
+    add(kCmdToolValidateXml, CmdCategory::Tools, L"cmd.tool.validateXml", L"校验 XML(&V)",
+        needsBuffer, [this](const CmdContext&) { CommandValidateXml(); });
 
     // ---- 窗口 ----
     add(kCmdWindowNext, CmdCategory::Window, L"cmd.window.next", L"下一个标签(&N)",
@@ -1363,6 +1382,7 @@ void MainWindow::RegisterCommands() {
     bindChecked(kCmdViewHexToggle, [this] { return hexMode_; });
     bindChecked(kCmdViewMarkdownPreview, [this] { return markdownPreviewVisible_; });
     bindChecked(kCmdViewJsonTree, [this] { return jsonTreeVisible_; });
+    bindChecked(kCmdViewXmlTree, [this] { return xmlTreeVisible_; });
     bindChecked(kCmdViewFullScreen, [this] { return fullScreen_; });
     bindChecked(kCmdViewToolbar, [this] { return toolbarVisible_; });
     // "跳到偏移"只在十六进制视图里才有意义：不在的时候灰掉，而不是点了没反应
@@ -1577,15 +1597,15 @@ void MainWindow::LayoutViews() const {
     // Markdown 预览占右边一栏。宽度按比例写死（与左侧固定栏同一个态度：没有真正的
     // DockHost，拖动分隔条留给那一版），编辑区就是剩下的部分
     RECT editor = viewRect;
-    const bool rightPanel = markdownPreviewVisible_ || jsonTreeVisible_;
+    const bool rightPanel = markdownPreviewVisible_ || jsonTreeVisible_ || xmlTreeVisible_;
     if (rightPanel && viewRect.right - viewRect.left > 320) {
         const int width = viewRect.right - viewRect.left;
         const int previewWidth = std::max(160, width * 45 / 100);
         RECT preview = viewRect;
         preview.left = viewRect.right - previewWidth;
-        // 两个面板互斥（都用右侧这一栏），谁开着就摆谁
-        if (jsonTreeVisible_) {
-            jsonTreePanel_.Resize(preview);
+        // 三个面板互斥（都用右侧这一栏），谁开着就摆谁（顺序与互斥规则一致）
+        if (xmlTreeVisible_ || jsonTreeVisible_) {
+            structureTreePanel_.Resize(preview);
         } else {
             markdownPreview_.Resize(preview);
         }
@@ -2078,6 +2098,9 @@ void MainWindow::ActivateDocument(core::BufferId id) {
     if (jsonTreeVisible_) {
         RefreshJsonTree();
     }
+    if (xmlTreeVisible_) {
+        RefreshXmlTree();
+    }
     if (edit::Document* document = documents_->Active(); document != nullptr && document->view) {
         ApplyViewToggles(*document);
         FocusActivePane();   // 分屏时焦点可能落在另一侧
@@ -2398,6 +2421,7 @@ void MainWindow::HandleEditorNotify(const NMHDR& header) {
                 ScheduleFunctionParse();
                 ScheduleMarkdownPreview();
                 ScheduleJsonTree();
+                ScheduleXmlTree();
             }
             // 崩溃抢救只看"有没有未保存的改动"，所以这一刻必须同步刷新槽位：
             // 否则刚打完字就崩，抢救会以为这个文档是干净的，直接跳过。
@@ -4270,6 +4294,16 @@ void MainWindow::CommandPreviewInBrowser() {
 
 void MainWindow::CommandToggleMarkdownPreview() {
     markdownPreviewVisible_ = !markdownPreviewVisible_;
+    if (markdownPreviewVisible_ && (jsonTreeVisible_ || xmlTreeVisible_)) {
+        // 三个面板都用右侧那一栏，只能开一个：开 Markdown 预览就把树视图关掉
+        // （不说一声的话，树面板会毫无预兆地消失）
+        jsonTreeVisible_ = false;
+        xmlTreeVisible_ = false;
+        structureTreePanel_.SetVisible(false);
+        config_.General().jsonTreeVisible = false;
+        config_.General().xmlTreeVisible = false;
+        statusBar_.SetMessage(L"Markdown 预览与树视图都用右侧那一栏，已关掉树视图");
+    }
     markdownPreview_.SetVisible(markdownPreviewVisible_);
     config_.General().markdownPreviewVisible = markdownPreviewVisible_;
     config_.SaveNow();   // 与切语言同一个理由：这是"马上要生效"的状态，别攒着
@@ -4411,24 +4445,30 @@ void MainWindow::ShowComparison(edit::Document& left, const std::string& leftTex
                           std::to_wstring(stats.inserted) + L"）");
 }
 
-// ---- JSON 树面板（M3 的内置 JSON 能力）----
+// ---- 结构树面板（M3 的内置 JSON 能力与 XML 工具共用这一块）----
 
 void MainWindow::CommandToggleJsonTree() {
     jsonTreeVisible_ = !jsonTreeVisible_;
+    if (jsonTreeVisible_ && xmlTreeVisible_) {
+        // 面板一次只显示一棵树（内容模式是面板自己的状态）：开 JSON 树就把 XML 树关掉
+        xmlTreeVisible_ = false;
+        statusBar_.SetMessage(L"右侧那一栏一次只显示一棵树，已关掉 XML 树视图");
+    }
     if (jsonTreeVisible_ && markdownPreviewVisible_) {
-        // 两者都占右侧那一栏，只能开一个：开 JSON 树就把 Markdown 预览关掉，
+        // 三者都占右侧那一栏，只能开一个：开 JSON 树就把 Markdown 预览关掉，
         // 并说一声（不然用户会以为预览坏了）
         markdownPreviewVisible_ = false;
         markdownPreview_.SetVisible(false);
         statusBar_.SetMessage(L"JSON 树与 Markdown 预览都用右侧那一栏，已关掉 Markdown 预览");
     }
-    jsonTreePanel_.SetVisible(jsonTreeVisible_);
+    structureTreePanel_.SetVisible(jsonTreeVisible_ || xmlTreeVisible_);
     config_.General().jsonTreeVisible = jsonTreeVisible_;
+    config_.General().xmlTreeVisible = xmlTreeVisible_;
     config_.General().markdownPreviewVisible = markdownPreviewVisible_;
     config_.SaveNow();
     if (jsonTreeVisible_) {
         RefreshJsonTree();
-        jsonTreePanel_.Focus();
+        structureTreePanel_.Focus();
     }
     LayoutViews();
     RebuildMenu();
@@ -4448,10 +4488,55 @@ void MainWindow::RefreshJsonTree() {
     }
     edit::Document* document = ActiveDocument();
     if (document == nullptr || document->view == nullptr) {
-        jsonTreePanel_.Clear();
+        structureTreePanel_.Clear();
         return;
     }
-    jsonTreePanel_.SetJson(document->view->GetAllText());
+    structureTreePanel_.SetJson(document->view->GetAllText());
+}
+
+void MainWindow::CommandToggleXmlTree() {
+    xmlTreeVisible_ = !xmlTreeVisible_;
+    if (xmlTreeVisible_ && jsonTreeVisible_) {
+        // 同上：面板一次只显示一棵树
+        jsonTreeVisible_ = false;
+        statusBar_.SetMessage(L"右侧那一栏一次只显示一棵树，已关掉 JSON 树视图");
+    }
+    if (xmlTreeVisible_ && markdownPreviewVisible_) {
+        markdownPreviewVisible_ = false;
+        markdownPreview_.SetVisible(false);
+        statusBar_.SetMessage(L"XML 树与 Markdown 预览都用右侧那一栏，已关掉 Markdown 预览");
+    }
+    structureTreePanel_.SetVisible(xmlTreeVisible_ || jsonTreeVisible_);
+    config_.General().xmlTreeVisible = xmlTreeVisible_;
+    config_.General().jsonTreeVisible = jsonTreeVisible_;
+    config_.General().markdownPreviewVisible = markdownPreviewVisible_;
+    config_.SaveNow();
+    if (xmlTreeVisible_) {
+        RefreshXmlTree();
+        structureTreePanel_.Focus();
+    }
+    LayoutViews();
+    RebuildMenu();
+}
+
+void MainWindow::ScheduleXmlTree() {
+    if (!xmlTreeVisible_) {
+        return;
+    }
+    // 与其它面板同一套节流：停手 300 ms 才重新解析
+    ::SetTimer(hwnd_, kTimerXmlTree, 300, nullptr);
+}
+
+void MainWindow::RefreshXmlTree() {
+    if (!xmlTreeVisible_) {
+        return;
+    }
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr) {
+        structureTreePanel_.Clear();
+        return;
+    }
+    structureTreePanel_.SetXml(document->view->GetAllText());
 }
 
 // 打开之后留下的提示在状态栏露面一次（DocumentManager 只负责把它写进
@@ -5097,7 +5182,7 @@ void MainWindow::CommandToggleDarkMode() {
     hexView_.SetDark(darkMode_);   // 十六进制视图的自绘配色也跟着走
     toolbar_.SetDark(darkMode_);   // 工具栏同样（浅底/深底两套，不然深色下一条白杠）
     markdownPreview_.SetDark(darkMode_);
-    jsonTreePanel_.SetDark(darkMode_);
+    structureTreePanel_.SetDark(darkMode_);
 }
 
 edit::EditorPalette MainWindow::CurrentEditorPalette() const {
@@ -5449,6 +5534,40 @@ void MainWindow::CommandFormatStructured(bool json, bool minify) {
             return result.text;
         },
         title);
+}
+
+// 校验 XML（M3 的内置 XML 工具）：只探一次结构树，不改内容。
+// 错误信息与"美化 XML"共用同一套说法（第几行第几列，来自 XmlFormat）；
+// 成功则把这份文档的规模（行数 / 节点数）写进状态栏——"合法"两个字之外
+// 总得给点有用的数字。
+void MainWindow::CommandValidateXml() {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr) {
+        return;
+    }
+    const std::string text = document->view->GetAllText();
+    const core::XmlTreeResult result = core::ParseXmlTree(text);
+    if (!result.ok) {
+        ::MessageBoxW(hwnd_, result.error.c_str(), L"校验 XML", MB_ICONWARNING);
+        infra::LogInfo(L"tools", std::wstring(L"校验 XML 失败：") + result.error);
+        return;
+    }
+    // 行数与编辑器看到的一致：换行个数，末尾没有换行时最后一行也算一行
+    int lines = 0;
+    for (char ch : text) {
+        if (ch == '\n') {
+            ++lines;
+        }
+    }
+    if (!text.empty() && text.back() != '\n') {
+        ++lines;
+    }
+    const std::wstring summary =
+        L"XML 合法：" + std::to_wstring(lines) + L" 行，" +
+        std::to_wstring(result.nodeCount) + L" 个节点" +
+        (result.truncated ? L"（节点太多，只数到显示上限）" : L"");
+    statusBar_.SetMessage(summary);
+    infra::LogInfo(L"tools", summary);
 }
 
 void MainWindow::CommandRegisterAssociations(bool registerThem) {

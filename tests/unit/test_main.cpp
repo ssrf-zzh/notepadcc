@@ -30,6 +30,7 @@
 #include "core/JsonFlat.h"
 #include "core/JsonFormat.h"
 #include "core/XmlFormat.h"
+#include "core/XmlTree.h"
 #include "core/Localization.h"
 #include "core/ExportRtf.h"
 #include "shell/FolderPanel.h"
@@ -6739,6 +6740,98 @@ int main() {
             }
             Check(result.error.find(bad.needle) != std::wstring::npos, "错误信息对得上");
         }
+    }
+
+    Section("XML 结构树（ParseXmlTree）");
+    {
+        using npcc::core::ParseXmlTree;
+        using npcc::core::XmlNode;
+        using npcc::core::XmlNodeKind;
+
+        // ---- 元素 / 属性 / 文本：层级、行号、节点数 ----
+        const std::string source = "<?xml version=\"1.0\"?>\n"
+                                   "<root id=\"1\" name='two'>\n"
+                                   "  <item>one</item>\n"
+                                   "  <empty/>\n"
+                                   "</root>\n";
+        const auto tree = ParseXmlTree(source);
+        Check(tree.ok, "合法 XML 能建树");
+        Check(tree.nodeCount == 7, "节点数 = PI + root + 两个属性 + item + 文本 + empty");
+        Check(tree.root.kind == XmlNodeKind::Document, "文档根是 Document 容器");
+        Check(tree.root.children.size() == 2, "顶层是 PI 与 root 两个节点");
+        const XmlNode& root = tree.root.children[1];
+        Check(root.kind == XmlNodeKind::Element && root.name == "root",
+              "第二个顶层节点是 root 元素");
+        Check(root.line == 2, "root 的行号指向源文本第二行");
+        Check(root.children.size() == 4, "root 下依次是 属性 ×2 + item + empty（空白文本不建节点）");
+        Check(root.children[0].kind == XmlNodeKind::Attribute && root.children[0].name == "id" &&
+                  root.children[0].value == "1",
+              "双引号属性的名与值");
+        Check(root.children[1].kind == XmlNodeKind::Attribute &&
+                  root.children[1].name == "name" && root.children[1].value == "two",
+              "单引号属性同样解析");
+        Check(root.children[2].line == 3 && root.children[2].children.size() == 1 &&
+                  root.children[2].children[0].kind == XmlNodeKind::Text &&
+                  root.children[2].children[0].value == "one",
+              "item 在第三行，文本子节点是 one");
+        Check(root.children[3].kind == XmlNodeKind::Element && root.children[3].children.empty() &&
+                  root.children[3].line == 4,
+              "自闭合元素没有子节点，行号第四行");
+
+        // ---- 注释 / CDATA / 处理指令 / DOCTYPE：各归其类，行号跟着走 ----
+        const std::string specials = "<?xml version=\"1.0\"?>\n"
+                                     "<!DOCTYPE note [<!ENTITY x \"y\">]>\n"
+                                     "<!-- head -->\n"
+                                     "<root>\n"
+                                     "  <!-- inner\n"
+                                     "      续 -->\n"
+                                     "  <a><![CDATA[<raw>]]></a>\n"
+                                     "</root>\n";
+        const auto special = ParseXmlTree(specials);
+        Check(special.ok, "带 DOCTYPE / 注释 / CDATA 的文档能建树");
+        Check(special.root.children.size() == 4, "顶层是 PI + DOCTYPE + 注释 + root");
+        Check(special.root.children[0].kind == XmlNodeKind::PI &&
+                  special.root.children[0].name == "xml",
+              "XML 声明的目标名是 xml");
+        Check(special.root.children[1].kind == XmlNodeKind::Doctype &&
+                  special.root.children[1].value.find("<!ENTITY") != std::string::npos,
+              "DOCTYPE 连内部子集一起进树");
+        Check(special.root.children[2].kind == XmlNodeKind::Comment &&
+                  special.root.children[2].line == 3,
+              "顶层注释在第 3 行");
+        const XmlNode& rootTag = special.root.children[3];
+        Check(rootTag.name == "root" && rootTag.line == 4, "root 元素在第 4 行");
+        Check(rootTag.children[0].kind == XmlNodeKind::Comment && rootTag.children[0].line == 5,
+              "跨行注释的行号指向它的起点");
+        Check(rootTag.children[1].children.size() == 1 &&
+                  rootTag.children[1].children[0].kind == XmlNodeKind::CData &&
+                  rootTag.children[1].children[0].value == "<raw>",
+              "CDATA 内容原样进树");
+
+        // ---- 混合内容：裸文本与元素并列 ----
+        const auto mixed = ParseXmlTree("<p>hello <b>world</b></p>");
+        Check(mixed.ok && mixed.root.children[0].children.size() == 2,
+              "混合内容：p 下是文本与 b 两个节点");
+        Check(mixed.root.children[0].children[0].kind == XmlNodeKind::Text &&
+                  mixed.root.children[0].children[0].value == "hello ",
+              "混合内容里的裸文本原样保留（含尾随空格）");
+
+        // ---- 非法输入：不建树，错误信息与格式化共用同一套行列说法 ----
+        const auto bad = ParseXmlTree("<a>\n<b>\n</c>");
+        Check(!bad.ok, "不合法 XML 不建树");
+        Check(bad.root.children.empty(), "失败时连半截树都没有");
+        Check(bad.error.find(L"第 3 行第 1 列") != std::wstring::npos,
+              "错误信息带行与列");
+
+        // ---- 节点数上限：合法但超大的文档截断而不是失败 ----
+        std::string huge = "<r>";
+        for (int index = 0; index < 25000; ++index) {
+            huge += "<i/>";
+        }
+        huge += "</r>";
+        const auto limited = ParseXmlTree(huge);
+        Check(limited.ok && limited.truncated, "超过上限的文档合法，只是截断");
+        Check(limited.nodeCount == npcc::core::kMaxXmlNodes, "节点数停在上限");
     }
 
     FinishSections();

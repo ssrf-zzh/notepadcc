@@ -74,6 +74,7 @@ std::vector<LangPack> MakeBuiltin() {
         Entry(L"cmd.view.previewBrowser", L"Open Preview in Browser", L"B"),
         Entry(L"cmd.view.markdownPreview", L"Markdown Preview Panel", L"M"),
         Entry(L"cmd.view.jsonTree", L"JSON Tree View", L"J"),
+        Entry(L"cmd.view.xmlTree", L"XML Tree View", L"X"),
         Entry(L"cmd.view.workspaceOpen", L"Open Folder as Workspace...", L"F"),
         Entry(L"cmd.view.workspaceClose", L"Close Workspace", L"C"),
         Entry(L"cmd.view.workspaceRefresh", L"Refresh Workspace", L"R"),
@@ -135,6 +136,7 @@ std::vector<LangPack> MakeBuiltin() {
         Entry(L"cmd.tool.formatJson", L"Format JSON", L"J"),
         Entry(L"cmd.tool.minifyJson", L"Minify JSON", L"M"),
         Entry(L"cmd.tool.formatXml", L"Pretty-print XML", L"X"),
+        Entry(L"cmd.tool.validateXml", L"Validate XML", L"V"),
         // ---- 工具：导出到配置目录 ----
         Entry(L"cmd.tool.exportLanguages", L"Export Language Definitions to Config Folder"),
         Entry(L"cmd.tool.exportUdlSample", L"Export UDL Sample to Config Folder"),

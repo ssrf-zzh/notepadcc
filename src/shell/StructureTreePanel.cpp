@@ -1,4 +1,4 @@
-#include "shell/JsonTreePanel.h"
+#include "shell/StructureTreePanel.h"
 
 #include <windowsx.h>
 
@@ -11,7 +11,7 @@
 namespace npcc::shell {
 namespace {
 
-constexpr const wchar_t* kWindowClass = L"notepadccJsonTree";
+constexpr const wchar_t* kWindowClass = L"notepadccStructureTree";
 constexpr int kIndentCells = 2;      // 每一层的缩进（字符数）
 
 int DpiOf(HWND reference) {
@@ -56,6 +56,20 @@ std::string ToUtf8(const std::wstring& text) {
     std::string out(static_cast<std::size_t>(need), '\0');
     ::WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(),
                           need, nullptr, nullptr);
+    return out;
+}
+
+// 长值截到 limit 个字节再加省略号；不把 UTF-8 序列截成半个字符（续字节是 10xxxxxx）
+std::string Ellipsize(std::string_view text, std::size_t limit = 80) {
+    if (text.size() <= limit) {
+        return std::string(text);
+    }
+    std::size_t cut = limit;
+    while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80) {
+        --cut;
+    }
+    std::string out(text.substr(0, cut));
+    out += "…";
     return out;
 }
 
@@ -105,11 +119,11 @@ int CellsOf(std::string_view text) {
 
 }  // namespace
 
-void JsonTreePanel::RegisterWindowClass(HINSTANCE instance) {
+void StructureTreePanel::RegisterWindowClass(HINSTANCE instance) {
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.style = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc = &JsonTreePanel::WndProcThunk;
+    wc.lpfnWndProc = &StructureTreePanel::WndProcThunk;
     wc.hInstance = instance;
     wc.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = nullptr;
@@ -117,12 +131,12 @@ void JsonTreePanel::RegisterWindowClass(HINSTANCE instance) {
     ::RegisterClassExW(&wc);
 }
 
-LRESULT CALLBACK JsonTreePanel::WndProcThunk(HWND hwnd, UINT message, WPARAM wParam,
+LRESULT CALLBACK StructureTreePanel::WndProcThunk(HWND hwnd, UINT message, WPARAM wParam,
                                              LPARAM lParam) {
-    auto* self = reinterpret_cast<JsonTreePanel*>(::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    auto* self = reinterpret_cast<StructureTreePanel*>(::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (message == WM_NCCREATE) {
         const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
-        self = static_cast<JsonTreePanel*>(create->lpCreateParams);
+        self = static_cast<StructureTreePanel*>(create->lpCreateParams);
         self->hwnd_ = hwnd;
         ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
     }
@@ -132,7 +146,7 @@ LRESULT CALLBACK JsonTreePanel::WndProcThunk(HWND hwnd, UINT message, WPARAM wPa
     return self->WndProc(message, wParam, lParam);
 }
 
-bool JsonTreePanel::Create(HWND parent, int controlId) {
+bool StructureTreePanel::Create(HWND parent, int controlId) {
     dpi_ = DpiOf(parent);
     hwnd_ = ::CreateWindowExW(0, kWindowClass, L"", WS_CHILD | WS_VSCROLL | WS_TABSTOP, 0, 0,
                               10, 10, parent,
@@ -145,7 +159,7 @@ bool JsonTreePanel::Create(HWND parent, int controlId) {
     return true;
 }
 
-void JsonTreePanel::CreateFonts() {
+void StructureTreePanel::CreateFonts() {
     const auto make = [this](int weight) {
         LOGFONTW logFont{};
         ::wcscpy_s(logFont.lfFaceName, L"Consolas");
@@ -178,20 +192,22 @@ void JsonTreePanel::CreateFonts() {
     ::ReleaseDC(hwnd_, dc);
 }
 
-void JsonTreePanel::SetDark(bool dark) {
+void StructureTreePanel::SetDark(bool dark) {
     dark_ = dark;
     if (hwnd_ != nullptr) {
         ::InvalidateRect(hwnd_, nullptr, TRUE);
     }
 }
 
-void JsonTreePanel::Clear() {
+void StructureTreePanel::Clear() {
     source_.clear();
     tree_ = core::JsonTreeResult{};
+    xmlTree_ = core::XmlTreeResult{};
     valid_ = false;
     nodeCount_ = 0;
     rows_.clear();
-    collapsed_.clear();
+    collapsedJson_.clear();
+    collapsedXml_.clear();
     topLine_ = 0;
     UpdateScrollBar();
     if (hwnd_ != nullptr) {
@@ -199,20 +215,38 @@ void JsonTreePanel::Clear() {
     }
 }
 
-void JsonTreePanel::SetJson(std::string utf8) {
+void StructureTreePanel::SetJson(std::string utf8) {
     source_ = std::move(utf8);
+    isXml_ = false;
     // 折起来的状态在换内容时就该丢掉：节点指针全变了，留着等于随机折几个
-    collapsed_.clear();
+    collapsedJson_.clear();
+    collapsedXml_.clear();
     tree_ = core::ParseJsonTree(source_);
     valid_ = tree_.ok;
     nodeCount_ = tree_.ok ? tree_.nodeCount : 0;
     Rebuild();
 }
 
-void JsonTreePanel::Rebuild() {
+void StructureTreePanel::SetXml(std::string utf8) {
+    source_ = std::move(utf8);
+    isXml_ = true;
+    collapsedJson_.clear();
+    collapsedXml_.clear();
+    xmlTree_ = core::ParseXmlTree(source_);
+    valid_ = xmlTree_.ok;
+    nodeCount_ = xmlTree_.ok ? xmlTree_.nodeCount : 0;
+    Rebuild();
+}
+
+
+void StructureTreePanel::Rebuild() {
     rows_.clear();
     if (valid_) {
-        Flatten(tree_.root, 0);
+        if (isXml_) {
+            FlattenXml(xmlTree_.root, 0, true);
+        } else {
+            FlattenJson(tree_.root, 0);
+        }
     }
     topLine_ = 0;
     UpdateScrollBar();
@@ -221,43 +255,91 @@ void JsonTreePanel::Rebuild() {
     }
 }
 
-bool JsonTreePanel::Collapsed(const core::JsonNode* node) const {
-    for (const core::JsonNode* item : collapsed_) {
-        if (item == node) {
+
+bool StructureTreePanel::ContainerOf(const Row& row) const {
+    if (row.xml != nullptr) {
+        return row.xml->kind == core::XmlNodeKind::Element && !row.xml->children.empty();
+    }
+    return row.json->kind == core::JsonKind::Object || row.json->kind == core::JsonKind::Array;
+}
+
+bool StructureTreePanel::Collapsed(const Row& row) const {
+    if (row.xml != nullptr) {
+        for (const core::XmlNode* item : collapsedXml_) {
+            if (item == row.xml) {
+                return true;
+            }
+        }
+        return false;
+    }
+    for (const core::JsonNode* item : collapsedJson_) {
+        if (item == row.json) {
             return true;
         }
     }
     return false;
 }
 
-void JsonTreePanel::Toggle(const core::JsonNode* node) {
-    for (std::size_t index = 0; index < collapsed_.size(); ++index) {
-        if (collapsed_[index] == node) {
-            collapsed_.erase(collapsed_.begin() + static_cast<std::ptrdiff_t>(index));
+void StructureTreePanel::Toggle(const Row& row) {
+    if (row.xml != nullptr) {
+        for (std::size_t index = 0; index < collapsedXml_.size(); ++index) {
+            if (collapsedXml_[index] == row.xml) {
+                collapsedXml_.erase(collapsedXml_.begin() + static_cast<std::ptrdiff_t>(index));
+                Rebuild();
+                return;
+            }
+        }
+        collapsedXml_.push_back(row.xml);
+        Rebuild();
+        return;
+    }
+    for (std::size_t index = 0; index < collapsedJson_.size(); ++index) {
+        if (collapsedJson_[index] == row.json) {
+            collapsedJson_.erase(collapsedJson_.begin() + static_cast<std::ptrdiff_t>(index));
             Rebuild();
             return;
         }
     }
-    collapsed_.push_back(node);
+    collapsedJson_.push_back(row.json);
     Rebuild();
 }
 
-void JsonTreePanel::Flatten(const core::JsonNode& node, int depth) {
+void StructureTreePanel::FlattenJson(const core::JsonNode& node, int depth) {
     Row row;
-    row.node = &node;
+    row.json = &node;
     row.depth = depth;
     rows_.push_back(row);
     const bool container =
         node.kind == core::JsonKind::Object || node.kind == core::JsonKind::Array;
-    if (!container || Collapsed(&node)) {
+    if (!container || Collapsed(row)) {
         return;
     }
     for (const core::JsonNode& child : node.children) {
-        Flatten(child, depth + 1);
+        FlattenJson(child, depth + 1);
     }
 }
 
-int JsonTreePanel::VisibleLineCount() const {
+void StructureTreePanel::FlattenXml(const core::XmlNode& node, int depth, bool rootDocument) {
+    Row row;
+    row.xml = &node;
+    row.depth = depth;
+    if (!rootDocument) {
+        rows_.push_back(row);
+    }
+    // 文档根自己不是元素，但它的孩子要照常铺开（根不进显示行，也永远不会被折叠）
+    const bool container =
+        (node.kind == core::XmlNodeKind::Element || node.kind == core::XmlNodeKind::Document) &&
+        !node.children.empty();
+    if (!container || (!rootDocument && Collapsed(row))) {
+        return;
+    }
+    for (const core::XmlNode& child : node.children) {
+        FlattenXml(child, rootDocument ? 0 : depth + 1, false);
+    }
+}
+
+
+int StructureTreePanel::VisibleLineCount() const {
     if (hwnd_ == nullptr || charHeight_ <= 0) {
         return 1;
     }
@@ -267,7 +349,7 @@ int JsonTreePanel::VisibleLineCount() const {
     return rows > 0 ? rows : 1;
 }
 
-void JsonTreePanel::UpdateScrollBar() const {
+void StructureTreePanel::UpdateScrollBar() const {
     if (hwnd_ == nullptr) {
         return;
     }
@@ -281,7 +363,7 @@ void JsonTreePanel::UpdateScrollBar() const {
     ::SetScrollInfo(hwnd_, SB_VERT, &info, TRUE);
 }
 
-void JsonTreePanel::ScrollTo(int topLine) {
+void StructureTreePanel::ScrollTo(int topLine) {
     const int maxTop = std::max(0, static_cast<int>(rows_.size()) - VisibleLineCount());
     const int clamped = std::min(std::max(topLine, 0), maxTop);
     if (clamped == topLine_) {
@@ -292,14 +374,17 @@ void JsonTreePanel::ScrollTo(int topLine) {
     ::InvalidateRect(hwnd_, nullptr, TRUE);
 }
 
-std::string JsonTreePanel::RowText(const Row& row) const {
-    const core::JsonNode& node = *row.node;
+std::string StructureTreePanel::RowText(const Row& row) const {
+    return row.xml != nullptr ? XmlRowText(row) : JsonRowText(row);
+}
+
+std::string StructureTreePanel::JsonRowText(const Row& row) const {
+    const core::JsonNode& node = *row.json;
     std::string text(static_cast<std::size_t>(row.depth) * kIndentCells, ' ');
-    const bool container =
-        node.kind == core::JsonKind::Object || node.kind == core::JsonKind::Array;
+    const bool container = ContainerOf(row);
     if (container) {
         // 折叠记号用 ASCII 的 v/>：等宽字体里宽度确定，跨字体也不会变成方框
-        text += Collapsed(&node) ? "> " : "v ";
+        text += Collapsed(row) ? "> " : "v ";
     } else {
         text += "  ";
     }
@@ -311,7 +396,7 @@ std::string JsonTreePanel::RowText(const Row& row) const {
     if (node.kind == core::JsonKind::Object || node.kind == core::JsonKind::Array) {
         const char open = node.kind == core::JsonKind::Object ? '{' : '[';
         const char close = node.kind == core::JsonKind::Object ? '}' : ']';
-        if (Collapsed(&node) && node.count > 0) {
+        if (Collapsed(row) && node.count > 0) {
             text.push_back(open);
             text += " " + std::to_string(node.count) + " ";
             text.push_back(close);
@@ -330,16 +415,81 @@ std::string JsonTreePanel::RowText(const Row& row) const {
     return text;
 }
 
-std::string JsonTreePanel::VisibleText() const {
+std::string StructureTreePanel::XmlRowText(const Row& row) const {
+    const core::XmlNode& node = *row.xml;
+    std::string text(static_cast<std::size_t>(row.depth) * kIndentCells, ' ');
+    const bool container = ContainerOf(row);
+    if (container) {
+        text += Collapsed(row) ? "> " : "v ";
+    } else {
+        text += "  ";
+    }
+    switch (node.kind) {
+        case core::XmlNodeKind::Element:
+            text += "<";
+            text += node.name;
+            if (container && Collapsed(row)) {
+                text += " ... ";
+                text += std::to_string(node.children.size());
+                text += " 项";
+            }
+            text += ">";
+            break;
+        case core::XmlNodeKind::Attribute:
+            text += "@";
+            text += node.name;
+            text += " = \"";
+            text += Ellipsize(node.value);
+            text += "\"";
+            break;
+        case core::XmlNodeKind::Text:
+            text += "\"";
+            text += Ellipsize(node.value);
+            text += "\"";
+            break;
+        case core::XmlNodeKind::CData:
+            text += "CDATA: ";
+            text += Ellipsize(node.value);
+            break;
+        case core::XmlNodeKind::Comment:
+            text += "<!-- ";
+            text += Ellipsize(node.value);
+            text += " -->";
+            break;
+        case core::XmlNodeKind::PI:
+            text += "<?";
+            text += node.name;
+            if (!node.value.empty()) {
+                text += " ";
+                text += Ellipsize(node.value);
+            }
+            text += "?>";
+            break;
+        case core::XmlNodeKind::Doctype:
+            text += Ellipsize(node.value);
+            break;
+        case core::XmlNodeKind::Document:
+            break;   // 文档根不进显示行
+    }
+    return text;
+}
+
+
+std::string StructureTreePanel::VisibleText() const {
     std::string text;
     if (!valid_) {
-        // 不是合法 JSON：把原因（含行列）直接显示出来——与其它几块"失败要说清楚"一致
+        // 不是合法 JSON / XML：把原因（含行列）直接显示出来——与其它几块“失败要说清楚”一致
         if (source_.empty()) {
-            return ToUtf8(core::Tr(L"json.tree.empty",
-                                   L"（打开或切到一份 JSON 文档就会在这里显示结构）"));
+            return isXml_ ? ToUtf8(core::Tr(L"xml.tree.empty",
+                                            L"（打开或切到一份 XML 文档就会在这里显示结构）"))
+                          : ToUtf8(core::Tr(L"json.tree.empty",
+                                            L"（打开或切到一份 JSON 文档就会在这里显示结构）"));
         }
-        return ToUtf8(core::Tr(L"json.tree.invalid", L"不是合法的 JSON：")) +
-               ToUtf8(tree_.error);
+        return isXml_
+                   ? ToUtf8(core::Tr(L"xml.tree.invalid", L"不是合法的 XML：")) +
+                         ToUtf8(xmlTree_.error)
+                   : ToUtf8(core::Tr(L"json.tree.invalid", L"不是合法的 JSON：")) +
+                         ToUtf8(tree_.error);
     }
     const int first = std::max(topLine_, 0);
     const int last = std::min(static_cast<int>(rows_.size()), first + VisibleLineCount());
@@ -349,14 +499,19 @@ std::string JsonTreePanel::VisibleText() const {
         }
         text += RowText(rows_[static_cast<std::size_t>(index)]);
     }
-    if (tree_.truncated) {
+    const bool truncated = isXml_ ? xmlTree_.truncated : tree_.truncated;
+    if (truncated) {
         text += "\r\n";
-        text += ToUtf8(core::Tr(L"json.tree.truncated", L"（节点太多，只显示了前面一部分）"));
+        text += isXml_
+                    ? ToUtf8(core::Tr(L"xml.tree.truncated",
+                                      L"（节点太多，只显示了前面一部分）"))
+                    : ToUtf8(core::Tr(L"json.tree.truncated",
+                                      L"（节点太多，只显示了前面一部分）"));
     }
     return text;
 }
 
-void JsonTreePanel::Paint(HDC dc, const RECT& client) {
+void StructureTreePanel::Paint(HDC dc, const RECT& client) {
     const COLORREF background = dark_ ? RGB(30, 30, 30) : RGB(255, 255, 255);
     const COLORREF textColour = dark_ ? RGB(220, 220, 220) : RGB(30, 30, 30);
     const COLORREF nameColour = dark_ ? RGB(156, 220, 254) : RGB(0, 87, 145);
@@ -378,59 +533,120 @@ void JsonTreePanel::Paint(HDC dc, const RECT& client) {
         return;
     }
 
+    const Colours colours{textColour, nameColour, stringColour, numberColour, dimColour};
     const std::uint32_t totalRows = static_cast<std::uint32_t>(VisibleLineCount());
     for (std::uint32_t row = 0; row < totalRows; ++row) {
         const std::size_t index = static_cast<std::size_t>(topLine_) + row;
         if (index >= rows_.size()) {
             break;
         }
-        const Row& item = rows_[index];
-        const core::JsonNode& node = *item.node;
         const int y = static_cast<int>(row) * charHeight_;
-        int x = 0;
-        const auto draw = [&](const std::string& text, COLORREF colour, HFONT font) {
-            if (text.empty()) {
-                return;
-            }
-            const HGDIOBJ previous = ::SelectObject(dc, font);
-            ::SetTextColor(dc, colour);
-            const std::wstring wide = ToWide(text);
-            ::TextOutW(dc, x, y, wide.c_str(), static_cast<int>(wide.size()));
-            ::SelectObject(dc, previous);
-            x += CellsOf(text) * charWidth_;
-        };
-        const bool container =
-            node.kind == core::JsonKind::Object || node.kind == core::JsonKind::Array;
-        draw(std::string(static_cast<std::size_t>(item.depth) * kIndentCells, ' '), dimColour,
-             font_);
-        draw(container ? (Collapsed(&node) ? "> " : "v ") : "  ", dimColour, font_);
-        if (!node.name.empty()) {
-            draw("\"" + node.name + "\"", nameColour, boldFont_);
-            draw(": ", dimColour, font_);
-        }
-        if (node.kind == core::JsonKind::Object || node.kind == core::JsonKind::Array) {
-            const char open = node.kind == core::JsonKind::Object ? '{' : '[';
-            const char close = node.kind == core::JsonKind::Object ? '}' : ']';
-            if (Collapsed(&node) && node.count > 0) {
-                std::string text(1, open);
-                text += " " + std::to_string(node.count) + " ";
-                text.push_back(close);
-                draw(text, dimColour, font_);
-            } else {
-                draw(std::string(1, open), dimColour, font_);
-            }
-        } else if (node.kind == core::JsonKind::String) {
-            draw("\"" + node.value + "\"", stringColour, font_);
-        } else if (node.kind == core::JsonKind::Number) {
-            draw(node.value, numberColour, font_);
+        if (rows_[index].xml != nullptr) {
+            PaintRowXml(dc, rows_[index], y, colours);
         } else {
-            draw(node.value, textColour, font_);
+            PaintRowJson(dc, rows_[index], y, colours);
         }
     }
     ::SelectObject(dc, previousFont);
 }
 
-LRESULT JsonTreePanel::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
+int StructureTreePanel::DrawSegment(HDC dc, int x, int y, const std::string& text, COLORREF colour,
+                                    HFONT font) const {
+    if (text.empty()) {
+        return x;
+    }
+    const HGDIOBJ previous = ::SelectObject(dc, font);
+    ::SetTextColor(dc, colour);
+    const std::wstring wide = ToWide(text);
+    ::TextOutW(dc, x, y, wide.c_str(), static_cast<int>(wide.size()));
+    ::SelectObject(dc, previous);
+    return x + CellsOf(text) * charWidth_;
+}
+
+void StructureTreePanel::PaintRowJson(HDC dc, const Row& row, int y,
+                                      const Colours& colours) const {
+    const core::JsonNode& node = *row.json;
+    int x = 0;
+    x = DrawSegment(dc, x, y,
+                    std::string(static_cast<std::size_t>(row.depth) * kIndentCells, ' '),
+                    colours.dim, font_);
+    const bool container = ContainerOf(row);
+    x = DrawSegment(dc, x, y, container ? (Collapsed(row) ? "> " : "v ") : "  ", colours.dim,
+                    font_);
+    if (!node.name.empty()) {
+        x = DrawSegment(dc, x, y, "\"" + node.name + "\"", colours.name, boldFont_);
+        x = DrawSegment(dc, x, y, ": ", colours.dim, font_);
+    }
+    if (node.kind == core::JsonKind::Object || node.kind == core::JsonKind::Array) {
+        const char open = node.kind == core::JsonKind::Object ? '{' : '[';
+        const char close = node.kind == core::JsonKind::Object ? '}' : ']';
+        if (Collapsed(row) && node.count > 0) {
+            std::string text(1, open);
+            text += " " + std::to_string(node.count) + " ";
+            text.push_back(close);
+            DrawSegment(dc, x, y, text, colours.dim, font_);
+        } else {
+            DrawSegment(dc, x, y, std::string(1, open), colours.dim, font_);
+        }
+    } else if (node.kind == core::JsonKind::String) {
+        DrawSegment(dc, x, y, "\"" + node.value + "\"", colours.string, font_);
+    } else if (node.kind == core::JsonKind::Number) {
+        DrawSegment(dc, x, y, node.value, colours.number, font_);
+    } else {
+        DrawSegment(dc, x, y, node.value, colours.text, font_);
+    }
+}
+
+void StructureTreePanel::PaintRowXml(HDC dc, const Row& row, int y, const Colours& colours) const {
+    const core::XmlNode& node = *row.xml;
+    int x = 0;
+    x = DrawSegment(dc, x, y,
+                    std::string(static_cast<std::size_t>(row.depth) * kIndentCells, ' '),
+                    colours.dim, font_);
+    const bool container = ContainerOf(row);
+    x = DrawSegment(dc, x, y, container ? (Collapsed(row) ? "> " : "v ") : "  ", colours.dim,
+                    font_);
+    switch (node.kind) {
+        case core::XmlNodeKind::Element:
+            x = DrawSegment(dc, x, y, "<" + node.name, colours.name, boldFont_);
+            if (container && Collapsed(row)) {
+                x = DrawSegment(dc, x, y, " ... " + std::to_string(node.children.size()) + " 项",
+                                colours.dim, font_);
+            }
+            DrawSegment(dc, x, y, ">", colours.name, boldFont_);
+            break;
+        case core::XmlNodeKind::Attribute:
+            x = DrawSegment(dc, x, y, "@" + node.name, colours.name, boldFont_);
+            x = DrawSegment(dc, x, y, " = ", colours.dim, font_);
+            DrawSegment(dc, x, y, "\"" + Ellipsize(node.value) + "\"", colours.string, font_);
+            break;
+        case core::XmlNodeKind::Text:
+            DrawSegment(dc, x, y, "\"" + Ellipsize(node.value) + "\"", colours.string, font_);
+            break;
+        case core::XmlNodeKind::CData:
+            x = DrawSegment(dc, x, y, "CDATA: ", colours.dim, font_);
+            DrawSegment(dc, x, y, Ellipsize(node.value), colours.string, font_);
+            break;
+        case core::XmlNodeKind::Comment:
+            DrawSegment(dc, x, y, "<!-- " + Ellipsize(node.value) + " -->", colours.dim, font_);
+            break;
+        case core::XmlNodeKind::PI:
+            x = DrawSegment(dc, x, y, "<?" + node.name, colours.name, boldFont_);
+            if (!node.value.empty()) {
+                x = DrawSegment(dc, x, y, " " + Ellipsize(node.value), colours.dim, font_);
+            }
+            DrawSegment(dc, x, y, "?>", colours.dim, font_);
+            break;
+        case core::XmlNodeKind::Doctype:
+            DrawSegment(dc, x, y, Ellipsize(node.value), colours.dim, font_);
+            break;
+        case core::XmlNodeKind::Document:
+            break;   // 文档根不进显示行
+    }
+}
+
+
+LRESULT StructureTreePanel::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
         case WM_PAINT: {
             PAINTSTRUCT paint{};
@@ -459,13 +675,12 @@ LRESULT JsonTreePanel::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             if (index >= rows_.size()) {
                 return 0;
             }
-            const core::JsonNode* node = rows_[index].node;
-            const bool container =
-                node->kind == core::JsonKind::Object || node->kind == core::JsonKind::Array;
-            if (container) {
-                Toggle(node);
+            const Row& row = rows_[index];
+            if (ContainerOf(row)) {
+                Toggle(row);
             } else if (jumpCallback_) {
-                jumpCallback_(node->line);   // 点了标量：跳到源码里那一行
+                // 点了标量 / 属性 / 文本：跳到源码里那一行
+                jumpCallback_(row.xml != nullptr ? row.xml->line : row.json->line);
             }
             return 0;
         }
@@ -550,20 +765,20 @@ LRESULT JsonTreePanel::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
     return ::DefWindowProcW(hwnd_, message, wParam, lParam);
 }
 
-void JsonTreePanel::SetVisible(bool visible) const {
+void StructureTreePanel::SetVisible(bool visible) const {
     if (hwnd_ != nullptr) {
         ::ShowWindow(hwnd_, visible ? SW_SHOW : SW_HIDE);
     }
 }
 
-void JsonTreePanel::Resize(const RECT& area) const {
+void StructureTreePanel::Resize(const RECT& area) const {
     if (hwnd_ != nullptr) {
         ::MoveWindow(hwnd_, area.left, area.top, area.right - area.left, area.bottom - area.top,
                      TRUE);
     }
 }
 
-void JsonTreePanel::Focus() const {
+void StructureTreePanel::Focus() const {
     if (hwnd_ != nullptr) {
         ::SetFocus(hwnd_);
     }

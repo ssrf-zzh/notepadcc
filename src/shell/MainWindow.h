@@ -29,7 +29,7 @@
 #include "shell/FunctionListPanel.h"
 #include "shell/HexView.h"
 #include "shell/MarkdownPreview.h"
-#include "shell/JsonTreePanel.h"
+#include "shell/StructureTreePanel.h"
 #include "plugin/PluginHost.h"
 #include "shell/FindBar.h"
 #include "shell/SearchPanel.h"
@@ -144,6 +144,9 @@ private:
     // JSON / XML 格式化（设计文档 2.13）。这两件事会失败（内容不合法），
     // 所以不能走 ApplyTextTool 那条"永不失败"的入口：先试一次，失败只弹说明。
     void CommandFormatStructured(bool json, bool minify);
+    // 校验 XML（M3 的内置 XML 工具）：只探一次结构树、不改内容；结果（行数 / 节点数
+    // 或者出错的行列）进状态栏与日志
+    void CommandValidateXml();
     void CommandExportLanguageDefs();
     void CommandStyleConfigurator();
     void CommandExportUdlSample();
@@ -195,9 +198,10 @@ private:
     MarkdownPreview markdownPreview_;
     bool            markdownPreviewVisible_ = false;
     int             previewFileCounter_ = 0;
-    // JSON 树面板（与 Markdown 预览互斥：两者都用右侧那一栏）
-    JsonTreePanel   jsonTreePanel_;
+    // 结构树面板（JSON 树与 XML 树共用这一块面板；与 Markdown 预览互斥：都用右侧那一栏）
+    StructureTreePanel structureTreePanel_;
     bool            jsonTreeVisible_ = false;
+    bool            xmlTreeVisible_ = false;
     // ---- 界面语言（设计文档 6.6 / 7.7）----
     void RegisterLanguageCommands();
     void CommandSwitchLanguage(const std::wstring& locale);
@@ -219,10 +223,13 @@ private:
     void ScheduleMarkdownPreview();     // 内容变了之后节流刷新（300 ms）
     void RefreshMarkdownPreview();      // 立刻按活动文档重排面板
     bool ActiveDocumentIsMarkdown() const;
-    // ---- JSON 树面板（M3 的内置 JSON 能力）----
+    // ---- 结构树面板（M3 的内置 JSON 能力与 XML 工具共用）----
     void CommandToggleJsonTree();
     void ScheduleJsonTree();
     void RefreshJsonTree();
+    void CommandToggleXmlTree();
+    void ScheduleXmlTree();
+    void RefreshXmlTree();
     // ---- 比较（设计文档第 10 章 M3 的内置 Compare）----
     void CommandCompareWithDocument();   // 与另一个**已打开**的文档比
     void CommandCompareWithDisk();       // 与这份文档在磁盘上的版本比（"我改了哪些"）

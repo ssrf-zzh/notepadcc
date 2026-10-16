@@ -190,6 +190,7 @@ CMD_TOOL_EXPORT_UDL = (14 << 12) | 31
 CMD_TOOL_FORMAT_JSON = (14 << 12) | 32
 CMD_TOOL_MINIFY_JSON = (14 << 12) | 33
 CMD_TOOL_FORMAT_XML = (14 << 12) | 34
+CMD_TOOL_VALIDATE_XML = (14 << 12) | 40   # 工具 → 校验 XML
 CMD_RUN_DIALOG = (9 << 12) | 1          # 运行…（F5）
 CMD_RUN_FIRST_SAVED = (9 << 12) | 128   # 存下来的第一条运行命令
 LANGUAGE_BASE = (7 << 12) | 128         # 界面语言：第 0 项是简体中文，第 1 项是内置英文
@@ -209,13 +210,15 @@ CMD_TOOL_COMPARE_DISK = (14 << 12) | 37
 CMD_WINDOW_NEXT = (11 << 12) | 1
 CMD_WINDOW_PREV = (11 << 12) | 2
 CMD_VIEW_JSON_TREE = (4 << 12) | 25
-JSON_TREE_CLASS = "notepadccJsonTree"
+# JSON 树与 XML 树共用同一块面板（M3 第七块把面板并成了"结构树"）
+STRUCTURE_TREE_CLASS = "notepadccStructureTree"
 # 视图类 26/27/28：全屏（F11）、跳到匹配括号（Ctrl+B）、摘要
 CMD_VIEW_FULL_SCREEN = (4 << 12) | 26
 CMD_VIEW_GOTO_MATCH_BRACE = (4 << 12) | 27
 CMD_VIEW_SUMMARY = (4 << 12) | 28
 CMD_VIEW_TOOLBAR = (4 << 12) | 29        # 视图 → 工具栏（勾选）
 CMD_VIEW_EYE_CARE = (4 << 12) | 30       # 视图 → 护眼模式（低蓝光，勾选）
+CMD_VIEW_XML_TREE = (4 << 12) | 31       # 视图 → XML 树视图（勾选，与 JSON 树共用面板）
 CMD_SETTINGS_TOOLBAR = (7 << 12) | 6     # 设置 → 自定义工具栏…
 MENU_INDEX_VIEW = 3                   # 文件 / 编辑 / 查找 / 视图 …
 PREF_UI_LANGUAGE_COMBO = 1048
@@ -4469,6 +4472,8 @@ def run():
         failed = True
     if not test_json_tree(root):
         failed = True
+    if not test_xml_tree(root):
+        failed = True
     if not test_brace_summary_fullscreen(root):
         failed = True
     if not test_toolbar(root):
@@ -4489,7 +4494,7 @@ def run():
           "宏 + 文件夹工作区 + 函数列表 + 导出与打印 + 插件宿主 + JSON/XML 格式化 + "
           "运行命令 + 界面语言 + 十六进制查看 + 复制为富文本 + Markdown 预览 + 对话框文案 + "
           "比较 + JSON 树视图 + 括号匹配与摘要与全屏 + 工具栏 + 自动完成 + 文件关联 + "
-          "文件类型识别与 MIME 工具 + 护眼模式 + 绿色打包）")
+          "文件类型识别与 MIME 工具 + 护眼模式 + XML 树视图与校验 + 绿色打包）")
     return 0
 
 
@@ -4754,7 +4759,7 @@ def test_json_tree(root):
         """等 JSON 树面板出现并读回它渲染的那几行。"""
         deadline = time.time() + timeout
         while time.time() < deadline:
-            panel = find_child(window, JSON_TREE_CLASS)
+            panel = find_child(window, STRUCTURE_TREE_CLASS)
             if panel and user32.IsWindowVisible(panel):
                 text = window_text(panel)
                 if text:
@@ -4867,6 +4872,205 @@ def test_json_tree(root):
 
     print("  JSON 树视图：按层级列出结构（缩进/折叠记号/键名/值逐行核对）、"
           "点容器折叠与展开、点标量跳到源码那一行、内容不合法时说明原因（含行列）")
+    return True
+
+
+def test_xml_tree(root):
+    """XML 树视图与"校验 XML"（M3 第七块）：结构逐行核对、折叠/展开、点行跳转、
+    与 JSON 树共用同一块面板、校验成功报规模、失败弹说明且文档一个字节不动。
+
+    与 test_json_tree 同一套手法：面板是自绘的，渲染内容靠 WM_GETTEXT 读回；
+    点击位置固定 y=1（命中"此刻第一行"），所以折叠/跳转的判据都是确定的。
+    树的结构用嵌套文档核对；跳转用"根就是空元素"的文档——第一行不是容器，
+    点它才会走"跳到源码行"这条路而不是折叠。
+    """
+    work = os.path.join(root, "build", "xml_test")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    cfg = os.path.join(root, "build", "bin", "config")
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+
+    nestedPath = os.path.join(work, "nested.xml")
+    nestedText = '<root id="1">\n  <item>one</item>\n  <empty/>\n</root>\n'
+    with open(nestedPath, "w", encoding="utf-8", newline="") as handle:
+        handle.write(nestedText)
+    simplePath = os.path.join(work, "simple.xml")
+    with open(simplePath, "w", encoding="utf-8", newline="") as handle:
+        handle.write("<a/>\n\n\n\n")
+
+    def clean_config():
+        for name in ("config.xml", "session.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    clean_config()
+    remove_log_with_retry(root)
+
+    def panel_lines(window, timeout=8.0):
+        """等结构树面板出现并读回它渲染的那几行。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            panel = find_child(window, STRUCTURE_TREE_CLASS)
+            if panel and user32.IsWindowVisible(panel):
+                text = window_text(panel)
+                if text:
+                    return panel, text.split("\r\n")
+            time.sleep(0.2)
+        return None, []
+
+    def caret_line(window):
+        scinti = visible_scintilla(window)
+        position = user32.SendMessageW(scinti, SCI_GETCURRENTPOS, 0, 0)
+        return user32.SendMessageW(scinti, SCI_LINEFROMPOSITION, position, 0)
+
+    def click_first_row(panel):
+        user32.PostMessageW(panel, WM_LBUTTONDOWN, 0, (1 << 16) | 1)
+
+    # ---- 1) 结构 / 折叠展开 / 与 JSON 树共用面板 / 校验成功报规模 ----
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", nestedPath], cwd=root)
+    window = wait_for_main_window("notepadcc - nested.xml")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口（nested.xml）")
+            return False
+        time.sleep(0.8)
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_XML_TREE, 0)
+        panel, lines = panel_lines(window)
+        if not panel:
+            print("  FAIL: 打开 XML 树之后没看到那块面板")
+            return False
+        expected = [
+            "v <root>",
+            '    @id = "1"',
+            "  v <item>",
+            '      "one"',
+            "    <empty>",
+        ]
+        if lines != expected:
+            print(f"  FAIL: 树的结构不对\n           实际 {lines}\n           期望 {expected}")
+            return False
+
+        click_first_row(panel)
+        time.sleep(0.6)
+        _, collapsed = panel_lines(window)
+        if collapsed != ["> <root ... 3 项>"]:
+            print(f"  FAIL: 点根应当折叠成一行摘要，实际 {collapsed}")
+            return False
+        click_first_row(panel)
+        time.sleep(0.6)
+        _, expanded = panel_lines(window)
+        if expanded != expected:
+            print(f"  FAIL: 再点一次应当展开回来，实际 {expanded[:3]}…")
+            return False
+
+        # 打开 JSON 树：同一块面板换内容（这份 XML 不是合法 JSON，面板如实说明原因）；
+        # 再切回 XML 树，结构原样回来
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_JSON_TREE, 0)
+        time.sleep(1.2)
+        _, as_json = panel_lines(window)
+        if not as_json or "不是合法的 JSON" not in as_json[0]:
+            print(f"  FAIL: 打开 JSON 树后同一块面板应当换内容，实际 {as_json[:2]}")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_XML_TREE, 0)
+        time.sleep(1.2)
+        _, back = panel_lines(window)
+        if back != expected:
+            print(f"  FAIL: 切回 XML 树应当恢复结构，实际 {back[:3]}…")
+            return False
+
+        # 校验 XML：合法 → 状态栏报行数与节点数
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_VALIDATE_XML, 0)
+        time.sleep(0.8)
+        message = read_status_bar(window)
+        if not message or "XML 合法" not in message:
+            print(f"  FAIL: 校验 XML 应当在状态栏报结果，实际 {message!r}")
+            return False
+        if "4 行" not in message or "5 个节点" not in message:
+            print(f"  FAIL: 校验结果的规模不对（期望 4 行 5 个节点），实际 {message!r}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        clean_config()
+
+    # ---- 2) 点元素跳到源码行；改坏后说明原因；校验失败弹说明且文档不动 ----
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", simplePath], cwd=root)
+    window = wait_for_main_window("notepadcc - simple.xml")
+    try:
+        if not window:
+            print("  FAIL: 找不到第二个实例的主窗口")
+            return False
+        time.sleep(0.8)
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_XML_TREE, 0)
+        panel, lines = panel_lines(window)
+        if not panel or lines[0] != "  <a>":
+            print(f"  FAIL: 空元素根应当渲染成一行，实际 {lines}")
+            return False
+        # 先把光标挪到文末，再点树里的那一行
+        scinti = visible_scintilla(window)
+        user32.SendMessageW(scinti, SCI_GOTOPOS, 8, 0)   # "<a/>\n\n\n\n" 共八个字节
+        time.sleep(0.3)
+        if caret_line(window) == 0:
+            print("  FAIL: 光标没有先挪开，这条就测不出跳跃")
+            return False
+        click_first_row(panel)
+        time.sleep(0.6)
+        if caret_line(window) != 0:
+            print(f"  FAIL: 点元素应当跳到源码第 1 行，实际第 {caret_line(window) + 1} 行")
+            return False
+
+        # 把文档改坏 → 面板里应当说明"不是合法的 XML"（错误信息含行列）
+        user32.SendMessageW(scinti, SCI_GOTOPOS, 0, 0)
+        user32.PostMessageW(scinti, WM_CHAR_INPUT, ord("<"), 0)
+        time.sleep(1.2)   # 刷新是节流的（300 ms），等宽裕一点
+        _, broken = panel_lines(window)
+        if not broken or "不是合法的 XML" not in broken[0]:
+            print(f"  FAIL: 内容不合法时面板里应当说明原因，实际 {broken[:2]}")
+            return False
+        if "第 1 行" not in broken[0]:
+            print(f"  FAIL: 错误信息里应当带行列，实际 {broken[0]!r}")
+            return False
+
+        # 校验 XML：不合法 → 弹说明（带行列），弹掉之后内容一个字节都没动
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_VALIDATE_XML, 0)
+        box = None
+        deadline = time.time() + 8.0
+        while time.time() < deadline and not box:
+            box = user32.FindWindowW("#32770", "校验 XML")
+            if not box:
+                time.sleep(0.2)
+        if not box:
+            print("  FAIL: 校验 XML 失败时应当弹出说明")
+            return False
+        shown = dialog_texts(box)
+        if not any("第 1 行" in item for item in shown):
+            print(f"  FAIL: 弹框里应当说明出错的行列，实际 {shown!r}")
+            dismiss_dialog("校验 XML", IDOK, timeout=4.0, quiet=True)
+            return False
+        if not dismiss_dialog("校验 XML", IDOK, timeout=6.0):
+            print("  FAIL: 校验 XML 的说明弹框点不掉")
+            return False
+        time.sleep(0.5)
+        if scinti_text(scinti) != "<<a/>\n\n\n\n":
+            print(f"  FAIL: 校验只是看看，不该改动内容，实际 {scinti_text(scinti)!r}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        clean_config()
+
+    print("  XML 树视图与校验 XML：树按层级逐行核对（元素/属性/文本/折叠摘要）、折叠与展开、"
+          "与 JSON 树共用同一块面板、点元素跳到源码行、非法内容说明原因（含行列）、"
+          "校验成功在状态栏报规模、失败弹说明且内容不动")
     return True
 
 
