@@ -11,6 +11,7 @@
 #include "core/DocumentManager.h"
 #include "core/Macro.h"
 #include "core/RunCommand.h"
+#include "core/ScriptEngine.h"
 #include "core/Messages.h"
 #include "core/ExportHtml.h"
 #include "core/ShortcutStore.h"
@@ -24,6 +25,7 @@
 #include "infra/CrashGuard.h"
 #include "infra/ThreadPool.h"
 #include "infra/UpdateService.h"
+#include "infra/ScriptRunner.h"
 #include "shell/StatusBar.h"
 #include "shell/TabBar.h"
 #include "shell/ToolBar.h"
@@ -188,6 +190,19 @@ private:
     bool PollRunCommand();                               // 后台命令跑完了吗
     void FinishRunCommand();                             // 收尾：读输出 → 开文档
     void CancelPendingRun(bool deleteOutput);            // 退出时清理
+    // ---- 脚本插件（M3 第十二块）----
+    void CommandRunScriptFile();      // 工具菜单：运行脚本…（选任意 .py 跑一次）
+    void CommandOpenScriptsFolder();  // 工具菜单：打开脚本目录
+    void CommandRefreshScripts();     // 工具菜单：刷新脚本列表
+    void RefreshScriptList();         // 扫描 <配置根>\scripts（IO 这一半）
+    void RegisterScriptCommands();    // 把脚本列表变成工具菜单里的命令
+    void RunScript(std::wstring_view scriptPath, std::wstring_view displayName);
+    bool PollScript();                // 脚本跑完了吗（超时顺带终止）
+    void FinishScript();              // 收尾：结果写回文档 / 失败收进新文档
+    void CancelPendingScript();       // 退出时清理（终止子进程）
+    // 生成一份"只读用途"的输出文档（运行命令与脚本共用）：UTF-8 + CRLF、
+    // 不进撤销栈、钉在保存点上。text 按 UTF-8 字节给出
+    edit::Document* OpenOutputDocument(std::wstring_view displayName, std::string_view text);
     // 正在跑的那条命令（捕获输出时才有：不捕获就是"丢出去不管"）
     struct PendingRun {
         HANDLE        process = nullptr;
@@ -202,6 +217,19 @@ private:
     std::wstring lastRunCommand_;   // 下次打开 F5 时预填
     int          runOutputCounter_ = 0;
     int          runTempCounter_ = 0;
+    // 脚本插件：列表来自 <配置根>\scripts；"刷新脚本列表"把命令整批换掉
+    std::vector<core::ScriptInfo> scripts_;
+    std::size_t scriptCommandCount_ = 0;   // 上一批注册了几条（撤旧用）
+    std::unique_ptr<infra::ScriptRunner> scriptRunner_;
+    struct PendingScript {
+        std::wstring   name;
+        core::BufferId docId = core::kInvalidId;
+        int32_t        start = 0;
+        int32_t        end = 0;
+        std::string    input;   // 喂给脚本的原文：收尾时用它核对文档有没有被改过
+    };
+    PendingScript pendingScript_;
+    int           scriptOutputCounter_ = 0;
     // 十六进制视图：一次只看一个文件（它读的是磁盘字节，不是缓冲区）
     HexView      hexView_;
     bool         hexMode_ = false;

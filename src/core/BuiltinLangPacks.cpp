@@ -145,6 +145,11 @@ std::vector<LangPack> MakeBuiltin() {
         Entry(L"cmd.tool.exportLangPack", L"Export Language Pack Template (English)"),
         Entry(L"cmd.tool.compareDocument", L"Compare with Another Open Document...", L"C"),
         Entry(L"cmd.tool.compareDisk", L"Compare with Version on Disk", L"D"),
+        // ---- 工具：脚本插件（M3 第十二块）----
+        Entry(L"cmd.tool.scriptOpenDir", L"Open Scripts Folder", L"S"),
+        Entry(L"cmd.tool.scriptRefresh", L"Refresh Script List", L"R"),
+        Entry(L"cmd.tool.scriptRun", L"Run Script...", L"U"),
+        Entry(L"cmd.tool.scriptPrefix", L"Script: "),
         Entry(L"compare.pick.title", L"Pick a Document to Compare"),
         Entry(L"compare.pick.prompt", L"Current document: "),
         Entry(L"compare.pick.promptTail", L"  --  compare with which one?"),

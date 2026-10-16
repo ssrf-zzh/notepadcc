@@ -54,6 +54,19 @@ bool CommandRegistry::SetCommandText(CmdId id, std::wstring text) {
     return false;
 }
 
+bool CommandRegistry::Unregister(CmdId id) {
+    const auto firstRemoved = std::remove_if(
+        commands_.begin(), commands_.end(), [id](const Command& c) { return c.id == id; });
+    if (firstRemoved == commands_.end()) {
+        return false;
+    }
+    commands_.erase(firstRemoved, commands_.end());
+    // 命令没了，绑在它身上的快捷键也必须一起走：留着的绑定是"幽灵命令"，
+    // 加速键按下会走进一个不存在的命令
+    ClearShortcutsOf(id);
+    return true;
+}
+
 const Command* CommandRegistry::Find(CmdId id) const {
     const auto it = std::find_if(commands_.begin(), commands_.end(),
                                  [id](const Command& c) { return c.id == id; });

@@ -332,6 +332,14 @@ bool ConfigCenter::Load(std::wstring* error) {
             3600, warnings_, L"update"));
     }
 
+    const infra::XmlElement* script = Section(root, L"script");
+    if (script != nullptr) {
+        script_.interpreter = ReadString(script, L"interpreter", script_.interpreter);
+        script_.timeoutSeconds = static_cast<std::uint32_t>(ReadIntInRange(
+            script, L"timeoutSeconds", static_cast<int>(script_.timeoutSeconds), 1, 3600,
+            warnings_, L"script"));
+    }
+
     // 远程站点（M3 第十一块）：一个个 <Site> 子元素。坏站点只警告并跳过
     // （少一个站点不该让程序起不来），名字重复的后来者覆盖前者——站点名
     // 同时是本地缓存目录名，"两个同名站点"在磁盘上本来就分不开。
@@ -472,6 +480,10 @@ bool ConfigCenter::Save(bool force, std::wstring* error) {
     update->SetAttribute(L"sourceUrl", update_.sourceUrl);
     update->SetAttributeInt(L"startupDelaySeconds",
                             static_cast<int>(update_.startupDelaySeconds));
+
+    infra::XmlElementPtr script = root->AddChild(L"script");
+    script->SetAttribute(L"interpreter", script_.interpreter);
+    script->SetAttributeInt(L"timeoutSeconds", static_cast<int>(script_.timeoutSeconds));
 
     // 远程站点：没配站点就不写这一节（跟工具栏项表同一个取舍）
     if (!remote_.sites.empty()) {

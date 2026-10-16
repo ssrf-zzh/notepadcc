@@ -45,6 +45,7 @@
 #include "core/XmlFormat.h"
 #include "core/XmlTree.h"
 #include "core/RunCommand.h"
+#include "core/ScriptEngine.h"
 #include "core/Localization.h"
 #include "core/Version.h"
 #include "core/PrintText.h"
@@ -53,6 +54,7 @@
 #include "core/ShortcutStore.h"
 #include "infra/SingleInstance.h"
 #include "infra/FileAssociation.h"
+#include "infra/ScriptRunner.h"
 #include "infra/Paths.h"
 #include "io/AtomicFile.h"
 #include "io/FileReader.h"
@@ -70,6 +72,7 @@ constexpr UINT_PTR kTimerMarkdownPreview = 5;   // Markdown 预览的节流定�
 constexpr UINT_PTR kTimerJsonTree = 6;          // JSON 树面板的节流定时器（一次性）
 constexpr UINT_PTR kTimerXmlTree = 7;           // XML 树面板的节流定时器（一次性）
 constexpr UINT_PTR kTimerUpdateCheck = 8;       // 启动后的延迟更新检查（一次性）
+constexpr UINT_PTR kTimerScript = 9;            // 脚本执行器的轮询（M3 第十二块）
 
 enum : npcc::core::CmdId {
     kCmdFileNew     = npcc::core::MakeCmdId(1, 1),
@@ -199,6 +202,9 @@ enum : npcc::core::CmdId {
     kCmdToolQuotedPrintableDecode = npcc::core::MakeCmdId(14, 39),
     kCmdToolValidateXml     = npcc::core::MakeCmdId(14, 40),
     kCmdToolXPathQuery      = npcc::core::MakeCmdId(14, 41),
+    kCmdToolRunScript       = npcc::core::MakeCmdId(14, 42),
+    kCmdToolScriptsFolder   = npcc::core::MakeCmdId(14, 43),
+    kCmdToolRefreshScripts  = npcc::core::MakeCmdId(14, 44),
     // 运行类（9）：第 1 号是 F5 那个对话框，第 kRunCommandBase 号起是用户存的命令
     kCmdRunDialog           = npcc::core::MakeCmdId(9, npcc::core::kRunCommandDialogIndex),
     kCmdEditAutoComplete = npcc::core::MakeCmdId(2, 33),
@@ -441,6 +447,10 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             RegisterMacroCommands();
             // 运行命令同理：存过的命令要变成"运行"菜单里的条目才能点
             RegisterRunCommands();
+            // 脚本：<配置根>\scripts 里的 .py 变成工具菜单里的条目（列表跟着目录走，
+            // "刷新脚本列表"时整批换掉）
+            RefreshScriptList();
+            RegisterScriptCommands();
             // 函数列表面板：开关记在配置里
             functionListVisible_ = config_.General().functionListVisible;
             functionListPanel_.SetVisible(functionListVisible_);
@@ -833,6 +843,14 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
                 }
                 return 0;
             }
+            if (wParam == kTimerScript) {
+                // 脚本同理：结果在 UI 线程里收（写回文档、开输出文档），
+                // 没有跨线程的所有权问题
+                if (PollScript()) {
+                    FinishScript();
+                }
+                return 0;
+            }
             if (wParam == kTimerMarkdownPreview) {
                 ::KillTimer(hwnd_, kTimerMarkdownPreview);   // 一次性
                 RefreshMarkdownPreview();
@@ -886,6 +904,7 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             // 还在跑的捕获型命令：不再等它（子进程由用户自己收），临时输出文件尽量删掉。
             // 一定要在窗口销毁之前做——定时器与消息都挂在这个窗口上
             CancelPendingRun(true);
+            CancelPendingScript();   // 脚本：终止子进程并删掉临时文件
             if (CloseAllDocuments()) {
                 // 正常退出：未保存的内容已经逐一问过了，快照不该留到下次启动再问一遍
                 ::KillTimer(hwnd_, kTimerAutosave);
@@ -1210,13 +1229,19 @@ void MainWindow::RegisterCommands() {
     // ---- 工具：行操作与文本转换（设计文档 2.13）----
     // 用分组分隔线代替子菜单：本版的菜单是"一个类别一个平铺菜单"，
     // 嵌套子菜单要等菜单定制那一版。分组顺序是 行操作 → 排序 → 去重 → 空白 → 行号 → 大小写 → 编码。
-    // 分隔线也要占一个命令 ID。**必须给它显式的保留号**：用"自动分配"的话，
-    // 它领到的号正好是紧随其后的那条命令的显式号，于是那条命令被当成重复注册丢弃
-    // （表现：菜单里有这一项，点了没反应）。保留号放在没人用的第 15 类里。
+    // 分隔线也要占一个命令 ID，保留号放在没人用的第 15 类里。两个坑都踩过：
+    // ① 用“自动分配”的话，它领到的号正好是紧随其后的那条命令的显式号，于是那条命令
+    // 被当成重复注册丢弃（表现：菜单里有这一项，点了没反应）；
+    // ② 本序列的连续号也会撞上别处手工占的号——第十二块新增 sepScript 把序列涨到 10、
+    // 撞上文件菜单手工占的 (15,10)，帮助菜单的分隔线就被整条丢掉。
+    // 所以取号时向后找第一个空闲号：手工号都先于本序列注册，跳过它们之后选到的一定是崭新号。
     int separatorIndex = 0;
-    auto addSeparator = [&](const wchar_t* key) {
-        add(core::MakeCmdId(15, static_cast<uint16_t>(++separatorIndex)), CmdCategory::Tools, key,
-            L"-", core::kCmdNone, [](const CmdContext&) {});
+    auto addSeparator = [this, &add, &separatorIndex](const wchar_t* key) {
+        core::CmdId id = 0;
+        do {
+            id = core::MakeCmdId(15, static_cast<uint16_t>(++separatorIndex));
+        } while (registry_.Find(id) != nullptr);
+        add(id, CmdCategory::Tools, key, L"-", core::kCmdNone, [](const CmdContext&) {});
     };
     auto addTool = [&](core::CmdId id, const wchar_t* key, const wchar_t* text,
                        std::function<std::string(std::string_view, std::uint32_t)> tool) {
@@ -1372,6 +1397,17 @@ void MainWindow::RegisterCommands() {
         needsBuffer, [this](const CmdContext&) { CommandValidateXml(); });
     add(kCmdToolXPathQuery, CmdCategory::Tools, L"cmd.tool.xpathQuery", L"XPath 查询(&P)...",
         needsBuffer, [this](const CmdContext&) { CommandXPathQuery(); });
+
+    addSeparator(L"cmd.tool.sepScript");
+    add(kCmdToolScriptsFolder, CmdCategory::Tools, L"cmd.tool.scriptOpenDir",
+        L"打开脚本目录(&O)", core::kCmdNone,
+        [this](const CmdContext&) { CommandOpenScriptsFolder(); });
+    add(kCmdToolRefreshScripts, CmdCategory::Tools, L"cmd.tool.scriptRefresh",
+        L"刷新脚本列表(&R)", core::kCmdNone,
+        [this](const CmdContext&) { CommandRefreshScripts(); });
+    add(kCmdToolRunScript, CmdCategory::Tools, L"cmd.tool.scriptRun", L"运行脚本(&U)...",
+        needsWritable, [this](const CmdContext&) { CommandRunScriptFile(); });
+    // 具体的脚本条目由 RegisterScriptCommands() 在加载配置之后补上（列表跟着目录走）
 
     // ---- 窗口 ----
     add(kCmdWindowNext, CmdCategory::Window, L"cmd.window.next", L"下一个标签(&N)",
@@ -3950,26 +3986,7 @@ void MainWindow::FinishRunCommand() {
     text += "[运行结束：退出码 " + std::to_string(exitCode) + "，用时 " + SecondsText(elapsedMs) +
             " 秒]\n";
 
-    if (edit::Document* document = documents_->CreateUntitled(); document != nullptr) {
-        // 输出文档的形态定死：UTF-8 + CRLF。它不该跟着"新建文档"那几项配置跑，
-        // 否则用户在 ANSI 配置下会拿到一份看不懂的输出
-        document->buffer.displayName = L"运行输出 " + std::to_wstring(++runOutputCounter_);
-        document->buffer.encoding.uniMode = edit::UniMode::Utf8;
-        document->buffer.encoding.codePage = edit::kCodePageUtf8;
-        document->buffer.encoding.confidence = 100;
-        document->buffer.eol = edit::EolMode::Crlf;
-        document->buffer.detectedEol = edit::EolMode::Crlf;
-        document->buffer.isModified = false;
-        if (document->view != nullptr) {
-            document->view->SetCodePage(edit::kCodePageUtf8);
-            document->view->SetText(text);
-            // 刚生成的输出不该显得"改过"：清掉撤销栈、钉在保存点上
-            document->view->ClearUndoBuffer();
-            document->view->MarkSavePoint();
-        }
-        SyncTabBar();
-        ActivateDocument(document->buffer.id);
-    }
+    OpenOutputDocument(L"运行输出 " + std::to_wstring(++runOutputCounter_), text);
     statusBar_.SetMessage(L"命令结束：退出码 " + std::to_wstring(exitCode) + L"，用时 " +
                           FromUtf8(SecondsText(elapsedMs)) + L" 秒");
     ::DeleteFileW(outputPath.c_str());
@@ -3989,6 +4006,298 @@ void MainWindow::CancelPendingRun(bool deleteOutput) {
     }
     pendingRun_ = PendingRun{};
     pendingRunActive_ = false;
+}
+
+// ---- 脚本插件（M3 第十二块）----
+//
+// 协议：脚本从 stdin 收到当前选区（无选区为整篇）的 UTF-8 字节；退出码为 0 时
+// stdout 的字节写回同一段内容（一步撤销），退出码非 0 或超时不动文档，
+// 结果收进一份新的"脚本输出"文档。编辑器内部就是 UTF-8，因此不做编码转换。
+
+void MainWindow::CommandRunScriptFile() {
+    std::vector<wchar_t> buffer(32768, L'\0');
+    OPENFILENAMEW dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = hwnd_;
+    dialog.lpstrFilter = L"Python 脚本 (*.py)\0*.py\0所有文件\0*.*\0";
+    dialog.lpstrTitle = L"运行脚本";
+    dialog.lpstrFile = buffer.data();
+    dialog.nMaxFile = static_cast<DWORD>(buffer.size());
+    const std::wstring scriptDir = core::ScriptDirectory(infra::ConfigRoot()).wstring();
+    dialog.lpstrInitialDir = scriptDir.c_str();
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
+    if (::GetOpenFileNameW(&dialog) == 0) {
+        return;   // 用户取消
+    }
+    const std::wstring path = buffer.data();
+    RunScript(path, std::filesystem::path(path).filename().wstring());
+}
+
+void MainWindow::CommandOpenScriptsFolder() {
+    const std::filesystem::path directory = core::ScriptDirectory(infra::ConfigRoot());
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    if (ec) {
+        ::MessageBoxW(hwnd_, (L"建不出脚本目录：\n" + directory.wstring() + L"\n" +
+                              io::DescribeWin32Error(static_cast<unsigned long>(ec.value())))
+                                 .c_str(),
+                      L"脚本", MB_ICONWARNING);
+        return;
+    }
+    const HINSTANCE result = ::ShellExecuteW(hwnd_, L"open", directory.c_str(), nullptr, nullptr,
+                                             SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(result) <= 32) {
+        infra::LogWarn(L"script", L"打开脚本目录失败: " + directory.wstring());
+        statusBar_.SetMessage(L"打开脚本目录失败：" + directory.wstring());
+        return;
+    }
+    statusBar_.SetMessage(L"脚本目录：" + directory.wstring());
+}
+
+void MainWindow::CommandRefreshScripts() {
+    RefreshScriptList();
+    RegisterScriptCommands();
+    RebuildMenu();
+    RebuildAccelerators();
+    statusBar_.SetMessage(L"脚本列表已刷新（" + std::to_wstring(scripts_.size()) + L" 个脚本）");
+    infra::LogInfo(L"script", L"脚本列表已刷新：" + std::to_wstring(scripts_.size()) + L" 个");
+}
+
+void MainWindow::RefreshScriptList() {
+    scripts_.clear();
+    const std::filesystem::path directory = core::ScriptDirectory(infra::ConfigRoot());
+    std::error_code ec;
+    std::filesystem::directory_iterator iterator(directory, ec);
+    if (ec) {
+        return;   // 目录不在（或打不开）= 还没放脚本，不是错误
+    }
+    std::vector<std::wstring> fileNames;
+    for (const std::filesystem::directory_entry& entry : iterator) {
+        const bool regular = entry.is_regular_file(ec);
+        ec.clear();
+        if (regular) {
+            fileNames.push_back(entry.path().filename().wstring());
+        }
+    }
+    scripts_ = core::ListScriptsFromFileNames(directory, fileNames);
+}
+
+void MainWindow::RegisterScriptCommands() {
+    // 先把上一批撤掉：刷新之后已经删掉的脚本不该继续挂在菜单上
+    for (std::size_t slot = 0; slot < scriptCommandCount_; ++slot) {
+        registry_.Unregister(
+            core::MakeCmdId(static_cast<uint8_t>(core::CmdCategory::Tools),
+                            static_cast<uint16_t>(core::kScriptCommandBase + slot)));
+    }
+    scriptCommandCount_ = 0;
+    for (std::size_t index = 0; index < scripts_.size(); ++index) {
+        core::Command command;
+        command.id = core::MakeCmdId(static_cast<uint8_t>(core::CmdCategory::Tools),
+                                     static_cast<uint16_t>(core::kScriptCommandBase + index));
+        command.category = core::CmdCategory::Tools;
+        command.key = L"script." + scripts_[index].name;
+        // 动态文本（脚本名）：defaultText 留空，切换界面语言时不碰它；前缀走语言包
+        command.text = core::Tr(L"cmd.tool.scriptPrefix", L"脚本：") + scripts_[index].name;
+        // kCmdUserDefined：编号跟着目录里的文件走，快捷键不许落盘（会绑到别的脚本上）
+        command.flags = core::kCmdNeedsBuffer | core::kCmdNeedsWritable | core::kCmdUserDefined;
+        const std::size_t captured = index;
+        command.execute = [this, captured](const core::CmdContext&) {
+            RunScript(scripts_[captured].path, scripts_[captured].name);
+        };
+        registry_.Register(std::move(command));
+        scriptCommandCount_ = index + 1;
+    }
+}
+
+void MainWindow::RunScript(std::wstring_view scriptPath, std::wstring_view displayName) {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr) {
+        statusBar_.SetMessage(L"没有可运行的文档");
+        return;
+    }
+    if (scriptRunner_) {
+        // 同一时间只跑一个：同时跑多个，结果写回哪一段都会乱
+        statusBar_.SetMessage(L"上一个脚本还在跑，等它结束再试");
+        return;
+    }
+    core::ScriptInterpreter interpreter;
+    std::wstring interpreterError;
+    if (!infra::ResolveScriptInterpreter(config_.Script().interpreter, &interpreter,
+                                         &interpreterError)) {
+        ::MessageBoxW(hwnd_, interpreterError.c_str(), L"运行脚本", MB_ICONWARNING);
+        statusBar_.SetMessage(L"运行脚本：找不到 Python 解释器");
+        return;
+    }
+
+    // 作用范围：有选区就是选区，没有就整篇（与工具菜单里那些文本变换一致）
+    int32_t start = document->view->SelectionStart();
+    int32_t end = document->view->SelectionEnd();
+    if (end < start) {
+        std::swap(start, end);
+    }
+    if (start == end) {
+        start = 0;
+        end = document->view->ByteLength();
+    }
+    PendingScript pending;
+    pending.name = std::wstring(displayName);
+    pending.docId = document->buffer.id;
+    pending.start = start;
+    pending.end = end;
+    pending.input = document->view->TextRange(start, end);
+
+    infra::ScriptRunner::Options options;
+    options.commandLine = core::BuildScriptCommandLine(interpreter, scriptPath);
+    options.stdinBytes = pending.input;
+    options.timeoutMs = static_cast<std::uint64_t>(config_.Script().timeoutSeconds) * 1000;
+    // 工作目录 = 脚本所在目录：脚本里想读自己的伴生文件时，相对路径才找得到
+    options.workingDir = std::filesystem::path(std::wstring(scriptPath)).parent_path().wstring();
+
+    auto runner = std::make_unique<infra::ScriptRunner>();
+    infra::ScriptRunner::Result startResult;
+    if (!runner->Start(options, &startResult)) {
+        ::MessageBoxW(hwnd_, (startResult.startError + L"\n" + options.commandLine).c_str(),
+                      L"运行脚本", MB_ICONWARNING);
+        statusBar_.SetMessage(L"运行脚本：启动失败");
+        return;
+    }
+    pendingScript_ = std::move(pending);
+    scriptRunner_ = std::move(runner);
+    ::SetTimer(hwnd_, kTimerScript, 100, nullptr);
+    statusBar_.SetMessage(L"脚本已启动：" + pendingScript_.name);
+    infra::LogInfo(L"script", L"运行脚本: " + options.commandLine);
+}
+
+bool MainWindow::PollScript() {
+    if (!scriptRunner_) {
+        ::KillTimer(hwnd_, kTimerScript);   // 兜底：没有任务在跑就不该有这个定时器
+        return false;
+    }
+    if (scriptRunner_->TimedOut()) {
+        scriptRunner_->Kill();
+        statusBar_.SetMessage(L"脚本超时，正在终止：" + pendingScript_.name);
+        // 终止之后进程就是"已退出"：随后的 FinishScript 靠 killed 标记认出这是超时
+        // （退出码是 TerminateProcess 留下的，不算数）
+    }
+    return scriptRunner_->Exited();
+}
+
+void MainWindow::FinishScript() {
+    if (!scriptRunner_) {
+        return;
+    }
+    const infra::ScriptRunner::Result result = scriptRunner_->Finish();
+    scriptRunner_.reset();
+    ::KillTimer(hwnd_, kTimerScript);
+    PendingScript pending = std::move(pendingScript_);
+    pendingScript_ = PendingScript{};
+    infra::LogInfo(L"script", L"脚本结束: " + pending.name + L"，退出码 " +
+                                 std::to_wstring(result.exitCode) + L"，用时 " +
+                                 FromUtf8(SecondsText(result.elapsedMs)) + L" 秒");
+
+    if (result.killed) {
+        std::string text =
+            "[脚本超时：超过 " + std::to_string(config_.Script().timeoutSeconds) +
+            " 秒，已被终止，用时 " + SecondsText(result.elapsedMs) + " 秒]\n";
+        if (!result.stderrBytes.empty()) {
+            text += result.stderrBytes;
+            if (text.back() != '\n') {
+                text.push_back('\n');
+            }
+        }
+        OpenOutputDocument(L"脚本输出 " + std::to_wstring(++scriptOutputCounter_), text);
+        statusBar_.SetMessage(L"脚本超时：" + pending.name + L"（已被终止）");
+        return;
+    }
+    if (result.exitCode != 0) {
+        std::string text = "[脚本结束：退出码 " + std::to_string(result.exitCode) + "，用时 " +
+                           SecondsText(result.elapsedMs) + " 秒]\n";
+        if (!result.stderrBytes.empty()) {
+            text += "--- 标准错误 ---\n" + result.stderrBytes;
+            if (text.back() != '\n') {
+                text.push_back('\n');
+            }
+        }
+        if (!result.stdoutBytes.empty()) {
+            text += "--- 标准输出 ---\n" + result.stdoutBytes;
+            if (text.back() != '\n') {
+                text.push_back('\n');
+            }
+        }
+        OpenOutputDocument(L"脚本输出 " + std::to_wstring(++scriptOutputCounter_), text);
+        statusBar_.SetMessage(L"脚本失败：" + pending.name + L"（退出码 " +
+                              std::to_wstring(result.exitCode) + L"）");
+        return;
+    }
+    if (result.stdoutTooLarge) {
+        // 截断的输出写回去等于悄悄毁文档：宁可停在"结果没收回来"
+        std::string text = "（脚本输出超过 8 MB，没有写回文档）\n";
+        text += result.stderrBytes;
+        OpenOutputDocument(L"脚本输出 " + std::to_wstring(++scriptOutputCounter_), text);
+        statusBar_.SetMessage(L"脚本结束：输出过大，没有写回文档");
+        return;
+    }
+    // 成功：结果写回原来的那段内容。写之前先核对"文档还在、那块内容还是原来那段"——
+    // 脚本跑的时候用户可能已经把那段改了或删了
+    edit::Document* document =
+        (documents_ != nullptr) ? documents_->Find(pending.docId) : nullptr;
+    edit::EditView* view = (document != nullptr) ? document->view.get() : nullptr;
+    if (view == nullptr) {
+        std::string text = "（脚本结束时文档已经关闭，结果收在这里）\n" + result.stdoutBytes;
+        OpenOutputDocument(L"脚本输出 " + std::to_wstring(++scriptOutputCounter_), text);
+        statusBar_.SetMessage(L"脚本结束：文档已关闭，结果收进新文档");
+        return;
+    }
+    const bool sameContent = pending.end <= view->ByteLength() &&
+                             view->TextRange(pending.start, pending.end) == pending.input;
+    if (!sameContent) {
+        std::string text = "（文档在脚本运行期间被改动，结果没有写回）\n" + result.stdoutBytes;
+        OpenOutputDocument(L"脚本输出 " + std::to_wstring(++scriptOutputCounter_), text);
+        statusBar_.SetMessage(L"脚本结束：文档已改动，结果收进新文档");
+        infra::LogWarn(L"script", L"脚本结果没有写回：目标文档在运行期间被改动");
+        return;
+    }
+    view->SetSelectionRange(pending.start, pending.end);
+    view->ReplaceSelection(result.stdoutBytes);
+    statusBar_.SetMessage(L"脚本结束：" + pending.name + L"（一步撤销可还原）");
+}
+
+void MainWindow::CancelPendingScript() {
+    if (!scriptRunner_) {
+        return;
+    }
+    ::KillTimer(hwnd_, kTimerScript);
+    // ScriptRunner 的析构会终止子进程并清理临时文件：窗口都要销毁了，
+    // 脚本的结果没有去处，留着它等超时不如直接终止
+    scriptRunner_.reset();
+    pendingScript_ = PendingScript{};
+}
+
+edit::Document* MainWindow::OpenOutputDocument(std::wstring_view displayName,
+                                               std::string_view text) {
+    edit::Document* document = documents_->CreateUntitled();
+    if (document == nullptr) {
+        return nullptr;
+    }
+    // 输出文档的形态定死：UTF-8 + CRLF。它不该跟着"新建文档"那几项配置跑，
+    // 否则用户在 ANSI 配置下会拿到一份看不懂的输出
+    document->buffer.displayName = std::wstring(displayName);
+    document->buffer.encoding.uniMode = edit::UniMode::Utf8;
+    document->buffer.encoding.codePage = edit::kCodePageUtf8;
+    document->buffer.encoding.confidence = 100;
+    document->buffer.eol = edit::EolMode::Crlf;
+    document->buffer.detectedEol = edit::EolMode::Crlf;
+    document->buffer.isModified = false;
+    if (document->view != nullptr) {
+        document->view->SetCodePage(edit::kCodePageUtf8);
+        document->view->SetText(std::string(text));
+        // 刚生成的输出不该显得"改过"：清掉撤销栈、钉在保存点上
+        document->view->ClearUndoBuffer();
+        document->view->MarkSavePoint();
+    }
+    SyncTabBar();
+    ActivateDocument(document->buffer.id);
+    return document;
 }
 
 void MainWindow::RegisterRunCommands() {

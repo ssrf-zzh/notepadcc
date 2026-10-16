@@ -114,6 +114,14 @@ struct RemoteConfig {
     std::vector<RemoteSite> sites;
 };
 
+// 脚本插件（M3 第十二块）：解释器路径与单次运行超时。
+// interpreter 为空 = 自动探测（PATH 里的 python.exe / py.exe）；写了就只认它，
+// 路径不存在时明确报错，不去 PATH 里另找一个顶替。
+struct ScriptConfig {
+    std::wstring  interpreter;
+    std::uint32_t timeoutSeconds = 60;   // 1~3600 秒；超时终止脚本，结果收进新文档
+};
+
 // 配置中心（设计文档 4.5 / 7.2）。
 //
 // 三条硬性要求，都是"别让配置把程序搞挂"：
@@ -151,6 +159,7 @@ public:
     ContextMenuConfig& ContextMenu() noexcept { return contextMenu_; }
     UpdateConfig&   Update() noexcept { return update_; }
     RemoteConfig&   Remote() noexcept { return remote_; }
+    ScriptConfig&   Script() noexcept { return script_; }
 
     const GeneralConfig&  General() const noexcept { return general_; }
     const EditConfig&     Edit() const noexcept { return edit_; }
@@ -162,6 +171,7 @@ public:
     const ContextMenuConfig& ContextMenu() const noexcept { return contextMenu_; }
     const UpdateConfig&   Update() const noexcept { return update_; }
     const RemoteConfig&   Remote() const noexcept { return remote_; }
+    const ScriptConfig&   Script() const noexcept { return script_; }
 
     // 加载过程中被回退的属性名，供"关于/诊断"展示
     const std::vector<std::wstring>& Warnings() const noexcept { return warnings_; }
@@ -177,6 +187,7 @@ private:
     ContextMenuConfig contextMenu_;
     UpdateConfig    update_;
     RemoteConfig    remote_;
+    ScriptConfig    script_;
     std::vector<std::wstring> warnings_;
     long long       lastSaveTick_ = 0;
     bool            dirty_ = false;

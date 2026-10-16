@@ -146,6 +146,7 @@ set(NPCC_CORE_SOURCES
     src/core/XmlTree.cpp
     src/core/XPath.cpp
     src/core/RunCommand.cpp
+    src/core/ScriptEngine.cpp
     src/core/ToolbarItems.cpp
     src/core/Sha256.cpp
     src/core/UpdateManifest.cpp
@@ -175,6 +176,7 @@ set(NPCC_CORE_SOURCES
     src/infra/FtpClient.cpp
     src/infra/SftpRunner.cpp
     src/infra/RemoteService.cpp
+    src/infra/ScriptRunner.cpp
     src/io/AtomicFile.cpp
     src/io/FileReader.cpp
     src/io/FileWatcher.cpp

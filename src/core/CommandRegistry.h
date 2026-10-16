@@ -19,6 +19,11 @@ public:
     // 只换显示文本（切换界面语言时用）。返回 false = 没这条命令。
     bool SetCommandText(CmdId id, std::wstring text);
 
+    // 注销一条命令（连同它的快捷键绑定）。给"列表跟着外部状态走"的命令用：
+    // 脚本命令按 <配置根>\scripts 里的文件注册，刷新之后删掉的脚本不该继续挂在菜单上。
+    // 返回 false = 本来就没这条命令。
+    bool Unregister(CmdId id);
+
     const Command* Find(CmdId id) const;
     // 按**命令键**找（工具栏按钮表记的是键：ID 是运行期分配的，键是稳定的）
     const Command* FindByKey(std::wstring_view key) const;

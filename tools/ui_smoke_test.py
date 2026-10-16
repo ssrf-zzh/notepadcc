@@ -264,6 +264,12 @@ CMD_FILE_PRINT = (1 << 12) | 8
 CMD_FILE_EXPORT_HTML = (1 << 12) | 9
 CMD_FILE_EXPORT_RTF = (1 << 12) | 10
 CMD_FILE_REMOTE = (1 << 12) | 11            # 文件 → 远程站点…
+CMD_FILE_CLOSE = (1 << 12) | 5              # 文件 → 关闭当前文档
+# 脚本插件（工具菜单）：命令号与 src/shell/MainWindow.cpp 一致
+CMD_TOOL_RUN_SCRIPT = (14 << 12) | 42       # 工具 → 运行脚本…（挑任意 .py 跑一次）
+CMD_TOOL_SCRIPTS_FOLDER = (14 << 12) | 43   # 工具 → 打开脚本目录
+CMD_TOOL_REFRESH_SCRIPTS = (14 << 12) | 44  # 工具 → 刷新脚本列表
+SCRIPT_COMMAND_BASE = (14 << 12) | 128      # 脚本条目：<配置根>\scripts 按名字排序，从 128 起
 
 # 远程站点浏览框 / 站点编辑器（自绘窗口类，不是 #32770；控件号与 src/shell 里一致）
 REMOTE_BROWSE_CLASS = "notepadccRemoteBrowse"
@@ -4569,6 +4575,8 @@ def run():
         failed = True
     if not test_remote_edit(root):
         failed = True
+    if not test_script_plugin(root):
+        failed = True
 
     if failed:
         print("FAIL: 界面回归未通过")
@@ -4581,7 +4589,7 @@ def run():
           "比较 + JSON 树视图 + 括号匹配与摘要与全屏 + 工具栏 + 右键菜单定制 + 自动完成 + "
           "文件关联 + "
           "文件类型识别与 MIME 工具 + 护眼模式 + XML 树视图与校验 + XPath 查询 + "
-          "自动更新检查 + 远程编辑（FTP/SFTP 站点）+ 绿色打包）")
+          "自动更新检查 + 远程编辑（FTP/SFTP 站点）+ 脚本插件 + 绿色打包）")
     return 0
 
 
@@ -8333,6 +8341,289 @@ def test_remote_edit(root):
 
     print("  远程编辑：FTP 列目录 / 进子目录 / 下载打开 / 列块编辑后上传 / "
           "新建重命名删除 / SFTP 报错文案 / 站点编辑器新建站点回写，全部逐字核对通过")
+    return True
+
+def test_script_plugin(root):
+    """脚本插件（M3 第十二块）：外挂 Python 解释器 + stdin/stdout 过滤协议。
+
+    每一步都要有可核对的证据，而不是"命令发出去了"：
+      1 启动扫描：<配置根>\\scripts 里放好的三个脚本出现在工具菜单里（文本逐字核对）；
+      2 整篇替换：没有选区时脚本收到整篇，stdout 原样写回，一步撤销回到原文；
+      3 选区替换：只把选中的那一段交给脚本，文档其余部分一个字节不动；
+      4 刷新列表：新放进目录的脚本不用重启就能用（菜单与状态栏计数都核对）；
+      5 非零退出：文档不动，stderr 收进新的"脚本输出"文档，退出码写在抬头里；
+      6 运行期间文档被改：结果不写回，收进新文档并注明原因；
+      7 超时：timeoutSeconds=2 时 sleep 5 秒的脚本被终止，输出文档有"已被终止"；
+      8 解释器配错：明确弹框说明，文档不动。
+    """
+    work = os.path.join(root, "build", "script_test")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+
+    cfg = os.path.join(root, "build", "bin", "config")
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    scripts_dir = os.path.join(cfg, "scripts")
+    sample = os.path.join(work, "sample.txt")
+    original = "marker: alpha\n第二行\n"
+
+    def clean_config():
+        for name in ("config.xml", "session.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+        shutil.rmtree(scripts_dir, ignore_errors=True)
+
+    def write_config(extra):
+        clean_config()
+        os.makedirs(scripts_dir, exist_ok=True)
+        with open(os.path.join(cfg, "config.xml"), "w", encoding="utf-8", newline="") as handle:
+            handle.write('<?xml version="1.0" encoding="utf-8"?>\n'
+                         '<NotepadccConfig schemaVersion="1">\n'
+                         '  <script ' + extra + ' />\n'
+                         '</NotepadccConfig>\n')
+
+    def write_script(name, body):
+        with open(os.path.join(scripts_dir, name), "w", encoding="utf-8", newline="") as handle:
+            handle.write(body)
+
+    def start():
+        session = os.path.join(cfg, "session.xml")
+        if os.path.exists(session):
+            os.remove(session)
+        proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", sample], cwd=root)
+        window = wait_for_main_window("notepadcc - sample.txt")
+        return proc, window
+
+    def stop(proc, window):
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    def wait_scinti_text(window, want, timeout=25.0):
+        deadline = time.time() + timeout
+        last = None
+        while time.time() < deadline:
+            scinti = visible_scintilla(window)
+            if scinti:
+                last = scinti_text(scinti)
+                if last == want:
+                    return last
+            time.sleep(0.2)
+        return last
+
+    def wait_output_doc(window, needle, timeout=30.0):
+        deadline = time.time() + timeout
+        last = None
+        while time.time() < deadline:
+            scinti = visible_scintilla(window)
+            if scinti:
+                last = scinti_text(scinti)
+                if needle in last:
+                    return last
+            time.sleep(0.2)
+        return None
+
+    def wait_status(window, needle, timeout=15.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if needle in read_status_bar(window):
+                return True
+            time.sleep(0.15)
+        return False
+
+    def run_cmd(window, command):
+        user32.PostMessageW(window, WM_COMMAND, command, 0)
+
+    with open(sample, "w", encoding="utf-8", newline="") as handle:
+        handle.write(original)
+
+    # ---- 主会话：扫描 / 整篇 / 选区 / 刷新 / 非零退出 / 运行期间改文档 ----
+    write_config('timeoutSeconds="30"')
+    write_script("upper.py",
+                 "import sys\n"
+                 "data = sys.stdin.buffer.read()\n"
+                 "sys.stdout.buffer.write(b'<' + data + b'>')\n")
+    write_script("boom.py",
+                 "import sys\n"
+                 "sys.stderr.write('boom from script\\n')\n"
+                 "sys.exit(3)\n")
+    write_script("slow.py",
+                 "import sys, time\n"
+                 "data = sys.stdin.buffer.read()\n"
+                 "time.sleep(5)\n"
+                 "sys.stdout.buffer.write(b'[' + data + b']')\n")
+
+    proc, window = start()
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None or scinti_text(scinti) != original:
+            print(f"  FAIL: 初始内容不对 {scinti_text(scinti)!r}")
+            return False
+
+        # 1) 启动扫描：boom / slow / upper（按名字排序）都在工具菜单里
+        items = menu_items(window, 6)   # 0 文件 / 1 编辑 / 2 查找 / 3 视图 / 4 格式 / 5 编码 / 6 工具
+        if not all(f"脚本：{name}" in items for name in ("boom", "slow", "upper")):
+            print(f"  FAIL: 工具菜单里没有脚本条目\n{items}")
+            return False
+
+        # 2) 整篇替换（upper 是排序后的第 3 个：boom=128 slow=129 upper=130）
+        run_cmd(window, SCRIPT_COMMAND_BASE + 2)
+        expect = "<" + original + ">"
+        if wait_scinti_text(window, expect) != expect:
+            print(f"  FAIL: 整篇脚本结果不对 {scinti_text(scinti)!r}")
+            return False
+        # 注：脚本结束的状态提示会被紧随其后的"行/列"刷新盖掉（替换动了光标，
+        # Scintilla 的 UPDATEUI 就会重刷第一段）——这里以文本结果为准，
+        # 状态栏另有"已启动 / 刷新 / 配错"三处断言
+        run_cmd(window, CMD_EDIT_UNDO)
+        if wait_scinti_text(window, original) != original:
+            print(f"  FAIL: 撤销一步没有回到原文 {scinti_text(scinti)!r}")
+            return False
+
+        # 3) 选区替换：只把选中的前 6 个字节（marker）交给脚本
+        send_bounded(scinti, SCI_SETSEL, 0, 6)
+        time.sleep(0.3)
+        run_cmd(window, SCRIPT_COMMAND_BASE + 2)
+        expect = "<marker>: alpha\n第二行\n"
+        if wait_scinti_text(window, expect) != expect:
+            print(f"  FAIL: 选区脚本结果不对 {scinti_text(scinti)!r}")
+            return False
+        run_cmd(window, CMD_EDIT_UNDO)
+        if wait_scinti_text(window, original) != original:
+            print("  FAIL: 选区脚本撤销不回来")
+            return False
+
+        # 4) 刷新脚本列表：新放进目录的脚本不用重启
+        write_script("added.py",
+                     "import sys\n"
+                     "sys.stdin.buffer.read()\n"
+                     "sys.stdout.buffer.write(b'ADDED\\n')\n")
+        run_cmd(window, CMD_TOOL_REFRESH_SCRIPTS)
+        if not wait_status(window, "脚本列表已刷新（4 个脚本）"):
+            print(f"  FAIL: 刷新脚本列表的状态不对 {read_status_bar(window)!r}")
+            return False
+        items = menu_items(window, 6)
+        if not all(f"脚本：{name}" in items for name in ("added", "boom", "slow", "upper")):
+            print(f"  FAIL: 刷新之后菜单里缺脚本\n{items}")
+            return False
+        # 刷新后重排：added=128 boom=129 slow=130 upper=131
+        run_cmd(window, SCRIPT_COMMAND_BASE + 0)
+        if wait_scinti_text(window, "ADDED\n") != "ADDED\n":
+            print(f"  FAIL: 新加的脚本没有生效 {scinti_text(scinti)!r}")
+            return False
+        run_cmd(window, CMD_EDIT_UNDO)
+        if wait_scinti_text(window, original) != original:
+            print("  FAIL: added 脚本撤销不回来")
+            return False
+
+        # 5) 非零退出：文档一个字节不动，stderr 收进新的输出文档
+        run_cmd(window, SCRIPT_COMMAND_BASE + 1)   # boom
+        text = wait_output_doc(window, "boom from script")
+        if text is None:
+            print("  FAIL: 脚本失败后没有开出带 stderr 的输出文档")
+            return False
+        if "退出码 3" not in text or "--- 标准错误 ---" not in text:
+            print(f"  FAIL: 输出文档抬头不对\n{text!r}")
+            return False
+        # 关掉输出文档（它停在保存点上，不弹框），回到被脚本保护住的原文档：
+        # 失败时文档必须逐字未动——这一条同时证明结果确实进了**另一份**文档
+        run_cmd(window, CMD_FILE_CLOSE)   # 输出文档停在保存点上，关它不弹框
+        if wait_scinti_text(window, original) != original:
+            print(f"  FAIL: 脚本失败不该改动文档 {scinti_text(scinti)!r}")
+            return False
+
+        # 6) 运行期间文档被改：结果不写回，收进新文档并注明
+        send_bounded(scinti, SCI_SETSEL, 0, 0)
+        run_cmd(window, SCRIPT_COMMAND_BASE + 2)   # slow（睡 5 秒，够把文档改掉）
+        if not wait_status(window, "脚本已启动：slow"):
+            print("  FAIL: slow 脚本没有启动")
+            return False
+        user32.PostMessageW(scinti, WM_CHAR_INPUT, ord("x"), 0)
+        if wait_scinti_text(window, "x" + original) != "x" + original:
+            print(f"  FAIL: 运行期间注入的改动没生效 {scinti_text(scinti)!r}")
+            return False
+        text = wait_output_doc(window, "被改动")
+        if text is None or "[" + original + "]" not in text:
+            print(f"  FAIL: 文档被改后结果应当收进新文档并注明原因\n{text!r}")
+            return False
+        run_cmd(window, CMD_FILE_CLOSE)
+        if wait_scinti_text(window, "x" + original) != "x" + original:
+            print("  FAIL: 关掉输出文档后没回到被改过的文档")
+            return False
+        run_cmd(window, CMD_EDIT_UNDO)
+        if wait_scinti_text(window, original) != original:
+            print("  FAIL: 撤销运行期间注入的改动失败")
+            return False
+    finally:
+        stop(proc, window)
+
+    # ---- 超时：timeoutSeconds=2，slow 睡 5 秒应当被终止 ----
+    write_config('timeoutSeconds="2"')
+    write_script("slow.py",
+                 "import sys, time\n"
+                 "sys.stdin.buffer.read()\n"
+                 "time.sleep(5)\n"
+                 "sys.stdout.buffer.write(b'SHOULD-NOT-APPEAR')\n")
+    proc, window = start()
+    try:
+        if not window:
+            print("  FAIL: 超时会话找不到主窗口")
+            return False
+        began = time.time()
+        run_cmd(window, SCRIPT_COMMAND_BASE + 0)   # 目录里只有 slow
+        text = wait_output_doc(window, "已被终止")
+        elapsed = time.time() - began
+        if text is None:
+            print("  FAIL: 超时脚本没有被终止（没有输出文档）")
+            return False
+        if "脚本超时：超过 2 秒" not in text or "SHOULD-NOT-APPEAR" in text:
+            print(f"  FAIL: 超时输出文档内容不对\n{text!r}")
+            return False
+        if elapsed > 15.0:
+            print(f"  FAIL: 超时处理太慢（{elapsed:.1f} 秒）")
+            return False
+        run_cmd(window, CMD_FILE_CLOSE)
+        if wait_scinti_text(window, original) != original:
+            print("  FAIL: 超时不该改动文档")
+            return False
+    finally:
+        stop(proc, window)
+
+    # ---- 解释器配错：明确弹框说明，文档不动 ----
+    write_config('interpreter="C:\\definitely-not-here\\python.exe"')
+    write_script("upper.py",
+                 "import sys\n"
+                 "sys.stdin.buffer.read()\n"
+                 "sys.stdout.buffer.write(b'X')\n")
+    proc, window = start()
+    try:
+        if not window:
+            print("  FAIL: 坏解释器会话找不到主窗口")
+            return False
+        run_cmd(window, SCRIPT_COMMAND_BASE + 0)
+        if not dismiss_dialog("运行脚本", IDOK, timeout=8.0):
+            print("  FAIL: 解释器配错时应当弹框说明")
+            return False
+        if not wait_status(window, "找不到 Python 解释器"):
+            print(f"  FAIL: 状态栏没有说明 {read_status_bar(window)!r}")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None or scinti_text(scinti) != original:
+            print("  FAIL: 解释器配错时文档不该动")
+            return False
+    finally:
+        stop(proc, window)
+
+    clean_config()
+    shutil.rmtree(work, ignore_errors=True)
+    print("  脚本插件：清单扫描与刷新、整篇/选区过滤与一步撤销、非零退出收 stderr、"
+          "运行期间改文档不写回、超时终止、解释器配错弹框——逐条核对通过")
     return True
 
 if __name__ == "__main__":

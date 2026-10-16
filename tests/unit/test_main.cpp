@@ -32,6 +32,7 @@
 #include "core/XmlFormat.h"
 #include "core/XmlTree.h"
 #include "core/XPath.h"
+#include "core/ScriptEngine.h"
 #include "core/Localization.h"
 #include "core/Sha256.h"
 #include "core/UpdateKey.h"
@@ -7667,6 +7668,85 @@ int main() {
         // SftpAvailable 只要求"能问出个真假"，别把系统有没有 OpenSSH 当成断言
         const bool available = SftpAvailable();
         Check(available || !available, "SftpAvailable 能安全地问出来");
+    }
+
+    Section("脚本插件：清单与命令行（M3 第十二块）");
+    {
+        using npcc::core::BuildScriptCommandLine;
+        using npcc::core::ListScriptsFromFileNames;
+        using npcc::core::QuoteCommandLineArgument;
+        using npcc::core::ScriptDirectory;
+        using npcc::core::ScriptInfo;
+        using npcc::core::ScriptInterpreter;
+        using npcc::core::ScriptInterpreterCandidates;
+
+        CheckWide(ScriptDirectory(L"C:\\cfg").wstring(), L"C:\\cfg\\scripts",
+                  "脚本目录 = 配置根\\scripts");
+
+        // 目录里的文件名清单 → 脚本列表：只认 .py、跳过隐藏文件、不区分大小写排序、同名只留一条
+        const std::vector<std::wstring> files = {
+            L"sort.py", L"A.PY", L"notes.txt", L".hidden.py", L".py",
+            L"zhong 文.py", L"Tool.py", L"tool.PY", L"b.Py",
+        };
+        const std::vector<ScriptInfo> scripts =
+            ListScriptsFromFileNames(L"C:\\cfg\\scripts", files);
+        Check(scripts.size() == 5, "5 个 .py（隐藏文件、.py 本身、txt 都跳过）");
+        const wchar_t* expectedNames[] = {L"A", L"b", L"sort", L"Tool", L"zhong 文"};
+        bool namesOk = scripts.size() == 5;
+        for (std::size_t i = 0; namesOk && i < scripts.size(); ++i) {
+            namesOk = scripts[i].name == expectedNames[i];
+        }
+        Check(namesOk, "按名字不区分大小写排序，同名（Tool/tool）只留第一个");
+        Check(scripts.size() == 5 && scripts[3].path == L"C:\\cfg\\scripts\\Tool.py",
+              "路径 = 目录 + 原文件名（保原大小写）");
+        Check(ListScriptsFromFileNames(L"C:\\x", std::vector<std::wstring>{}).empty(),
+              "空清单 = 没有脚本");
+
+        // 命令行参数引用：与 MSVCRT 的解析规则对齐
+        CheckWide(QuoteCommandLineArgument(L"C:\\dir\\file.py"), L"C:\\dir\\file.py",
+                  "没有特殊字符时不加引号");
+        CheckWide(QuoteCommandLineArgument(L"C:\\dir with space\\file.py"),
+                  L"\"C:\\dir with space\\file.py\"", "有空格时包引号");
+        CheckWide(QuoteCommandLineArgument(L"C:\\some dir\\"),
+                  L"\"C:\\some dir\\\\\"", "包引号时收尾反斜杠翻倍");
+        CheckWide(QuoteCommandLineArgument(L""), L"\"\"", "空参数写成一对引号");
+        CheckWide(QuoteCommandLineArgument(L"it's"), L"it's", "单引号不是特殊字符");
+        CheckWide(QuoteCommandLineArgument(L"a\tb"), L"\"a\tb\"", "制表符也要包引号");
+        CheckWide(QuoteCommandLineArgument(L"x\"y"), L"\"x\\\"y\"",
+                  "参数里的引号要转义");
+
+        // 解释器候选：配置优先；没配就 python.exe → py.exe（启动器要补 -3）
+        const std::vector<ScriptInterpreter> autoCandidates = ScriptInterpreterCandidates(L"");
+        Check(autoCandidates.size() == 2, "没配解释器时有两个候选");
+        Check(autoCandidates.size() == 2 && autoCandidates[0].executable == L"python.exe" &&
+                  !autoCandidates[0].launcher,
+              "第一个候选是 PATH 里的 python.exe");
+        Check(autoCandidates.size() == 2 && autoCandidates[1].executable == L"py.exe" &&
+                  autoCandidates[1].launcher,
+              "第二个候选是启动器 py.exe（要补 -3）");
+        const std::vector<ScriptInterpreter> configured =
+            ScriptInterpreterCandidates(L"D:\\tools\\python\\python.exe");
+        Check(configured.size() == 1 &&
+                  configured[0].executable == L"D:\\tools\\python\\python.exe" &&
+                  !configured[0].launcher,
+              "配置里指定了解释器就只认它");
+
+        // 命令行组装：两个参数各过一遍引用，py.exe 补 -3
+        ScriptInterpreter python;
+        python.executable = L"C:\\Program Files\\Python\\python.exe";
+        CheckWide(BuildScriptCommandLine(python, L"C:\\my scripts\\upper.py"),
+                  L"\"C:\\Program Files\\Python\\python.exe\" \"C:\\my scripts\\upper.py\"",
+                  "解释器与脚本路径都带空格时各包一层引号");
+        ScriptInterpreter launcher;
+        launcher.executable = L"py.exe";
+        launcher.launcher = true;
+        CheckWide(BuildScriptCommandLine(launcher, L"upper.py"), L"py.exe -3 upper.py",
+                  "py.exe 启动器补 -3");
+
+        // 编号约定：脚本在工具类第 128 号起（与 kScriptCommandBase 一致）
+        Check(npcc::core::MakeCmdId(static_cast<uint8_t>(npcc::core::CmdCategory::Tools),
+                                    npcc::core::kScriptCommandBase) == ((14u << 12) | 128u),
+              "脚本命令编号 = 工具类 128 起");
     }
 
     FinishSections();
