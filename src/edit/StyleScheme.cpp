@@ -183,6 +183,65 @@ void StyleScheme::ResetLanguage(const std::wstring& language) {
                      overrides_.end());
 }
 
+const std::vector<StyleOverride>& StyleScheme::Styles(const std::wstring& language) const {
+    static const std::vector<StyleOverride> empty;
+    for (const LanguageEntry& entry : overrides_) {
+        if (entry.name == language) {
+            return entry.styles;
+        }
+    }
+    return empty;
+}
+
+void StyleScheme::SetStyle(const std::wstring& language, int number, std::wstring name,
+                           const RoleStyle& style) {
+    // 样式号是 Scintilla 的 STYLE_MAX（255）以内；越界的值写进文件也上不了色，
+    // 不如当场拒掉，免得"配置写对了却没反应"这种最难查的现象
+    if (language.empty() || number < 0 || number > 255) {
+        return;
+    }
+    for (LanguageEntry& entry : overrides_) {
+        if (entry.name != language) {
+            continue;
+        }
+        for (StyleOverride& item : entry.styles) {
+            if (item.number == number) {
+                item.name = std::move(name);
+                item.value = style;
+                return;
+            }
+        }
+        entry.styles.push_back(StyleOverride{number, std::move(name), style});
+        return;
+    }
+    // 这个语言还没有条目：先按默认值铺一份角色，再挂上这条覆盖
+    LanguageEntry entry;
+    entry.name = language;
+    for (const RoleEntry& roleEntry : kRoles) {
+        RoleStyle value;
+        value.fore = roleEntry.fore;
+        value.bold = roleEntry.bold;
+        value.italic = roleEntry.italic;
+        entry.roles[static_cast<std::size_t>(roleEntry.role)] = value;
+    }
+    entry.styles.push_back(StyleOverride{number, std::move(name), style});
+    overrides_.push_back(std::move(entry));
+}
+
+void StyleScheme::ClearStyle(const std::wstring& language, int number) {
+    for (LanguageEntry& entry : overrides_) {
+        if (entry.name != language) {
+            continue;
+        }
+        entry.styles.erase(std::remove_if(entry.styles.begin(), entry.styles.end(),
+                                          [number](const StyleOverride& item) {
+                                              return item.number == number;
+                                          }),
+                           entry.styles.end());
+        return;
+    }
+}
+
 bool StyleScheme::HasOverride(const std::wstring& language) const {
     return std::any_of(overrides_.begin(), overrides_.end(),
                        [&language](const LanguageEntry& entry) { return entry.name == language; });
@@ -269,6 +328,24 @@ bool StyleScheme::Load(std::wstring* error, std::vector<std::wstring>* warnings)
             value.italic = style->AttributeBool(L"italic", value.italic);
             SetRole(name, role, value);
         }
+        // 逐样式号覆盖：颜色必须写全（没有"角色默认"可以继承——这个样式号可能是
+        // 目录里都没有的，程序此刻并不知道它该是什么色）
+        for (const infra::XmlElement* style : node->Children(L"StyleNumber")) {
+            const int number = style->AttributeInt(L"number", -1);
+            if (number < 0 || number > 255) {
+                sink.push_back(name + L"：样式号越界（应当 0~255），已跳过");
+                continue;
+            }
+            RoleStyle value;
+            if (!ParseColour(style->AttributeOr(L"fore", L""), value.fore)) {
+                sink.push_back(name + L"：样式号 " + std::to_wstring(number) +
+                               L" 没写颜色或颜色不是 #RRGGBB，已跳过");
+                continue;
+            }
+            value.bold = style->AttributeBool(L"bold", false);
+            value.italic = style->AttributeBool(L"italic", false);
+            SetStyle(name, number, style->AttributeOr(L"name", L""), value);
+        }
     }
 
     for (const std::wstring& warning : sink) {
@@ -298,6 +375,18 @@ bool StyleScheme::Save(std::wstring* error) const {
             style->SetAttribute(L"fore", ColourText(value.fore));
             style->SetAttributeBool(L"bold", value.bold);
             style->SetAttributeBool(L"italic", value.italic);
+        }
+        // 逐样式号的覆盖跟在角色后面，一行一个样式号
+        for (const StyleOverride& item : entry.styles) {
+            infra::XmlElementPtr style = node->AddChild(L"StyleNumber");
+            style->SetAttributeInt(L"number", item.number);
+            if (!item.name.empty()) {
+                // 名字只为让人看得懂这一行是什么；程序不用它
+                style->SetAttribute(L"name", item.name);
+            }
+            style->SetAttribute(L"fore", ColourText(item.value.fore));
+            style->SetAttributeBool(L"bold", item.value.bold);
+            style->SetAttributeBool(L"italic", item.value.italic);
         }
     }
     return io::SaveXmlFile(Path().wstring(), document, error);

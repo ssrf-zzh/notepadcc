@@ -14,6 +14,7 @@
 
 #include "edit/UdlLexer.h"
 #include "edit/UdlStyles.h"
+#include "edit/StyleCatalogue.h"
 #include "infra/Log.h"
 
 // 把 EditView 对外暴露的查找标志钉死在 Scintilla 的取值上：
@@ -45,66 +46,18 @@ const LanguageRegistry& FallbackRegistry() {
 // ---------------------------------------------------------------- 语法着色的默认配色
 //
 // 光接上词法器不等于"用户看得见颜色"：词法器只负责把每个 token 标上样式号，
-// 颜色得我们按样式号设进去。样式号取自 Lexilla 的 SCE_* 定义（third_party/
-// lexilla/include/SciLexer.h），**不靠记忆写数字**——写错的表现是"某个语言没颜色"，
-// 而且不报任何错。单元测试会按真实 token 位置核对颜色确实生效。
+// 颜色得我们按样式号设进去。**哪些样式号需要上色**这件事统一交给
+// edit/StyleCatalogue（内置语言与 UDL 一份表，同时供样式配置器列条目），
+// 这里只负责把颜色发下去。
 //
-// 这里的默认值是"开箱可用"，用户可以改（stylers.xml 覆盖这一层，见 StyleScheme）。
-struct SyntaxStyleMap {
-    const char* lexer;
-    int commentLine;    // -1 表示该语言没有这一类
-    int commentBlock;
-    int keyword;
-    int number;
-    int string;
-    int highlight;      // 语言特有的强调项：预处理、变量、属性名、键…
-    int extra;
-};
-
+// 这里的默认值是"开箱可用"，用户可以改：角色级改 stylers.xml 的 <Style>，
+// 单样式号改 <StyleNumber>（见 StyleScheme）。
 constexpr int kCommentColour = 0x2E7D32;    // 注释：绿
 constexpr int kKeywordColour = 0x0000C0;    // 关键字：深蓝
 constexpr int kNumberColour = 0x986500;     // 数字：棕
 constexpr int kStringColour = 0xA31515;     // 字符串：暗红
 constexpr int kHighlightColour = 0x800080;  // 强调项：紫
 constexpr int kExtraColour = 0x266B9E;      // 次要项：蓝
-
-// 样式号对应关系（Lexilla 的 SCE_*）：
-//   cpp       : COMMENTLINE=2 COMMENT=1 WORD=5 NUMBER=4 STRING=6 PREPROCESSOR=9 CHARACTER=7
-//   python    : COMMENTLINE=1 WORD=5 NUMBER=2 STRING=3
-//   json      : LINECOMMENT=6 BLOCKCOMMENT=7 NUMBER=1 STRING=2 PROPERTYNAME=4
-//   hypertext : COMMENT=9 TAG=1 NUMBER=5 DOUBLESTRING=6 ATTRIBUTE=3 ENTITY=10
-//   css       : COMMENT=9 TAG=1 CLASS=2 VALUE=8
-//   markdown  : HEADER1=6 STRONG1=2 CODE=19 LINK=18
-//   sql       : COMMENTLINE=2 COMMENT=1 WORD=5 NUMBER=4 CHARACTER=7
-//   powershell: COMMENT=1 COMMENTSTREAM=13 KEYWORD=8 NUMBER=4 STRING=2 VARIABLE=5 CMDLET=9
-//   batch     : COMMENT=1 WORD=2
-//               （批处理的"命令"是另一个样式号 5，所以 extra 指到它）
-//   props     : COMMENT=1 SECTION=2 KEY=5 DEFVAL=4
-const SyntaxStyleMap kSyntaxMaps[] = {
-    {"cpp", 2, 1, 5, 4, 6, 9, 7},
-    {"python", 1, -1, 5, 2, 3, -1, -1},
-    {"json", 6, 7, -1, 1, 2, 4, -1},
-    {"xml", 9, -1, 1, 5, 6, 3, 10},
-    {"hypertext", 9, -1, 1, 5, 6, 3, 10},
-    {"css", 9, -1, 1, -1, -1, 2, 8},
-    {"markdown", -1, -1, 6, -1, 19, 2, 18},
-    {"sql", 2, 1, 5, 4, 7, -1, -1},
-    {"powershell", 1, 13, 8, 4, 2, 5, 9},
-    {"batch", 1, -1, 2, -1, -1, -1, 5},
-    {"props", 1, -1, 2, -1, -1, 5, 4},
-};
-
-const SyntaxStyleMap* FindSyntaxMap(const char* lexerName) {
-    if (lexerName == nullptr) {
-        return nullptr;
-    }
-    for (const SyntaxStyleMap& entry : kSyntaxMaps) {
-        if (std::string_view(entry.lexer) == lexerName) {
-            return &entry;
-        }
-    }
-    return nullptr;
-}
 
 }  // namespace
 
@@ -814,66 +767,20 @@ void EditView::ApplySchemeDefaults(const StyleScheme& scheme) const {
 }
 
 void EditView::ApplySyntaxColours(const LanguageDef& language, const StyleScheme& scheme) const {
-    if (language.udl != nullptr) {
-        ApplyUdlColours(language, scheme);
-        return;
-    }
-    const SyntaxStyleMap* map = FindSyntaxMap(language.lexer.c_str());
-    if (map == nullptr) {
-        return;   // 没有配色表的语言用默认色，不强求
-    }
-    struct Slot {
-        int        style;
-        StyleRole  role;
+    const std::vector<StyleEntry> entries = StylesFor(language);
+    const auto apply = [this](int style, const RoleStyle& value) {
+        Send(SCI_STYLESETFORE, static_cast<uintptr_t>(style), static_cast<intptr_t>(value.fore));
+        Send(SCI_STYLESETBOLD, static_cast<uintptr_t>(style), value.bold ? 1 : 0);
+        Send(SCI_STYLESETITALIC, static_cast<uintptr_t>(style), value.italic ? 1 : 0);
     };
-    const Slot slots[] = {
-        {map->commentLine, StyleRole::Comment}, {map->commentBlock, StyleRole::Comment},
-        {map->keyword, StyleRole::Keyword},     {map->number, StyleRole::Number},
-        {map->string, StyleRole::String},       {map->highlight, StyleRole::Highlight},
-        {map->extra, StyleRole::Extra},
-    };
-    for (const Slot& slot : slots) {
-        if (slot.style < 0) {
-            continue;
-        }
-        const RoleStyle value = scheme.Role(language.languageName, slot.role);
-        Send(SCI_STYLESETFORE, static_cast<uintptr_t>(slot.style),
-             static_cast<intptr_t>(value.fore));
-        Send(SCI_STYLESETBOLD, static_cast<uintptr_t>(slot.style), value.bold ? 1 : 0);
-        Send(SCI_STYLESETITALIC, static_cast<uintptr_t>(slot.style), value.italic ? 1 : 0);
+    // 先按角色铺一遍……
+    for (const StyleEntry& entry : entries) {
+        apply(entry.number, scheme.Role(language.languageName, entry.role));
     }
-}
-
-// UDL 的样式号是我们自己定的一组（见 UdlStyles.h），所以配色表也自己写一份。
-// 9 组关键字按 0/1/2 循环映射到三个角色：组 0/3/6 是"关键字"，1/4/7 是"强调项"，
-// 2/5/8 是"次要项"——每组的颜色因此能看出区别，但做不到 9 组各不相同（那要等
-// 样式配置器支持"按样式号逐项调整"，设计文档 2.6 第 4 条的后半段）。
-void EditView::ApplyUdlColours(const LanguageDef& language, const StyleScheme& scheme) const {
-    struct Slot {
-        int       style;
-        StyleRole role;
-    };
-    std::vector<Slot> slots = {
-        {udl::kStyleCommentLine, StyleRole::Comment},
-        {udl::kStyleCommentBlock, StyleRole::Comment},
-        {udl::kStyleNumber, StyleRole::Number},
-        {udl::kStyleString, StyleRole::String},
-        {udl::kStyleOperator, StyleRole::Highlight},
-        {udl::kStyleIdentifier, StyleRole::Extra},
-    };
-    for (int group = 0; group < udl::kKeywordGroupCount; ++group) {
-        const int roleIndex = group % 3;
-        const StyleRole role = roleIndex == 0   ? StyleRole::Keyword
-                               : roleIndex == 1 ? StyleRole::Highlight
-                                                : StyleRole::Extra;
-        slots.push_back({udl::KeywordStyleOf(group), role});
-    }
-    for (const Slot& slot : slots) {
-        const RoleStyle value = scheme.Role(language.languageName, slot.role);
-        Send(SCI_STYLESETFORE, static_cast<uintptr_t>(slot.style),
-             static_cast<intptr_t>(value.fore));
-        Send(SCI_STYLESETBOLD, static_cast<uintptr_t>(slot.style), value.bold ? 1 : 0);
-        Send(SCI_STYLESETITALIC, static_cast<uintptr_t>(slot.style), value.italic ? 1 : 0);
+    // ……再让"逐样式号"的覆盖压上去。这一步不看目录：文件里写了什么就应用什么，
+    // 手写一个目录里没有的冷门样式号也能生效（见 StyleCatalogue 的说明）。
+    for (const StyleOverride& item : scheme.Styles(language.languageName)) {
+        apply(item.number, item.value);
     }
 }
 

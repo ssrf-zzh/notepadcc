@@ -24,6 +24,7 @@
 #include "edit/FileTier.h"
 #include "edit/TextTools.h"
 #include "edit/StyleScheme.h"
+#include "edit/StyleCatalogue.h"
 #include "edit/EditView.h"
 #include "edit/LanguageRegistry.h"
 #include "edit/UdlDefinition.h"
@@ -2898,6 +2899,122 @@ int main() {
             std::filesystem::remove(path, ec);
         }
 
+        // 样式目录：语言 → 可逐项调整的样式号清单（内置与 UDL 一份表，供界面与上色共用）
+        {
+            using npcc::edit::LanguageDef;
+            using npcc::edit::LanguageRegistry;
+            LanguageRegistry languages;
+            languages.Load(nullptr);
+            const LanguageDef* cpp = languages.FindByExtension("cpp");
+            Check(cpp != nullptr, "目录：找得到 cpp");
+            if (cpp != nullptr) {
+                const std::vector<npcc::edit::StyleEntry> entries = npcc::edit::StylesFor(*cpp);
+                Check(entries.size() == 7,
+                      "cpp 有 7 项可调（行/块注释、关键字、数字、字符串、强调、次要）");
+                Check(!entries.empty() && entries.front().number < entries.back().number,
+                      "目录按样式号升序");
+                Check(entries[0].number == 1 && entries[0].name == L"块注释" &&
+                          entries[0].role == StyleRole::Comment,
+                      "cpp 的条目带名字与角色（1 = 块注释）");
+            }
+            // 没有目录的语言：不认识就返回空表，不要瞎猜
+            LanguageDef unknown;
+            unknown.languageName = L"nothing";
+            unknown.lexer = "no_such_lexer";
+            Check(npcc::edit::StylesFor(unknown).empty(), "认不出的词法器没有目录");
+
+            // UDL 的目录是它自己的全表：6 项 + 9 组关键字
+            LanguageDef udlLanguage;
+            udlLanguage.languageName = L"mydsl";
+            udlLanguage.udl = std::make_shared<const npcc::edit::UdlDefinition>();
+            const std::vector<npcc::edit::StyleEntry> udlEntries =
+                npcc::edit::StylesFor(udlLanguage);
+            Check(udlEntries.size() == 15, "UDL 有 15 项可调（6 项 + 9 组关键字）");
+            bool sawOperator = false;
+            bool sawKeyword9 = false;
+            for (const npcc::edit::StyleEntry& entry : udlEntries) {
+                if (entry.number == npcc::edit::udl::kStyleOperator) {
+                    sawOperator = entry.name == L"运算符";
+                }
+                if (entry.number == npcc::edit::udl::KeywordStyleOf(8)) {
+                    sawKeyword9 = entry.name == L"关键字 9";
+                }
+            }
+            Check(sawOperator, "UDL 目录里有运算符");
+            Check(sawKeyword9, "UDL 目录里第 9 组关键字有名字");
+        }
+
+        // 逐样式号覆盖：存取、往返、坏值
+        {
+            StyleScheme scheme = StyleScheme::Defaults();
+            std::wstring error;
+            Check(scheme.Styles(L"cpp").empty(), "初始没有逐项覆盖");
+            npcc::edit::RoleStyle custom;
+            custom.fore = 0x123456;
+            custom.italic = true;
+            scheme.SetStyle(L"cpp", 7, L"次要项", custom);
+            Check(scheme.Styles(L"cpp").size() == 1, "写入一条覆盖");
+            Check(scheme.Styles(L"cpp")[0].number == 7 &&
+                      scheme.Styles(L"cpp")[0].name == L"次要项" &&
+                      scheme.Styles(L"cpp")[0].value.fore == 0x123456 &&
+                      scheme.Styles(L"cpp")[0].value.italic,
+                  "覆盖的内容（样式号、名字、颜色、斜体）");
+            Check(scheme.Role(L"cpp", StyleRole::Comment).fore != 0x123456,
+                  "逐项覆盖不动同语言的角色色");
+            scheme.SetStyle(L"cpp", 7, L"次要项", custom);   // 同一个号写两遍
+            Check(scheme.Styles(L"cpp").size() == 1, "同一个样式号只留一条");
+            npcc::edit::RoleStyle other = custom;
+            other.fore = 0x654321;
+            scheme.SetStyle(L"cpp", 21, L"字符串", other);
+            Check(scheme.Styles(L"cpp").size() == 2, "不同的样式号各一条");
+            scheme.ClearStyle(L"cpp", 7);
+            Check(scheme.Styles(L"cpp").size() == 1, "删掉一条之后剩一条");
+            scheme.SetStyle(L"cpp", 999, L"越界", custom);   // 越界直接拒
+            Check(scheme.Styles(L"cpp").size() == 1, "越界的样式号被拒（否则写了也没反应）");
+            scheme.ResetLanguage(L"cpp");
+            Check(scheme.Styles(L"cpp").empty(), "恢复默认把逐项覆盖也清掉");
+
+            // 往返：写文件再读回来
+            const std::filesystem::path path = StyleScheme::Path();
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+            StyleScheme saved = StyleScheme::Defaults();
+            saved.SetStyle(L"cpp", 7, L"次要项", custom);
+            Check(saved.Save(&error), "带逐项覆盖的方案落盘");
+            StyleScheme reloaded;
+            std::vector<std::wstring> warnings;
+            Check(reloaded.Load(&error, &warnings), "重新加载成功");
+            Check(reloaded.Styles(L"cpp").size() == 1 &&
+                      reloaded.Styles(L"cpp")[0].value.fore == 0x123456,
+                  "逐项覆盖往返一致");
+
+            // 坏值：颜色不是 #RRGGBB、样式号越界——跳过并记警告，别让整份文件失效
+            const std::string broken =
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<NotepadccStyles schemaVersion=\"1\">\n"
+                "  <Language name=\"cpp\">\n"
+                "    <Style role=\"comment\" fore=\"#00FF00\" bold=\"no\" italic=\"no\"/>\n"
+                "    <StyleNumber number=\"7\" fore=\"not-a-colour\"/>\n"
+                "    <StyleNumber number=\"999\" fore=\"#123456\"/>\n"
+                "    <StyleNumber number=\"9\" name=\"强调项\" fore=\"#AABBCC\" bold=\"yes\"/>\n"
+                "  </Language>\n"
+                "</NotepadccStyles>\n";
+            Check(WriteFileDirect(path, broken), "写入带坏值的 stylers.xml");
+            StyleScheme tolerant;
+            warnings.clear();
+            Check(tolerant.Load(&error, &warnings), "带坏值的文件仍能加载");
+            Check(warnings.size() >= 2, "坏颜色与越界样式号都给出了警告");
+            Check(tolerant.Styles(L"cpp").size() == 1, "只有合法的那条逐项覆盖生效");
+            Check(!tolerant.Styles(L"cpp").empty() &&
+                      tolerant.Styles(L"cpp")[0].number == 9 &&
+                      tolerant.Styles(L"cpp")[0].value.fore == 0xAABBCC &&
+                      tolerant.Styles(L"cpp")[0].value.bold,
+                  "合法的逐项覆盖照常生效");
+            Check(tolerant.Role(L"cpp", StyleRole::Comment).fore == 0x00FF00,
+                  "同一份文件里的角色色也照常生效");
+            std::filesystem::remove(path, ec);
+        }
+
         // 配色真的落到渲染上：用 cpp 的注释样式号（2）核对
         {
             const HWND host = CreateHiddenHost();
@@ -2921,6 +3038,26 @@ int main() {
                     view.ApplyLanguage(*cpp, &scheme);
                     Check(view.StyleForeColor(2) == 0xFF00FF, "方案里的注释色真的生效了");
                     Check(view.StyleForeColor(5) == 0x0000C0, "没覆盖的角色不受影响");
+
+                    // 逐样式号：压过角色色。这里故意挑一个角色也用到的号（2 = cpp 行注释），
+                    // 否则证明不了"覆盖真的盖在角色之上"，只能证明"各写各的"
+                    npcc::edit::RoleStyle perStyle;
+                    perStyle.fore = 0x00AAFF;
+                    scheme.SetStyle(L"cpp", 2, L"行注释", perStyle);
+                    view.ApplyLanguage(*cpp, &scheme);
+                    Check(view.StyleForeColor(2) == 0x00AAFF, "逐样式号的覆盖压过了角色色");
+                    // 块注释（1）与行注释（2）同属 Comment 角色，所以它拿到的是角色色，
+                    // 而不是上面那条只针对样式号 2 的覆盖——覆盖的作用范围是"这一个号"
+                    Check(view.StyleForeColor(1) == 0xFF00FF,
+                          "同一个角色的别的样式号（块注释）只受角色色影响");
+                    // 文件里有的样式号、目录里没有的（cpp 的运算符是 10）也要生效：
+                    // 目录只影响"界面上列得出来"，文件才是最终话语权
+                    npcc::edit::RoleStyle notInCatalogue;
+                    notInCatalogue.fore = 0xFF8800;
+                    scheme.SetStyle(L"cpp", 10, L"运算符", notInCatalogue);
+                    view.ApplyLanguage(*cpp, &scheme);
+                    Check(view.StyleForeColor(10) == 0xFF8800,
+                          "目录里没有的样式号照样生效（文件才是权威）");
                 }
             } else {
                 Check(false, "创建隐藏宿主窗口或编辑控件失败");

@@ -133,6 +133,7 @@ set(NPCC_CORE_SOURCES
     src/edit/EditView.cpp
     src/edit/Encoding.cpp
     src/edit/LanguageRegistry.cpp
+    src/edit/StyleCatalogue.cpp
     src/edit/StyleScheme.cpp
     src/edit/TextTools.cpp
     src/edit/UdlDefinition.cpp

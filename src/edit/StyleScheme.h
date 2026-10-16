@@ -32,6 +32,22 @@ struct RoleStyle {
     bool          italic = false;
 };
 
+inline bool operator==(const RoleStyle& a, const RoleStyle& b) {
+    return a.fore == b.fore && a.bold == b.bold && a.italic == b.italic;
+}
+inline bool operator!=(const RoleStyle& a, const RoleStyle& b) { return !(a == b); }
+
+// 逐样式号的覆盖（设计文档 2.6 第 4 条的后半段）。
+//
+// 角色是"粗调"（注释用什么颜色），这是"细调"（注释里第 3 个样式号单独一个颜色）。
+// 名字存下来是为了让文件自己可读：手改 stylers.xml 的人看到
+// `number="10" name="关键字 1"` 才知道这一行是什么。
+struct StyleOverride {
+    int          number = 0;
+    std::wstring name;
+    RoleStyle    value;
+};
+
 // 整套方案的默认值：前景/背景/字体字号 + 每个语言的角色配色。
 // 某语言没有条目 = 用内置默认配色（也就是这里 Defaults() 里那份）。
 class StyleScheme {
@@ -49,6 +65,11 @@ public:
 
     RoleStyle Role(const std::wstring& language, StyleRole role) const;
     void      SetRole(const std::wstring& language, StyleRole role, const RoleStyle& style);
+    // 逐样式号覆盖：按样式号升序；没有则返回空表
+    const std::vector<StyleOverride>& Styles(const std::wstring& language) const;
+    void SetStyle(const std::wstring& language, int number, std::wstring name,
+                  const RoleStyle& style);
+    void ClearStyle(const std::wstring& language, int number);
     // 把某个语言恢复成默认配色（删掉条目即可）
     void ResetLanguage(const std::wstring& language);
     bool HasOverride(const std::wstring& language) const;
@@ -67,6 +88,7 @@ private:
     struct LanguageEntry {
         std::wstring                  name;
         std::array<RoleStyle, kStyleRoleCount> roles{};
+        std::vector<StyleOverride>    styles;
     };
 
     std::uint32_t                fore_ = 0x1E1E1E;

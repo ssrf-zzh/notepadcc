@@ -148,6 +148,12 @@ SH_CLEAR_ALL = 1112
 SH_OK = 1120
 SH_CANCEL = 1121
 
+STYLE_LIST = 1261         # 样式配置器里「具体样式」那个列表
+LB_GETCOUNT = 0x018B
+LB_GETCURSEL = 0x0188
+LB_SETCURSEL = 0x0186
+LBN_SELCHANGE = 1
+
 VK_F2 = 0x71
 VK_F9 = 0x78
 
@@ -1352,6 +1358,23 @@ def test_style_scheme(root):
         if window_text(dialog) != "样式配置器":
             print(f"  FAIL: 对话框标题不对 {window_text(dialog)!r}")
             return False
+        # "具体样式"那一列要真的列出这个语言的样式号。列表里有几项能读到数值
+        # （LB_GETCOUNT 只回一个数，不用指针，跨进程是安全的），内容读不回来
+        # 就由单元测试去核对名字与样式号。
+        styleList = user32.GetDlgItem(dialog, STYLE_LIST)
+        if not styleList:
+            print("  FAIL: 样式配置器里没有「具体样式」列表")
+            return False
+        count = user32.SendMessageW(styleList, LB_GETCOUNT, 0, 0)
+        if count != 7:
+            print(f"  FAIL: cpp 的具体样式该列 7 项，实际 {count}")
+            return False
+        # 选中一项再切回来：走的是 LBN_SELCHANGE 那条路（界面上的"选中即刷新"）
+        user32.PostMessageW(dialog, WM_COMMAND, STYLE_LIST | (LBN_SELCHANGE << 16), 0)
+        time.sleep(0.5)
+        if user32.SendMessageW(styleList, LB_GETCURSEL, 0, 0) != 0:
+            print("  FAIL: 「具体样式」列表的选中项被弄乱了")
+            return False
         user32.PostMessageW(dialog, WM_COMMAND, 1271, 0)   # 确定
         deadline = time.time() + 5
         while time.time() < deadline and user32.FindWindowW("notepadccStyleConfig", None):
@@ -1376,12 +1399,15 @@ def test_style_scheme(root):
         if proc.poll() is None:
             proc.kill()
 
-    # 手写一份配色 → 重启 → 直接读渲染用的样式色
+    # 手写一份配色 → 重启 → 直接读渲染用的样式色。
+    # 这里同时考两件事：角色色（注释）与**逐样式号**覆盖（样式 7 是 cpp 的字符字面量，
+    # 它跟角色色冲突时应当赢——不然"逐项调整"就只是界面上好看）
     custom = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<NotepadccStyles schemaVersion="1">\n'
         '  <Language name="cpp">\n'
         '    <Style role="comment" fore="#FF00FF" bold="yes" italic="no"/>\n'
+        '    <StyleNumber number="7" name="次要项" fore="#00CC00" bold="no" italic="no"/>\n'
         '  </Language>\n'
         '</NotepadccStyles>\n'
     )
@@ -1399,6 +1425,10 @@ def test_style_scheme(root):
         if actual != 0xFF00FF:
             print(f"  FAIL: 自定义配色应当生效（注释色 #FF00FF），实际 0x{actual:06X}")
             return False
+        perStyle = user32.SendMessageW(scinti, SCI_STYLEGETFORE, 7, 0)
+        if perStyle != 0x00CC00:
+            print(f"  FAIL: 逐样式号覆盖应当生效（样式 7 = #00CC00），实际 0x{perStyle:06X}")
+            return False
     finally:
         if window:
             user32.PostMessageW(window, WM_CLOSE, 0, 0)
@@ -1411,7 +1441,8 @@ def test_style_scheme(root):
             if os.path.exists(target):
                 os.remove(target)
 
-    print("  样式方案：配置器能起来并落盘、手写配色重启后真的改变了注释色")
+    print("  样式方案：配置器能起来并落盘（角色 + 逐样式号两节）、手写配色重启后真的"
+          "改变了注释色，逐样式号覆盖也真的压过角色色")
     return True
 
 
