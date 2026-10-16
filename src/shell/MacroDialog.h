@@ -28,4 +28,8 @@ bool AskRunCommandName(HWND owner, const std::wstring& suggested, std::wstring& 
 // 这里只负责把用户敲的字原样交回去，**解析留给调用方**（edit::ParseHexJump）。
 bool AskHexOffset(HWND owner, std::wstring& out);
 
+// "跳到行"（编辑器与 T3 只读大文件视图共用，设计文档 6.1 T3 第 4 条）。
+// 同样只把用户敲的字交回去，行号解析留给调用方。
+bool AskGotoLine(HWND owner, std::wstring& out);
+
 }  // namespace npcc::shell

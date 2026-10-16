@@ -50,6 +50,7 @@
 #include "edit/Encoding.h"
 #include "edit/HexModel.h"
 #include "edit/FileTier.h"
+#include "edit/LineIndex.h"
 #include "edit/TextTools.h"
 #include "edit/StyleScheme.h"
 #include "edit/StyleCatalogue.h"
@@ -2224,11 +2225,20 @@ int main() {
                   "归入 T3 只读档");
             if (open4.document != nullptr && open4.document->view) {
                 Check(open4.document->buffer.isReadOnly, "T3 档标记为只读");
-                Check(open4.document->view->GetAllText() == big, "T3 装载内容一致");
-                // 只读必须真的挡住写入
+                // T3 的内容**不进编辑器**（那正是要省的内存）：Scintilla 是空壳，
+                // 真正的内容在自绘视口里（内存映射 + 延迟行索引）。索引要靠消息循环
+                // 一块块推进，单测里只核对"视口开了、文件长度报得对"
+                Check(open4.document->view->GetAllText().empty(),
+                      "T3 不把内容复制进编辑器");
+                Check(open4.document->logView != nullptr && open4.document->logView->Opened(),
+                      "T3 打开了自绘只读视口");
+                Check(open4.document->logView != nullptr &&
+                          open4.document->logView->FileSize() == big.size(),
+                      "自绘视口报出的文件长度一致");
+                // 只读必须真的挡住写入（空壳 Scintilla 也是只读的，钉死了）
                 open4.document->view->SetCaretPosition(0);
                 open4.document->view->ReplaceSelection("X");
-                Check(open4.document->view->GetAllText() == big, "只读文档拒绝写入");
+                Check(open4.document->view->GetAllText().empty(), "只读视图拒绝写入");
             }
 
             // 超过拒绝上限
@@ -7747,6 +7757,146 @@ int main() {
         Check(npcc::core::MakeCmdId(static_cast<uint8_t>(npcc::core::CmdCategory::Tools),
                                     npcc::core::kScriptCommandBase) == ((14u << 12) | 128u),
               "脚本命令编号 = 工具类 128 起");
+    }
+
+    Section("超大文件的延迟行索引（T3：稠密/稀疏/三种行尾/分块推进）");
+    {
+        using npcc::edit::LineIndex;
+        // 分块推进要有"不推进就是坏"的兜底：这条链路出问题时的表现是死循环，
+        // 直接 while 会把这个测试进程挂在这里
+        auto scan_all = [](LineIndex& index) {
+            int guard = 0;
+            while (!index.ScanNextChunk()) {
+                if (++guard > 200000) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        // 1) 稠密形态：\n 行尾、末尾空行、LineRange/SpanAt/LineOfOffset 的边界
+        const std::string basic = "a\nbb\nccc\n";
+        LineIndex dense;
+        dense.Attach(basic.data(), basic.size());
+        Check(scan_all(dense), "稠密：一块扫完");
+        Check(dense.Complete() && dense.Progress() == 1.0, "稠密：扫完即完成、进度 1.0");
+        Check(!dense.Sparse(), "稠密：行数没超过阈值时不转稀疏");
+        Check(dense.LineCount() == 4, "稠密：3 行 + 末尾空行 = 4 行（与编辑器口径一致）");
+        std::uint64_t offset = 0;
+        Check(dense.LineStart(0, &offset) && offset == 0, "稠密：第 1 行从 0 开始");
+        Check(dense.LineStart(2, &offset) && offset == 5, "稠密：第 3 行从 5 开始");
+        Check(dense.LineStart(3, &offset) && offset == 9, "稠密：末尾空行从 9（文件尾）开始");
+        Check(!dense.LineStart(4, &offset), "稠密：越界的行号返回 false");
+        std::uint64_t contentStart = 0, contentEnd = 0, nextStart = 0;
+        Check(dense.LineRange(1, &contentStart, &contentEnd, &nextStart), "稠密：LineRange 成功");
+        Check(contentStart == 2 && contentEnd == 4 && nextStart == 5,
+              "稠密：第 2 行 = [2,4)，下一行从 5 开始");
+        std::uint64_t line = 0;
+        Check(dense.LineOfOffset(3, &line) && line == 1, "稠密：偏移 3 落在第 2 行");
+        Check(dense.LineOfOffset(5, &line) && line == 2, "稠密：偏移 5 是第 3 行的起点");
+        Check(!dense.LineOfOffset(9, &line), "稠密：偏移 9 = 文件尾，没有对应行");
+        dense.SpanAt(2, &contentEnd, &nextStart);
+        Check(contentEnd == 4 && nextStart == 5, "稠密：SpanAt 给出（内容尾，下一行头）");
+
+        // 2) 三种行尾混用：\r\n、孤立 \r、\n
+        const std::string mixedBytes = "x\r\ny\rz\n";
+        LineIndex mixedIndex;
+        mixedIndex.Attach(mixedBytes.data(), mixedBytes.size());
+        Check(scan_all(mixedIndex), "混用行尾：扫完");
+        Check(mixedIndex.LineCount() == 4, "混用行尾：3 行 + 末尾空行");
+        Check(mixedIndex.LineStart(1, &offset) && offset == 3, "混用行尾：\\r\\n 占 2 字节");
+        Check(mixedIndex.LineStart(2, &offset) && offset == 5, "混用行尾：孤立 \\r 占 1 字节");
+
+        // 3) 没有行尾的单行文件
+        const std::string single = "abc";
+        LineIndex singleIndex;
+        singleIndex.Attach(single.data(), single.size());
+        Check(scan_all(singleIndex), "单行：扫完");
+        Check(singleIndex.LineCount() == 1, "单行：只有一行");
+        singleIndex.LineRange(0, &contentStart, &contentEnd, &nextStart);
+        Check(contentStart == 0 && contentEnd == 3 && nextStart == 3,
+              "单行：内容到文件尾，没有下一行起点");
+
+        // 4) 分块推进：块尾正好落在 \r 上时推迟到下一块判定（\r\n 还是孤立 \r）
+        const std::string splitBytes = "ab\r\ncd";
+        LineIndex::Options chunked;
+        chunked.chunkBytes = 3;
+        LineIndex splitIndex;
+        splitIndex.Attach(splitBytes.data(), splitBytes.size(), chunked);
+        Check(!splitIndex.ScanNextChunk(), "分块：第一块（ab\\r）扫不完——块尾的 \\r 推迟判定");
+        Check(!splitIndex.Complete(), "分块：推迟期间 Complete 仍是假");
+        Check(!splitIndex.ScanNextChunk(), "分块：第二块把 \\r\\n 认出来，但还没扫到文件尾");
+        Check(splitIndex.LineStart(1, &offset) && offset == 4,
+              "分块：第二块之后就定下了第 2 行的起点");
+        Check(splitIndex.ScanNextChunk(), "分块：第三块扫完");
+        Check(splitIndex.LineCount() == 2, "分块：行数正确");
+
+        // 5) chunkBytes = 1 的极端配置不能原地打转（\r 的 defer 要至少吃入 2 字节）
+        LineIndex::Options tiny;
+        tiny.chunkBytes = 1;
+        LineIndex tinyIndex;
+        tinyIndex.Attach(splitBytes.data(), splitBytes.size(), tiny);
+        Check(scan_all(tinyIndex), "1 字节一块：仍然能扫完（不在 \\r 上打转）");
+        Check(tinyIndex.LineCount() == 2, "1 字节一块：行数正确");
+        Check(tinyIndex.LineStart(1, &offset) && offset == 4, "1 字节一块：第 2 行起点正确");
+
+        // 6) 稀疏形态：行数超过阈值后转锚点表，任意行仍能定位
+        std::string many;
+        const std::uint64_t manyLines = 1000;
+        for (std::uint64_t i = 0; i < manyLines; ++i) {
+            many += "x\n";
+        }
+        LineIndex::Options sparse;
+        sparse.sparseAboveLines = 100;   // 超过 100 行就转稀疏
+        sparse.anchorInterval = 8;
+        LineIndex sparseIndex;
+        sparseIndex.Attach(many.data(), many.size(), sparse);
+        Check(scan_all(sparseIndex), "稀疏：扫完");
+        Check(sparseIndex.Sparse(), "稀疏：确实转成了锚点表");
+        Check(sparseIndex.LineCount() == manyLines + 1, "稀疏：1000 行 + 末尾空行");
+        bool sparseOk = true;
+        for (std::uint64_t probe = 0; probe <= manyLines; probe += 37) {
+            std::uint64_t at = 0;
+            if (!sparseIndex.LineStart(probe, &at) || at != probe * 2) {
+                sparseOk = false;
+                break;
+            }
+        }
+        Check(sparseOk, "稀疏：抽样行号都能回到正确偏移");
+        std::uint64_t sparseLine = 0;
+        Check(sparseIndex.LineOfOffset(2 * 999 + 1, &sparseLine) && sparseLine == 999,
+              "稀疏：按偏移反查行号（行中任意偏移）");
+
+        // 7) 分块推进期间的中间状态与"未扫到的范围查不到"
+        LineIndex::Options half;
+        half.chunkBytes = 64;   // 2000 字节要扫 32 次
+        LineIndex halfIndex;
+        halfIndex.Attach(many.data(), many.size(), half);
+        bool sawPartial = false;
+        int rounds = 0;
+        while (!halfIndex.ScanNextChunk()) {
+            const double progress = halfIndex.Progress();
+            if (progress > 0.0 && progress < 1.0) {
+                sawPartial = true;
+            }
+            if (++rounds > 1000) {
+                break;
+            }
+        }
+        Check(sawPartial, "进度：分块推进期间能看到 0 < 进度 < 1 的中间状态");
+        Check(halfIndex.LineCount() == manyLines + 1, "进度：分块扫完行数正确");
+        LineIndex partial;
+        partial.Attach(many.data(), many.size(), half);
+        partial.ScanNextChunk();
+        std::uint64_t partialLine = 0;
+        Check(!partial.LineOfOffset(many.size() - 1, &partialLine),
+              "未扫到的范围：按偏移反查行号如实返回 false");
+
+        // 8) 空文件：算 1 行，立即算扫完
+        LineIndex emptyIndex;
+        emptyIndex.Attach("", 0);
+        Check(emptyIndex.Complete() && emptyIndex.ScanNextChunk(), "空文件：直接算扫完");
+        Check(emptyIndex.LineCount() == 1, "空文件：算 1 行");
     }
 
     FinishSections();

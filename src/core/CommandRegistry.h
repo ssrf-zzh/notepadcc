@@ -40,6 +40,12 @@ public:
     using RecordHook = std::function<void(const Command&)>;
     void SetRecordHook(RecordHook hook) { recordHook_ = std::move(hook); }
 
+    // 额外的上下文门禁：标准 flags 之外，外壳可以再拦一层（例如 T3 只读大文件
+    // 视图里只放行"查找定位 / 另存为"这一小撮命令）。返回 false = 该命令禁用。
+    // 菜单灰显、工具栏状态、宏与快捷键执行都会经过它（都走 IsEnabled）。
+    using ContextGate = std::function<bool(CmdId, const CmdContext&)>;
+    void SetContextGate(ContextGate gate) { contextGate_ = std::move(gate); }
+
     bool BindShortcut(CmdId id, uint8_t modifiers, uint16_t keyCode, bool replace);
     const std::vector<ShortcutBinding>& AllBindings() const noexcept { return bindings_; }
     std::vector<CmdId> FindConflicts(uint8_t modifiers, uint16_t keyCode) const;
@@ -60,6 +66,7 @@ private:
     std::vector<ShortcutBinding> bindings_;
     CmdId                        nextAutoId_ = 1;
     RecordHook                   recordHook_;
+    ContextGate                  contextGate_;
 };
 
 }  // namespace npcc::core

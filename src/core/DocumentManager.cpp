@@ -38,6 +38,9 @@ DocumentManager::~DocumentManager() {
         if (document && document->view) {
             document->view->Destroy();
         }
+        if (document && document->logView) {
+            document->logView->Destroy();
+        }
     }
     documents_.clear();
     tabOrder_.clear();
@@ -169,7 +172,8 @@ OpenOutcome DocumentManager::Open(const std::wstring& path) {
 }
 
 bool DocumentManager::LoadInto(edit::Document& document, std::wstring& error,
-                               OpenStatus& status) {
+                               OpenStatus& status,
+                               const std::optional<edit::FileTier>& forcedTier) {
     const std::wstring& target = document.buffer.filePath;
     if (document.view == nullptr) {
         error = L"文档视图无效。";
@@ -191,7 +195,8 @@ bool DocumentManager::LoadInto(edit::Document& document, std::wstring& error,
         status = OpenStatus::TooLarge;
         return false;
     }
-    const edit::FileTier tier = tierPolicy_.Classify(fileSize);
+    const edit::FileTier tier =
+        forcedTier.has_value() ? *forcedTier : tierPolicy_.Classify(fileSize);
     document.buffer.tier = tier;
     document.buffer.lastKnown.size = fileSize;
     document.buffer.lastKnown.lastWriteMs = lastWrite;
@@ -248,7 +253,7 @@ bool DocumentManager::LoadInto(edit::Document& document, std::wstring& error,
         document.buffer.eol = edit::DetectEol(head);
         document.buffer.detectedEol = document.buffer.eol;
         std::wstring warningText = (tier == edit::FileTier::Huge)
-                                       ? L"文件较大，已以只读方式打开。"
+                                       ? L"文件较大，已进入超大文件只读视图（自绘视口，不复制内容到编辑器）。"
                                        : L"文件较大，已进入大文件模式。";
         if (edit::LooksBinaryContent(head)) {
             warningText += L"这看起来是二进制文件，建议用「视图 → 十六进制查看（只读）」核对字节。";
@@ -265,9 +270,19 @@ bool DocumentManager::LoadInto(edit::Document& document, std::wstring& error,
     view.SetEolMode(document.buffer.eol);
 
     if (tier == edit::FileTier::Normal) {
+        // 档位可能在两次装载之间变化（文件被改大/改小，或"以副本编辑"强制档）：
+        // 该有自绘视口就建、不该有就撤，两件事都在这里收口
+        if (document.logView) {
+            document.logView->Destroy();
+            document.logView.reset();
+        }
         view.SetText(loadedBytes);
         view.ApplyLanguageForPath(target, languages_, styles_);
-    } else {
+    } else if (tier == edit::FileTier::Large) {
+        if (document.logView) {
+            document.logView->Destroy();
+            document.logView.reset();
+        }
         // BOM 不能交给 Scintilla：它按代码页解释缓冲区，BOM 会变成一个可见字符
         const std::size_t skip = document.buffer.encoding.hasBom ? 3u : 0u;
         const char* data = mapped.Data() + skip;
@@ -276,13 +291,35 @@ bool DocumentManager::LoadInto(edit::Document& document, std::wstring& error,
             error = L"装载大文件失败。";
             return false;
         }
-        if (tier == edit::FileTier::Huge) {
-            view.ApplyHugeFileMode();
-            document.buffer.isReadOnly = true;
-        } else {
-            view.ApplyLargeFileDisplayMode();
-            view.ApplyLanguageForPath(target, languages_, styles_);
+        view.ApplyLargeFileDisplayMode();
+        view.ApplyLanguageForPath(target, languages_, styles_);
+    } else {
+        // T3：内容**不进 Scintilla**（那正是要省的内存），走自绘只读视口：
+        // 内存映射 + 延迟行索引 + 视口按需解码（设计 6.1 T3 实现要点 1~3）。
+        // Scintilla 控件仍然存在（空文档），只为让"每份文档都有 EditView"这条
+        // 不变量成立；显示与交互全部走 logView。
+        const std::size_t skip = document.buffer.encoding.hasBom ? 3u : 0u;
+        if (document.logView == nullptr) {
+            auto logView = std::make_unique<edit::TextLogView>();
+            if (!logView->Create(viewParent_, NextControlId())) {
+                error = L"创建只读大文件视口失败。";
+                return false;
+            }
+            logView->SetVisible(false);
+            logView->SetPalette(palette_);
+            document.logView = std::move(logView);
         }
+        if (!document.logView->OpenFile(target, skip, &error)) {
+            return false;
+        }
+        document.logView->SetCodePage(document.buffer.encoding.uniMode == edit::UniMode::Ansi
+                                          ? document.buffer.encoding.codePage
+                                          : edit::kCodePageUtf8);
+        document.buffer.isReadOnly = true;
+        // 空壳 Scintilla 也钉成只读：显示与交互都在自绘视口上，没有任何入口
+        // 该往它里面写东西（防御性的第二道锁）
+        view.SetReadOnly(true);
+        view.SetUndoCollection(false);
     }
     return true;
 }
@@ -363,7 +400,9 @@ bool DocumentManager::Reload(edit::Document& document, std::wstring& error) {
         return false;
     }
     // 记下视图状态，重新装载之后原样恢复——用户的注意力位置不该因为
-    // 一次后台改动而丢掉
+    // 一次后台改动而丢掉。T3 档记行号（自绘视口没有字节光标这个概念）
+    const bool hadLogView = document.logView != nullptr;
+    const std::uint64_t logLine = hadLogView ? document.logView->CurrentLine() : 1;
     const int32_t caret = document.view->CaretPosition();
     const int32_t firstLine = document.view->FirstVisibleLine();
     const int32_t zoom = document.view->ZoomLevel();
@@ -374,14 +413,22 @@ bool DocumentManager::Reload(edit::Document& document, std::wstring& error) {
     }
     document.view->ClearUndoBuffer();
     document.view->MarkSavePoint();
-    document.view->SetZoom(zoom);
-    document.view->SetCaretPosition(caret);
-    document.view->SetFirstVisibleLine(firstLine);
+    if (document.logView != nullptr) {
+        document.logView->GoToLine(hadLogView ? logLine : 1, true);
+    } else {
+        document.view->SetZoom(zoom);
+        document.view->SetCaretPosition(caret);
+        document.view->SetFirstVisibleLine(firstLine);
+    }
     document.buffer.isModified = false;
     return true;
 }
 
 SaveOutcome DocumentManager::Save(edit::Document& document) {
+    if (document.logView) {
+        // 只读档没有"保存回原文件"这回事，菜单里那条也被门禁关了，这里是兜底
+        return SaveOutcome{false, L"只读的大文件视图不支持保存到原文件，请用「另存为」。"};
+    }
     if (!document.buffer.HasPath()) {
         return SaveOutcome{false, L"文档尚未指定保存路径。"};
     }
@@ -392,6 +439,18 @@ SaveOutcome DocumentManager::SaveAs(edit::Document& document, const std::wstring
     SaveOutcome outcome;
     if (!document.view) {
         outcome.message = L"文档视图无效，无法保存。";
+        return outcome;
+    }
+    if (document.logView) {
+        // T3 档的"另存为"= 把磁盘上的原始字节复制一份到目标路径（含 BOM），
+        // 当前文档仍指向原文件保持只读（设计 6.1：可另存为副本后编辑）
+        std::wstring error;
+        if (!document.logView->WriteCopyTo(path, &error)) {
+            outcome.message = error;
+            return outcome;
+        }
+        outcome.ok = true;
+        outcome.message = L"已另存为副本：" + path + L"（当前文档仍指向原文件，只读）";
         return outcome;
     }
     const std::wstring target = infra::NormalizePath(path);
@@ -427,6 +486,50 @@ SaveOutcome DocumentManager::SaveAs(edit::Document& document, const std::wstring
     return outcome;
 }
 
+edit::Document* DocumentManager::OpenAsEditableCopy(edit::Document& source, std::wstring& error) {
+    if (source.logView == nullptr || !source.buffer.HasPath()) {
+        error = L"这份文档没有可复制的只读来源。";
+        return nullptr;
+    }
+    const std::uint64_t size = source.buffer.lastKnown.size;
+    if (!tierPolicy_.Acceptable(size)) {
+        error = L"文件超过 " + std::to_wstring(tierPolicy_.refuseAboveBytes >> 20) +
+                L" MB，复制进可编辑缓冲区会耗尽内存，当前版本不做。";
+        return nullptr;
+    }
+    edit::Document* copy = CreateUntitled();
+    if (copy == nullptr) {
+        error = L"创建副本文档失败。";
+        return nullptr;
+    }
+    // 借"未命名文档"的视图，但内容仍从原文件装载；装完再把路径清掉，
+    // 让第一次保存自然地去问"存到哪"，而不是覆盖原文件
+    copy->buffer.filePath = source.buffer.filePath;
+    copy->buffer.displayName = source.buffer.displayName;
+    copy->buffer.isUntitled = false;
+    // 强制 T1/T2：这是用户明确要求的"我要编辑它"，内存代价在提示里说清楚了
+    const edit::FileTier tier = size <= tierPolicy_.normalMaxBytes ? edit::FileTier::Normal
+                                                                   : edit::FileTier::Large;
+    OpenStatus status = OpenStatus::InternalError;
+    if (!LoadInto(*copy, error, status, tier)) {
+        Close(copy);
+        return nullptr;
+    }
+    copy->view->ClearUndoBuffer();
+    copy->buffer.filePath.clear();
+    copy->buffer.displayName = source.buffer.displayName + L"（副本）";
+    copy->buffer.isUntitled = true;
+    copy->buffer.isModified = true;
+    copy->buffer.lastKnown = edit::DocBuffer::FileStamp{};
+    copy->buffer.loadWarning =
+        L"这是「" + source.buffer.displayName +
+        L"」的副本（原文件仍以只读方式打开着）；保存时会问你存到哪里。";
+    Activate(copy);
+    infra::LogInfo(L"file", L"以副本方式打开: " + source.buffer.filePath + L" -> " +
+                                copy->buffer.displayName);
+    return copy;
+}
+
 bool DocumentManager::Close(edit::Document* document) {
     if (document == nullptr) {
         return false;
@@ -451,6 +554,9 @@ bool DocumentManager::Close(edit::Document* document) {
 
     if ((*it)->view) {
         (*it)->view->Destroy();
+    }
+    if ((*it)->logView) {
+        (*it)->logView->Destroy();
     }
     documents_.erase(it);
     RemoveFromTabOrder(id);
@@ -538,15 +644,27 @@ std::vector<edit::Document*> DocumentManager::All() const {
 
 void DocumentManager::ShowOnly(edit::Document* document) const {
     for (const auto& item : documents_) {
+        const bool active = item.get() == document;
+        // T3 档显示的是自绘视口，Scintilla 让位（它里面是空的）
+        const bool showLog = active && item->logView != nullptr;
         if (item->view) {
-            item->view->SetVisible(item.get() == document);
+            item->view->SetVisible(active && !showLog);
+        }
+        if (item->logView) {
+            item->logView->SetVisible(showLog);
         }
     }
 }
 
 void DocumentManager::ResizeActive(const RECT& area) const {
-    if (active_ != nullptr && active_->view) {
+    if (active_ == nullptr) {
+        return;
+    }
+    if (active_->view) {
         active_->view->Resize(area);
+    }
+    if (active_->logView) {
+        active_->logView->Resize(area);
     }
 }
 

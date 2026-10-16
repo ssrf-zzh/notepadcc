@@ -86,6 +86,8 @@ enum : npcc::core::CmdId {
     kCmdFileExportHtml = npcc::core::MakeCmdId(1, 9),
     kCmdFileExportRtf  = npcc::core::MakeCmdId(1, 10),
     kCmdFileRemote     = npcc::core::MakeCmdId(1, 11),
+    // T3 只读大文件：以副本方式打开来编辑（设计 6.1 T3 实现要点第 5 条）
+    kCmdFileEditCopy   = npcc::core::MakeCmdId(1, 12),
 
     kCmdEditUndo      = npcc::core::MakeCmdId(2, 1),
     kCmdEditRedo      = npcc::core::MakeCmdId(2, 2),
@@ -142,6 +144,8 @@ enum : npcc::core::CmdId {
     kCmdViewToolbar          = npcc::core::MakeCmdId(4, 29),
     kCmdViewEyeCare          = npcc::core::MakeCmdId(4, 30),
     kCmdViewXmlTree          = npcc::core::MakeCmdId(4, 31),
+    // "跳到行"：编辑器走 SCI_GOTOLINE，T3 只读视图走行索引（设计 6.1 T3 第 4 条）
+    kCmdViewGotoLine         = npcc::core::MakeCmdId(4, 32),
     // 宏（8 类）
     kCmdMacroRecord       = npcc::core::MakeCmdId(8, 1),
     kCmdMacroPlayLast     = npcc::core::MakeCmdId(8, 3),
@@ -370,6 +374,8 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             HexView::RegisterWindowClass(::GetModuleHandleW(nullptr));
             hexView_.Create(hwnd_, 5);
             hexView_.SetOffsetCallback([this](std::uint64_t) { UpdateHexStatus(); });
+            // T3 档的自绘只读视口由 DocumentManager 按文档创建，类要先注册好
+            edit::TextLogView::RegisterWindowClass(::GetModuleHandleW(nullptr));
             MarkdownPreview::RegisterWindowClass(::GetModuleHandleW(nullptr));
             markdownPreview_.Create(hwnd_, 6);
             markdownPreview_.SetDark(darkMode_);
@@ -1014,6 +1020,9 @@ void MainWindow::RegisterCommands() {
         core::kCmdNone, [](const CmdContext&) {});
     add(kCmdFileRemote, CmdCategory::File, L"cmd.file.remote", L"远程站点(&M)...",
         core::kCmdNone, [this](const CmdContext&) { CommandRemoteSites(); });
+    add(kCmdFileEditCopy, CmdCategory::File, L"cmd.file.editCopy",
+        L"以副本方式编辑（只读大文件）(&E)...", needsBuffer,
+        [this](const CmdContext&) { CommandOpenEditableCopy(); });
 
     // ---- 编辑 ----
     add(kCmdEditUndo, CmdCategory::Edit, L"cmd.edit.undo", L"撤销(&U)",
@@ -1023,7 +1032,17 @@ void MainWindow::RegisterCommands() {
     add(kCmdEditCut, CmdCategory::Edit, L"cmd.edit.cut", L"剪切(&T)",
         needsWritable, [this](const CmdContext& c) { c.view->Send(kSciCut); });
     add(kCmdEditCopy, CmdCategory::Edit, L"cmd.edit.copy", L"复制(&C)",
-        needsBuffer, [this](const CmdContext& c) { c.view->Send(kSciCopy); });
+        needsBuffer, [this](const CmdContext& c) {
+            // T3 只读档没有"选区"这个概念：复制的是光标所在那一行
+            //（与视口内 Ctrl+C 是同一条路，见 TextLogView::CurrentLineText）
+            if (edit::Document* document = ActiveDocument();
+                document != nullptr && document->logView != nullptr) {
+                CopyTextToClipboard(hwnd_, document->logView->CurrentLineText());
+                statusBar_.SetMessage(L"已复制当前行");
+                return;
+            }
+            c.view->Send(kSciCopy);
+        });
     add(kCmdEditPaste, CmdCategory::Edit, L"cmd.edit.paste", L"粘贴(&P)",
         needsWritable, [this](const CmdContext& c) { c.view->Send(kSciPaste); });
     add(kCmdEditCopyAsRtf, CmdCategory::Edit, L"cmd.edit.copyAsRtf",
@@ -1160,6 +1179,8 @@ void MainWindow::RegisterCommands() {
         core::kCmdCheckable, [this](const CmdContext&) { CommandToggleJsonTree(); });
     add(kCmdViewXmlTree, CmdCategory::View, L"cmd.view.xmlTree", L"XML 树视图(&X)",
         core::kCmdCheckable, [this](const CmdContext&) { CommandToggleXmlTree(); });
+    add(kCmdViewGotoLine, CmdCategory::View, L"cmd.view.gotoLine", L"跳到行(&L)...",
+        needsBuffer, [this](const CmdContext&) { CommandGotoLine(); });
 
     // ---- 宏 ----
     add(kCmdMacroRecord, CmdCategory::Macro, L"cmd.macro.record", L"开始/停止录制宏(&R)",
@@ -1481,10 +1502,26 @@ void MainWindow::RegisterCommands() {
         hexGoTo != nullptr) {
         hexGoTo->queryEnabled = [this](const CmdContext&) { return hexMode_; };
     }
+    // "以副本方式编辑"只对 T3 只读档有意义：别的文档没有副本可开，灰掉不给点
+    if (core::Command* editCopy =
+            const_cast<core::Command*>(registry_.Find(kCmdFileEditCopy));
+        editCopy != nullptr) {
+        editCopy->queryEnabled = [this](const CmdContext&) {
+            edit::Document* document = ActiveDocument();
+            return document != nullptr && document->logView != nullptr;
+        };
+    }
     // 界面语言（设计文档 6.6 / 7.7）：一语言一条命令，勾选态表示当前用的那套。
     // 放在这里而不是做成首选项里的下拉，是因为对话框文本还没进语言包——先让
     // "切换语言不重启"这条链路真能跑通、也能被回归脚本验证。
     RegisterLanguageCommands();
+
+    // T3 只读档的命令门禁（设计 6.1）：活动文档是自绘只读视口时，只放行
+    // "不写回原文件"的一小撮命令——查找定位、另存为、开副本、视图/窗口/设置/帮助；
+    // 编辑、格式、工具、宏、运行、插件这些一律灰掉。菜单灰显、快捷键、宏回放
+    // 都会经过 IsEnabled，所以装在这里一处就管住全部入口
+    registry_.SetContextGate(
+        [this](core::CmdId id, const core::CmdContext&) { return LogViewAllowsCommand(id); });
 
     // ---- 默认快捷键 ----
     const uint8_t ctrl = core::kModCtrl;
@@ -1531,6 +1568,8 @@ void MainWindow::RegisterCommands() {
     registry_.BindShortcut(kCmdViewGotoMatchBrace, ctrl, 'B', true);
     registry_.BindShortcut(kCmdWindowNext, ctrl, VK_TAB, true);
     registry_.BindShortcut(kCmdWindowPrev, ctrlShift, VK_TAB, true);
+    // 跳到行：基线附录 A 的手势，编辑器与 T3 只读视图共用一条命令
+    registry_.BindShortcut(kCmdViewGotoLine, ctrl, 'G', true);
     registry_.BindShortcut(kCmdWindowNext, ctrl, VK_NEXT, false);
     registry_.BindShortcut(kCmdWindowPrev, ctrl, VK_PRIOR, false);
     registry_.BindShortcut(kCmdSettingsPreferences, ctrl, VK_OEM_COMMA, true);
@@ -2055,6 +2094,12 @@ void MainWindow::ApplyViewToggles(edit::Document& document) const {
     // 这些是控件级设置，新激活的视图需要按当前配置复现。
     // 注意大文件档另有降级项：直接照搬配置会把降级覆盖掉，
     // 所以常规档才照配置来，降级档在配置之上再叠一层降级。
+    if (document.logView != nullptr) {
+        // T3 档：自绘视口自己管渲染，配置里只有 Tab 宽度和明暗配色能生效
+        document.logView->SetTabWidth(config_.Edit().tabWidth);
+        document.logView->SetPalette(CurrentEditorPalette());
+        return;
+    }
     if (document.view == nullptr) {
         return;
     }
@@ -2144,7 +2189,18 @@ void MainWindow::UpdateStatus() const {
         return;
     }
     edit::Document* document = documents_->Active();
-    if (document == nullptr || !document->view) {
+    if (document == nullptr) {
+        statusBar_.SetPosition(0, 0, 0);
+        UpdateDocumentInfo();
+        return;
+    }
+    if (document->logView != nullptr) {
+        // T3 档没有"行列/选区"这些编辑器概念：第一段显示行号、偏移与索引进度
+        UpdateLogStatus();
+        UpdateDocumentInfo();
+        return;
+    }
+    if (!document->view) {
         statusBar_.SetPosition(0, 0, 0);
         UpdateDocumentInfo();
         return;
@@ -2161,7 +2217,10 @@ void MainWindow::UpdateDocumentInfo() const {
         statusBar_.SetDocumentInfo(L"", L"", L"", false);
         return;
     }
-    std::wstring language = document->view->CurrentLanguageName();
+    // T3 档的 Scintilla 是空壳，语言名没有意义：如实说是只读视口
+    std::wstring language = document->logView != nullptr
+                                ? std::wstring(L"只读大文件视图")
+                                : document->view->CurrentLanguageName();
     if (document->buffer.tier != edit::FileTier::Normal) {
         language += L"  |  ";
         language += edit::TierName(document->buffer.tier);
@@ -2192,6 +2251,10 @@ void MainWindow::ActivateDocument(core::BufferId id) {
         RefreshXmlTree();
     }
     if (edit::Document* document = documents_->Active(); document != nullptr && document->view) {
+        if (document->logView != nullptr) {
+            // T3 档的交互全在自绘视口上：状态栏/查找/编辑尝试都要接回来
+            WireLogViewCallbacks(*document);
+        }
         ApplyViewToggles(*document);
         FocusActivePane();   // 分屏时焦点可能落在另一侧
     }
@@ -2236,12 +2299,25 @@ core::SessionSnapshot MainWindow::BuildSessionSnapshot() const {
         }
         core::SessionDocument entry;
         entry.filePath = document->buffer.filePath;
-        entry.caretPos = document->view->CaretPosition();
-        entry.firstVisibleLine = document->view->FirstVisibleLine();
-        entry.zoomLevel = document->view->ZoomLevel();
+        if (document->logView != nullptr) {
+            // T3 档的 Scintilla 是空壳，记它没有意义：记自绘视口的首行，
+            // 下次打开按行号滚回去（行号超过 int32 的部分夹一下，这是会话，
+            // 不追求精确到字节）
+            const std::uint64_t top = document->logView->TopLine();
+            entry.caretPos = 0;
+            entry.firstVisibleLine = static_cast<std::int32_t>(
+                top < 0x7FFFFFFFull ? top : 0x7FFFFFFFull);
+            entry.zoomLevel = 0;
+        } else {
+            entry.caretPos = document->view->CaretPosition();
+            entry.firstVisibleLine = document->view->FirstVisibleLine();
+            entry.zoomLevel = document->view->ZoomLevel();
+        }
         entry.isActive = (document == documents_->Active());
-        entry.bookmarks = document->view->AllBookmarkLines();
-        entry.folds = document->view->FoldedLines();
+        if (document->logView == nullptr) {
+            entry.bookmarks = document->view->AllBookmarkLines();
+            entry.folds = document->view->FoldedLines();
+        }
         snapshot.documents.push_back(std::move(entry));
     }
     return snapshot;
@@ -2272,6 +2348,17 @@ bool MainWindow::RestoreSession() {
         }
         edit::Document* document = outcome.document;
         if (document == nullptr || !document->view) {
+            continue;
+        }
+        if (document->logView != nullptr) {
+            // T3 档：只恢复"滚到哪一行"（映射 + 行索引都是打开时现建的）
+            document->logView->SetTopLine(
+                static_cast<std::uint64_t>(entry.firstVisibleLine > 0 ? entry.firstVisibleLine
+                                                                      : 0));
+            if (entry.isActive) {
+                active = document;
+            }
+            ++restored;
             continue;
         }
         // 先定位光标（会顺带滚动），再用记录的首可见行覆盖滚动位置
@@ -2644,6 +2731,73 @@ bool MainWindow::CommandSaveAs() {
     return false;
 }
 
+// ---- T3 只读档：以副本方式编辑（设计 6.1 T3 实现要点第 5 条）----
+void MainWindow::CommandOpenEditableCopy() {
+    edit::Document* source = ActiveDocument();
+    if (source == nullptr || source->logView == nullptr) {
+        ::MessageBoxW(hwnd_, L"只有超大文件的只读视图才有「以副本方式编辑」这一说。",
+                      L"以副本方式编辑", MB_ICONINFORMATION);
+        return;
+    }
+    // 这一步的代价要说清楚：副本是**完整读进内存**的可编辑缓冲区
+    const std::uint64_t size = source->buffer.lastKnown.size;
+    const std::wstring sizeText = std::to_wstring((size + 1024 * 1024 - 1) >> 20) + L" MB";
+    const std::wstring question =
+        L"将以副本方式编辑「" + source->buffer.displayName + L"」：\n\n" +
+        L"· 约 " + sizeText + L" 的内容会完整读进可编辑缓冲区（内存占用随之上去）；\n"
+        L"· 原文件继续以只读方式开着，副本第一次保存时会问你存到哪里；\n"
+        L"· 大文件下编辑与查找会比平时慢，这是「要编辑它」的固有代价。\n\n是否继续？";
+    if (::MessageBoxW(hwnd_, question.c_str(), L"以副本方式编辑",
+                      MB_ICONQUESTION | MB_YESNO) != IDYES) {
+        return;
+    }
+    std::wstring error;
+    edit::Document* copy = documents_->OpenAsEditableCopy(*source, error);
+    if (copy == nullptr) {
+        ::MessageBoxW(hwnd_, (L"打开副本失败：\n" + error).c_str(), L"以副本方式编辑",
+                      MB_ICONWARNING);
+        return;
+    }
+    SyncTabBar();
+    ActivateDocument(copy->buffer.id);
+    statusBar_.SetMessage(L"已以副本方式打开「" + source->buffer.displayName +
+                          L"」，保存时会问你存到哪里");
+}
+
+void MainWindow::CommandGotoLine() {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr) {
+        return;
+    }
+    std::wstring text;
+    if (!AskGotoLine(hwnd_, text)) {
+        return;   // 取消：什么都不动
+    }
+    wchar_t* end = nullptr;
+    long long line = std::wcstoll(text.c_str(), &end, 10);
+    if (end == text.c_str() || line <= 0) {
+        ::MessageBoxW(hwnd_, L"请输入一个从 1 开始的行号。", L"跳到行", MB_ICONINFORMATION);
+        return;
+    }
+    constexpr long long kMaxLine = 0x7FFFFFFFll;   // Scintilla 的行号是 int32
+    line = std::min(line, kMaxLine);
+    if (document->logView != nullptr) {
+        document->logView->GoToLine(static_cast<std::uint64_t>(line), true);
+        UpdateStatus();
+        return;
+    }
+    if (document->view == nullptr) {
+        return;
+    }
+    // Scintilla 的行号是 0 起：越界由它自己夹到末行
+    const int32_t lineIndex = static_cast<int32_t>(line - 1);
+    const int32_t target =
+        static_cast<int32_t>(document->view->PositionFromLine(lineIndex));
+    document->view->SetCaretPosition(target);
+    document->view->ScrollToLine(lineIndex);
+    UpdateStatus();
+}
+
 bool MainWindow::CommandCloseCurrent() {
     if (edit::Document* document = documents_->Active(); document != nullptr) {
         const core::BufferId id = document->buffer.id;
@@ -2718,7 +2872,26 @@ void MainWindow::CommandFind(bool replaceMode) {
 
 void MainWindow::CommandFindNext(bool forward) {
     edit::Document* document = ActiveDocument();
-    if (document == nullptr || !document->view) {
+    if (document == nullptr) {
+        return;
+    }
+    if (document->logView != nullptr) {
+        // T3 档：在映射内存上分块找（后台线程），结果经回调回来再更新查找栏
+        if (!findBar_.Visible()) {
+            findBar_.Show(false);
+            LayoutChildren();
+            return;
+        }
+        const search::SearchConfig config = CurrentSearchConfig();
+        if (config.pattern.empty()) {
+            findBar_.SetStatus(L"请输入查找内容");
+            return;
+        }
+        findBar_.SetStatus(L"正在查找…");
+        document->logView->FindNext(config, forward, true);
+        return;
+    }
+    if (!document->view) {
         return;
     }
     if (!findBar_.Visible()) {
@@ -2761,6 +2934,42 @@ bool MainWindow::HandleFindBarCommand(int controlId) {
     edit::Document* document = ActiveDocument();
     if (document == nullptr || !document->view) {
         return true;
+    }
+
+    if (document->logView != nullptr) {
+        // T3 档的查找栏：只留"找下一个/上一个、计数、关闭"；替换按钮如实说明
+        switch (controlId) {
+            case kFindNextButton:
+                CommandFindNext(true);
+                return true;
+            case kFindPrevButton:
+                CommandFindNext(false);
+                return true;
+            case kCloseButton:
+                findBar_.Hide();
+                document->logView->Focus();
+                LayoutChildren();
+                return true;
+            case kCountButton: {
+                const search::SearchConfig config = CurrentSearchConfig();
+                if (config.pattern.empty()) {
+                    findBar_.SetStatus(L"请输入查找内容");
+                    return true;
+                }
+                findBar_.SetStatus(L"正在统计…");
+                document->logView->CountMatches(config);
+                return true;
+            }
+            case kMarkButton:
+                findBar_.SetStatus(L"只读视图不落标记，用「计数」看总数");
+                return true;
+            case kReplaceButton:
+            case kReplaceAllButton:
+                findBar_.SetStatus(L"只读视图不支持替换；先用「以副本方式编辑」");
+                return true;
+            default:
+                return true;
+        }
     }
 
     switch (controlId) {
@@ -3532,6 +3741,9 @@ void MainWindow::ApplyStyleSchemeToAllViews() {
         }
         document->view->ApplyPalette(palette);
         document->view->ApplyLanguageForPath(document->buffer.filePath, &languages_, &styles_);
+        if (document->logView != nullptr) {
+            document->logView->SetPalette(palette);   // T3 档的明暗跟着主题走
+        }
     }
     // 克隆视图是独立的 Scintilla 控件，也得重新上色
     if (edit::EditView* clone = SecondaryView(); clone != nullptr && clone->Valid()) {
@@ -4503,6 +4715,133 @@ void MainWindow::UpdateHexStatus() const {
                           std::to_wstring(hexView_.FileSize()) + L" 字节  |  只读");
 }
 
+// ---- T3 超大文件的只读自绘视口（设计 6.1）----
+
+void MainWindow::UpdateLogStatus() const {
+    const edit::Document* document = documents_ != nullptr ? documents_->Active() : nullptr;
+    if (document == nullptr || document->logView == nullptr) {
+        return;
+    }
+    const edit::TextLogView& view = *document->logView;
+    // 对外显示的偏移要加回 BOM：屏幕上那一列也是这么画的（用户看到的是文件真实偏移）
+    const std::uint64_t offset = view.CurrentOffset() + view.BomSkip();
+    const std::string hex =
+        edit::FormatHexOffset(offset, edit::HexOffsetWidthFor(view.FileSize()));
+    std::wstring message = L"只读大文件视图  |  第 " + std::to_wstring(view.CurrentLine()) +
+                           L" 行  |  偏移 0x" + FromUtf8(hex);
+    if (view.IndexComplete()) {
+        message += L"  |  共 " + std::to_wstring(view.LineCount()) + L" 行";
+    } else {
+        const int percent = static_cast<int>(view.IndexProgress() * 100.0);
+        message += L"  |  正在建立索引 " + std::to_wstring(percent) + L"%";
+    }
+    message += L"  |  只读";
+    statusBar_.SetMessage(message);
+}
+
+void MainWindow::WireLogViewCallbacks(edit::Document& document) {
+    edit::TextLogView* view = document.logView.get();
+    if (view == nullptr) {
+        return;
+    }
+    // 行号/偏移变了、索引推进了，都由视口自己回调：状态栏保持一致
+    view->SetStatusCallback([this] { UpdateStatus(); });
+    // 用户在只读视口里打字 / 粘贴：问一次"要不要开个可编辑副本"（设计 6.1 第 5 条）
+    view->SetEditAttemptCallback([this] { CommandOpenEditableCopy(); });
+    // 查找在后台线程分块跑，结果经窗口消息回到这里（UI 线程）
+    view->SetFindCallback([this](const edit::TextLogView::FindHit& hit) {
+        if (!hit.error.empty()) {
+            findBar_.SetStatus(hit.error);
+            return;
+        }
+        if (!hit.found) {
+            findBar_.SetStatus(L"未找到匹配项");
+            return;
+        }
+        std::wstring status = L"已定位到第 " + std::to_wstring(hit.line + 1) + L" 行";
+        if (hit.wrapped) {
+            status = L"已回绕， " + status;
+        }
+        findBar_.SetStatus(status);
+    });
+    view->SetCountCallback(
+        [this](std::uint64_t count, bool truncated, const std::wstring& error) {
+            if (!error.empty()) {
+                findBar_.SetStatus(error);
+                return;
+            }
+            std::wstring status = L"共 " + std::to_wstring(count) + L" 处匹配";
+            if (truncated) {
+                status += L"（已达统计上限）";
+            }
+            findBar_.SetStatus(status);
+        });
+}
+
+bool MainWindow::LogViewAllowsCommand(core::CmdId id) const {
+    const edit::Document* document = documents_ != nullptr ? documents_->Active() : nullptr;
+    if (document == nullptr || document->logView == nullptr) {
+        return true;   // 常规文档：门禁不插手，一切照旧
+    }
+    switch (id) {
+        // 文件：只留"不写回原文件"的那些；保存/打印/导出要读编辑器缓冲区，灰掉
+        case kCmdFileNew:
+        case kCmdFileOpen:
+        case kCmdFileSaveAs:
+        case kCmdFileClose:
+        case kCmdFileCloseAll:
+        case kCmdFileExit:
+        case kCmdFileRemote:
+        case kCmdFileEditCopy:
+        case core::MakeCmdId(15, 10):   // 文件菜单里那条分隔线
+        // 搜索：查找定位可以，替换与书签不行
+        case kCmdSearchFind:
+        case kCmdSearchFindNext:
+        case kCmdSearchFindPrev:
+        case kCmdSearchInFiles:
+        case kCmdSearchReplaceInFiles:
+        // 编辑：只留"复制当前行"（实现见 kCmdEditCopy 的注册处）
+        case kCmdEditCopy:
+        // 视图：不动文档内容的开关。"跳到偏移"另由 hexMode_ 那道门禁管
+        case kCmdViewGotoLine:
+        case kCmdViewHexToggle:
+        case kCmdViewHexGoTo:
+        case kCmdViewFullScreen:
+        case kCmdViewToolbar:
+        case kCmdViewDarkMode:
+        case kCmdViewEyeCare:
+        case kCmdViewWorkspaceOpen:
+        case kCmdViewWorkspaceClose:
+        case kCmdViewWorkspaceRefresh:
+        case kCmdViewWorkspaceOpenSel:
+        // 面板开关（预览/结构树/函数列表）是界面 chrome：T3 档下开着也只是空内容，
+        // 但"关掉它"的入口必须留着，否则面板会卡在屏幕上关不掉
+        case kCmdViewFunctionList:
+        case kCmdViewMarkdownPreview:
+        case kCmdViewJsonTree:
+        case kCmdViewXmlTree:
+        // 窗口：标签切换是离开只读档的出口，必须留着
+        case kCmdWindowNext:
+        case kCmdWindowPrev:
+            return true;
+        default:
+            break;
+    }
+    const core::Command* command = registry_.Find(id);
+    if (command == nullptr) {
+        return false;
+    }
+    // 设置（含界面语言）与帮助是全局动作，跟哪个文档在前面无关
+    switch (command->category) {
+        case core::CmdCategory::Settings:
+        case core::CmdCategory::Window:
+        case core::CmdCategory::Help:
+            return true;
+        default:
+            return false;
+    }
+}
+
 void MainWindow::CommandToggleHexView() {
     if (hexMode_) {
         LeaveHexView();
@@ -4548,7 +4887,10 @@ void MainWindow::CommandToggleHexView() {
     hexView_.SetVisible(true);
     LayoutViews();
     // 与文本视图联动：滚到光标所在的字节。光标位置本来就是**字节**下标，正好对得上
-    if (document->view != nullptr) {
+    if (document->logView != nullptr) {
+        // T3 档没有字节光标：用视口当前行行首的偏移（内容坐标要加回 BOM）
+        hexView_.GoTo(document->logView->CurrentOffset() + document->logView->BomSkip());
+    } else if (document->view != nullptr) {
         const int32_t caret = document->view->CaretPosition();
         hexView_.GoTo(static_cast<std::uint64_t>(caret > 0 ? caret : 0));
     }
@@ -4580,9 +4922,12 @@ void MainWindow::LeaveHexView() {
     hexView_.SetVisible(false);
     documents_->ShowOnly(documents_->Active());
     LayoutViews();
-    if (edit::Document* document = documents_->Active();
-        document != nullptr && document->view != nullptr) {
-        ::SetFocus(document->view->Handle());
+    if (edit::Document* document = documents_->Active(); document != nullptr) {
+        if (document->logView != nullptr) {
+            document->logView->Focus();
+        } else if (document->view != nullptr) {
+            ::SetFocus(document->view->Handle());
+        }
     }
 }
 
@@ -6249,6 +6594,14 @@ void MainWindow::SyncSplitView() {
         dividerRect_ = RECT{0, 0, 0, 0};
         return;
     }
+    if (edit::Document* active = documents_->Active();
+        active != nullptr && active->logView != nullptr) {
+        // T3 只读视口没有"第二条文本视图"可言：克隆视图整体让位，
+        // 编辑区整块给自绘视口（splitEnabled_ 保留原值，切回常规文档时会建回来）
+        documents_->SplitDisableView();
+        dividerRect_ = RECT{0, 0, 0, 0};
+        return;
+    }
     if (!documents_->SplitEnableView()) {
         splitEnabled_ = false;
         return;
@@ -6275,9 +6628,14 @@ void MainWindow::FocusActivePane() {
         }
     }
     if (documents_ != nullptr) {
-        if (edit::Document* document = documents_->Active();
-            document != nullptr && document->view) {
-            ::SetFocus(document->view->Handle());
+        if (edit::Document* document = documents_->Active(); document != nullptr) {
+            if (document->logView != nullptr) {
+                document->logView->Focus();   // T3 档：焦点属于自绘视口
+                return;
+            }
+            if (document->view) {
+                ::SetFocus(document->view->Handle());
+            }
         }
     }
 }

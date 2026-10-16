@@ -4577,6 +4577,8 @@ def run():
         failed = True
     if not test_script_plugin(root):
         failed = True
+    if not test_text_log_view(root):
+        failed = True
 
     if failed:
         print("FAIL: 界面回归未通过")
@@ -4589,7 +4591,7 @@ def run():
           "比较 + JSON 树视图 + 括号匹配与摘要与全屏 + 工具栏 + 右键菜单定制 + 自动完成 + "
           "文件关联 + "
           "文件类型识别与 MIME 工具 + 护眼模式 + XML 树视图与校验 + XPath 查询 + "
-          "自动更新检查 + 远程编辑（FTP/SFTP 站点）+ 脚本插件 + 绿色打包）")
+          "自动更新检查 + 远程编辑（FTP/SFTP 站点）+ 脚本插件 + T3 自绘视口 + 绿色打包）")
     return 0
 
 
@@ -8625,6 +8627,266 @@ def test_script_plugin(root):
     print("  脚本插件：清单扫描与刷新、整篇/选区过滤与一步撤销、非零退出收 stderr、"
           "运行期间改文档不写回、超时终止、解释器配错弹框——逐条核对通过")
     return True
+
+TEXTLOG_VIEW_CLASS = "notepadccTextLogView"
+GOTO_LINE_CLASS = "notepadccLineGoto"
+CMD_VIEW_GOTO_LINE = (4 << 12) | 32
+CMD_FILE_EDIT_COPY = (1 << 12) | 12
+CMD_SEARCH_REPLACE = (3 << 12) | 2
+BTN_COUNT = 909
+CTRL_REPLACE_EDIT = 902
+SCI_GETLENGTH_MSG = 2006
+
+
+def test_text_log_view(root):
+    """T3 自绘视口：>64 MB 的文本文件不复制进编辑器，屏幕上那几行仍**逐字**等于文件内容。
+
+    这一段核对的是"屏幕上真正画出来的东西"，不是"命令发出去了"：
+      1 打开后自绘视口可见、编辑器让位，首屏第一行的行号/十六进制偏移/正文与磁盘字节逐字对得上；
+      2 翻页之后首行跟着走，行号与偏移仍然自洽；
+      3 Ctrl+G 跳到第 70000 行（跨过 62 MB 未复制的内容之后位置仍准）；
+      4 查找在映射内存上跑：命中之后视口滚到命中行，查找栏给出"已定位到第 N 行"；
+      5 计数沿全文件分块统计，得到与文件内容相符的总数；
+      6 往只读视口里打字只弹"以副本方式编辑"的询问，文件一个字节不动；
+      7 只读门禁：替换被挡下（日志留痕），"以副本方式编辑"可通行；
+      8 走那条命令开副本：内容完整读进可编辑缓冲区（Scintilla 长度对得上），
+        副本档上替换这类命令恢复可用。
+    """
+    work = os.path.join(root, "build", "log_test")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    cfg = os.path.join(root, "build", "bin", "config")
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+
+    # 80000 行 × 893 字节 = 71,440,000 字节：跨过 64 MB 的 T3 门槛。
+    # 末尾那个换行会让"空行"再占一行（与 Scintilla 的口径一致），所以总数是 80001
+    line_bytes = 893
+    line_count = 80000
+    total_lines = line_count + 1
+    target = os.path.join(work, "huge.log")
+    with open(target, "wb") as handle:
+        for start in range(0, line_count, 2000):
+            chunk = bytearray()
+            for number in range(start + 1, min(start + 2000, line_count) + 1):
+                chunk += ("LINE %06d " % number).encode("ascii")
+                chunk += b"x" * 880
+                chunk += b"\n"
+            handle.write(chunk)
+    size = os.path.getsize(target)
+    if size != line_count * line_bytes:
+        print(f"  FAIL: 测试文件长度不对 {size}")
+        return False
+
+    def rendered_line(number):
+        offset = (number - 1) * line_bytes
+        return "%6d  %08X  LINE %06d " % (number, offset, number)
+
+    def read_view(window, timeout=30.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            view = find_child(window, TEXTLOG_VIEW_CLASS)
+            if view and user32.IsWindowVisible(view):
+                text = window_text(view)
+                if text:
+                    return view, text
+            time.sleep(0.2)
+        return None, ""
+
+    def find_bar_status(find_bar):
+        for child in children(find_bar):
+            if class_name(child) == "Static":
+                return window_text(child)
+        return ""
+
+    def wait_find_status(find_bar, want, timeout=40.0):
+        deadline = time.time() + timeout
+        last = ""
+        while time.time() < deadline:
+            last = find_bar_status(find_bar)
+            if want in last:
+                return last
+            time.sleep(0.25)
+        return last
+
+    def clean_config():
+        for name in ("config.xml", "session.xml"):
+            path = os.path.join(cfg, name)
+            if os.path.exists(path):
+                os.remove(path)
+
+    clean_config()
+    log_file = remove_log_with_retry(root)
+
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", target], cwd=root)
+    window = wait_for_main_window("notepadcc - huge.log", timeout=90.0)
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+
+        # 1) 索引建完之后：状态栏给出行号/偏移/总数，首屏第一行与磁盘字节逐字对得上
+        status = ""
+        deadline = time.time() + 40
+        while time.time() < deadline:
+            status = read_status_bar(window) or ""
+            if "共 %d 行" % total_lines in status:
+                break
+            time.sleep(0.3)
+        if "只读大文件视图" not in status or ("共 %d 行" % total_lines) not in status:
+            print(f"  FAIL: 状态栏没有给出行号/偏移/总数 {status!r}")
+            return False
+        view, text = read_view(window)
+        if not view:
+            print("  FAIL: 看不到 T3 自绘视口（%s）" % TEXTLOG_VIEW_CLASS)
+            return False
+        first = text.split("\r\n")[0]
+        if not first.startswith(rendered_line(1)):
+            print(f"  FAIL: 首屏第一行不对\n           实际 {first!r}\n"
+                  f"           期望以 {rendered_line(1)!r} 开头")
+            return False
+        shown = first[18:]   # 跳过"行号 + 两空格 + 8 位偏移 + 两空格"
+        with open(target, "rb") as handle:
+            disk = handle.read(len(shown))
+        if shown.encode("ascii") != disk:
+            print("  FAIL: 屏幕上的正文与文件开头字节对不上")
+            return False
+        if visible_scintilla(window) is not None:
+            print("  FAIL: T3 档不该有可见的 Scintilla 编辑器（内容不进编辑器）")
+            return False
+
+        # 2) 翻页：首行跟着走，行号/偏移仍然自洽
+        user32.PostMessageW(view, WM_VSCROLL, SB_PAGEDOWN, 0)
+        time.sleep(0.6)
+        first2 = window_text(view).split("\r\n")[0]
+        number2 = int(first2.split()[0])
+        if number2 <= 1 or not first2.startswith(rendered_line(number2)):
+            print(f"  FAIL: 翻页之后首行不对 {first2!r}")
+            return False
+
+        # 3) 跳到行：跨过 62 MB 之后落在正确的那一行上
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_GOTO_LINE, 0)
+        time.sleep(0.8)
+        dialog = user32.FindWindowW(GOTO_LINE_CLASS, None)
+        if not dialog:
+            print("  FAIL: 跳到行没有弹出输入框")
+            return False
+        set_text(dialog, MACRO_EDIT, "70000")
+        time.sleep(0.2)
+        if not close_macro_dialog(GOTO_LINE_CLASS):
+            print("  FAIL: 跳到行的输入框点不掉")
+            return False
+        time.sleep(0.6)
+        first3 = window_text(view).split("\r\n")[0]
+        if not first3.startswith(rendered_line(70000)):
+            print(f"  FAIL: 跳到第 70000 行之后首行不对 {first3!r}")
+            return False
+        status = read_status_bar(window) or ""
+        if "第 70000 行" not in status:
+            print(f"  FAIL: 状态栏没有跟上跳到行 {status!r}")
+            return False
+
+        # 4) 查找：命中之后视口滚到命中行，查找栏给说法
+        user32.SendMessageW(window, WM_COMMAND, CMD_FIND, 0)
+        time.sleep(0.6)
+        find_bar = find_child(window, "notepadccFindBar")
+        if find_bar is None or not user32.IsWindowVisible(find_bar):
+            print("  FAIL: T3 档的查找栏没有出来")
+            return False
+        set_text(find_bar, CTRL_FIND_EDIT, "LINE 070000")
+        user32.SendMessageW(window, WM_COMMAND, BTN_FIND_NEXT, 0)
+        status = wait_find_status(find_bar, "已定位到第 70000 行")
+        if "已定位到第 70000 行" not in status:
+            print(f"  FAIL: 查找没有定位到第 70000 行 {status!r}")
+            return False
+        first4 = window_text(view).split("\r\n")[0]
+        if not first4.startswith(rendered_line(70000)):
+            print(f"  FAIL: 命中之后视口没有滚过去 {first4!r}")
+            return False
+
+        # 5) 计数：全文件分块统计，"LINE 07" 恰好命中第 70000~79999 行共 10000 处
+        set_text(find_bar, CTRL_FIND_EDIT, "LINE 07")
+        user32.SendMessageW(window, WM_COMMAND, BTN_COUNT, 0)
+        status = wait_find_status(find_bar, "共 10000 处匹配")
+        if "共 10000 处匹配" not in status:
+            print(f"  FAIL: 计数不对 {status!r}")
+            return False
+
+        # 6) 往只读视口里打字：只弹询问，文件一个字节不动
+        before_mtime = os.path.getmtime(target)
+        user32.PostMessageW(view, WM_CHAR_INPUT, ord("z"), 0)
+        if not dismiss_dialog("以副本方式编辑", IDNO, timeout=8.0):
+            print("  FAIL: 往只读视口里打字应当问一次「以副本方式编辑」")
+            return False
+        if os.path.getmtime(target) != before_mtime or os.path.getsize(target) != size:
+            print("  FAIL: 只读视口不该改动文件")
+            return False
+
+        # 7) 只读门禁：替换被挡下（替换行不出现），副本命令可通行
+        user32.PostMessageW(window, WM_COMMAND, CMD_SEARCH_REPLACE, 0)
+        time.sleep(0.6)
+        replace_edit = user32.GetDlgItem(find_bar, CTRL_REPLACE_EDIT)
+        if replace_edit and user32.IsWindowVisible(replace_edit):
+            print("  FAIL: 只读档上替换不该可用")
+            return False
+
+        # 8) 开副本：内容完整读进可编辑缓冲区，副本档上替换恢复可用
+        user32.PostMessageW(window, WM_COMMAND, CMD_FILE_EDIT_COPY, 0)
+        if not dismiss_dialog("以副本方式编辑", IDYES, timeout=8.0):
+            print("  FAIL: 「以副本方式编辑」的确认框没有出来")
+            return False
+        copy_title = "notepadcc - huge.log（副本） *"
+        deadline = time.time() + 120
+        scinti = None
+        scinti_length = 0
+        while time.time() < deadline:
+            if user32.FindWindowW("notepadccMainWindow", copy_title):
+                scinti = visible_scintilla(window)
+                if scinti is not None:
+                    scinti_length = user32.SendMessageW(scinti, SCI_GETLENGTH_MSG, 0, 0)
+                    if scinti_length and scinti_length >= size - 1024:
+                        break
+            time.sleep(0.5)
+        else:
+            scinti_length = 0
+        if not scinti or scinti_length < size - 1024:
+            print(f"  FAIL: 副本没有完整读进编辑器（长度 {scinti_length} / 期望约 {size}）")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_SEARCH_REPLACE, 0)
+        time.sleep(0.8)
+        replace_edit = user32.GetDlgItem(find_bar, CTRL_REPLACE_EDIT)
+        if not (replace_edit and user32.IsWindowVisible(replace_edit)):
+            print("  FAIL: 副本档上替换应当恢复可用")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=3.0, quiet=True)
+            time.sleep(1.0)
+        if proc.poll() is None:
+            proc.kill()
+    clean_config()
+    shutil.rmtree(work, ignore_errors=True)
+
+    with open(log_file, "r", encoding="utf-8", errors="replace") as handle:
+        log = handle.read()
+    if "进入超大文件只读视图" not in log:
+        print("  FAIL: 日志里应当留下进入只读大文件视图的记录")
+        return False
+    if "命令被禁用，未执行: %d" % CMD_SEARCH_REPLACE not in log:
+        print("  FAIL: 只读档上的替换应当被门禁挡下（日志里没有留痕）")
+        return False
+    if "命令被禁用，未执行: %d" % CMD_FILE_EDIT_COPY in log:
+        print("  FAIL: 「以副本方式编辑」不该被门禁挡下")
+        return False
+    if "以副本方式打开" not in log:
+        print("  FAIL: 日志里应当留下以副本方式打开的记录")
+        return False
+
+    print("  T3 自绘视口：71 MB 文件不进编辑器，屏幕首行与磁盘字节逐字一致、" 
+          "翻页/跳行/查找/计数全部对得上、打字只问副本不动文件、"
+          "只读门禁挡住替换、开副本后内容完整且命令恢复可用")
+    return True
+
 
 if __name__ == "__main__":
     sys.exit(run())

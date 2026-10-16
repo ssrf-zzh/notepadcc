@@ -32,6 +32,7 @@ std::vector<LangPack> MakeBuiltin() {
         Entry(L"cmd.file.exportHtml", L"Export as HTML...", L"H"),
         Entry(L"cmd.file.exportRtf", L"Export as RTF...", L"R"),
         Entry(L"cmd.file.remote", L"Remote Sites...", L"M"),
+        Entry(L"cmd.file.editCopy", L"Edit as Copy (Read-Only Large File)...", L"E"),
         // ---- 编辑 ----
         Entry(L"cmd.edit.undo", L"Undo", L"U"),
         Entry(L"cmd.edit.redo", L"Redo", L"R"),
@@ -76,6 +77,7 @@ std::vector<LangPack> MakeBuiltin() {
         Entry(L"cmd.view.markdownPreview", L"Markdown Preview Panel", L"M"),
         Entry(L"cmd.view.jsonTree", L"JSON Tree View", L"J"),
         Entry(L"cmd.view.xmlTree", L"XML Tree View", L"X"),
+        Entry(L"cmd.view.gotoLine", L"Go to Line...", L"L"),
         Entry(L"cmd.view.workspaceOpen", L"Open Folder as Workspace...", L"F"),
         Entry(L"cmd.view.workspaceClose", L"Close Workspace", L"C"),
         Entry(L"cmd.view.workspaceRefresh", L"Refresh Workspace", L"R"),

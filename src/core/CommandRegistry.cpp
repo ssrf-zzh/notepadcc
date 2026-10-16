@@ -117,6 +117,11 @@ bool CommandRegistry::IsEnabled(CmdId id, const CmdContext& context) const {
     if (command == nullptr) {
         return false;
     }
+    // 上下文门禁放在最前面：带 queryEnabled 的命令也拦得住——不然"T3 只读视图里
+    // 不许碰编辑器"这条规则会被任何一条自定义判定悄悄绕过去
+    if (contextGate_ && !contextGate_(id, context)) {
+        return false;
+    }
     if (command->queryEnabled) {
         return command->queryEnabled(context);
     }

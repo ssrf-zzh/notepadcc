@@ -11,6 +11,7 @@ namespace {
 constexpr const wchar_t* kNameClass = L"notepadccMacroName";
 constexpr const wchar_t* kRunClass = L"notepadccMacroRun";
 constexpr const wchar_t* kHexGotoClass = L"notepadccHexGoto";
+constexpr const wchar_t* kLineGotoClass = L"notepadccLineGoto";
 
 enum : int {
     kIdLabel = 1300,
@@ -324,6 +325,23 @@ bool AskHexOffset(HWND owner, std::wstring& out) {
     spec.value = L"0x0";
     spec.hint = L"例如 0x1F0 是十六进制的 496，496 是不带前缀的十进制写法。";
     spec.maxLength = 24;
+    SmallDialog dialog;
+    if (!dialog.Show(owner, spec)) {
+        return false;
+    }
+    out = spec.value;
+    return true;
+}
+
+bool AskGotoLine(HWND owner, std::wstring& out) {
+    DialogSpec spec;
+    spec.windowClass = kLineGotoClass;
+    spec.title = L"跳到行";
+    spec.prompt = L"跳到第几行（行号从 1 开始）：";
+    spec.value = L"1";
+    spec.hint = L"超大文件的只读视图里也走这一条；回车即可跳过去。";
+    spec.numeric = true;
+    spec.maxLength = 12;
     SmallDialog dialog;
     if (!dialog.Show(owner, spec)) {
         return false;

@@ -91,6 +91,7 @@ private:
     void CommandOpen();
     bool CommandSave();
     bool CommandSaveAs();
+    void CommandOpenEditableCopy();   // T3 只读档：读进可编辑副本（设计 6.1 第 5 条）
     bool CommandCloseCurrent();
     bool CommandCloseAll();
     void CommandNextTab();
@@ -171,6 +172,7 @@ private:
     // 基线 P0 的三件"编辑器基本功"：全屏（F11）、跳到匹配括号（Ctrl+B）、摘要
     void CommandToggleFullScreen();
     void CommandGotoMatchingBrace();
+    void CommandGotoLine();   // Ctrl+G：跳到第 N 行（编辑器与 T3 只读视图共用）
     void CommandShowSummary();
     // ---- 宏（设计文档 2.9 / 5.7）----
     void CommandToggleMacroRecord();
@@ -257,6 +259,10 @@ private:
     void LeaveHexView();     // 回到文本视图（不碰菜单勾选态：调用方自己重建）
     void LayoutViews() const;   // 按当前模式把视图区摆好（WM_SIZE 与切换时都走它）
     void UpdateHexStatus() const;   // 状态栏第一段显示十六进制偏移
+    // ---- T3 超大文件的只读自绘视口（设计 6.1）----
+    void WireLogViewCallbacks(edit::Document& document);   // 状态/查找/编辑尝试接回外壳
+    bool LogViewAllowsCommand(core::CmdId id) const;   // 只读档的命令门禁（装进注册表）
+    void UpdateLogStatus() const;   // 状态栏第一段显示行号/偏移/索引进度
     // ---- 预览（设计文档 2.13 第 4 条）----
     void CommandPreviewInBrowser();
     void CommandToggleMarkdownPreview();

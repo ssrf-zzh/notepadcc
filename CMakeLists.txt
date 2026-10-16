@@ -155,6 +155,8 @@ set(NPCC_CORE_SOURCES
     src/core/FtpProtocol.cpp
     src/edit/ColumnEdit.cpp
     src/edit/HexModel.cpp
+    src/edit/LineIndex.cpp
+    src/edit/TextLogView.cpp
     src/edit/ColumnText.cpp
     src/edit/EditView.cpp
     src/edit/Encoding.cpp

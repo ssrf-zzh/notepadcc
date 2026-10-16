@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -71,6 +72,9 @@ public:
     // 保存到原路径 / 另存为
     SaveOutcome Save(edit::Document& document);
     SaveOutcome SaveAs(edit::Document& document, const std::wstring& path);
+    // T3 只读文档的"编辑此文件"：把内容复制进一份新的可编辑文档（原文件不动，
+    // 副本标成"已修改"，第一次保存会问存到哪）。失败返回 nullptr，原因在 error。
+    edit::Document* OpenAsEditableCopy(edit::Document& source, std::wstring& error);
 
     // ---- 外部改动检测（设计文档 2.3 第 3 条） ----
     // 把磁盘上的身份与最近一次记录的比较。文件被删除也算"变了"。
@@ -120,7 +124,9 @@ public:
 private:
     edit::Document* AddDocument(std::unique_ptr<edit::Document> document);
     // 把文件内容装载进文档（Open 与 Reload 共用）
-    bool LoadInto(edit::Document& document, std::wstring& error, OpenStatus& status);
+    // forcedTier 非空时强制档位（"以副本方式编辑"用它把 T3 大文件按 T2 装进 Scintilla）
+    bool LoadInto(edit::Document& document, std::wstring& error, OpenStatus& status,
+                  const std::optional<edit::FileTier>& forcedTier = std::nullopt);
     void RemoveFromTabOrder(BufferId id);
     int  NextControlId();
 
