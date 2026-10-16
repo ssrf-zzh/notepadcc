@@ -132,6 +132,16 @@ CMD_TOOL_EXPORT_UDL = (14 << 12) | 31
 CMD_TOOL_FORMAT_JSON = (14 << 12) | 32
 CMD_TOOL_MINIFY_JSON = (14 << 12) | 33
 CMD_TOOL_FORMAT_XML = (14 << 12) | 34
+CMD_RUN_DIALOG = (9 << 12) | 1          # 运行…（F5）
+CMD_RUN_FIRST_SAVED = (9 << 12) | 128   # 存下来的第一条运行命令
+RUN_DIALOG_CLASS = "notepadccRunCommand"
+RUN_COMBO = 1401
+RUN_CAPTURE = 1402
+RUN_GO = 1410
+RUN_SAVE = 1411
+RUN_CANCEL = 1412
+VK_F5 = 0x74
+BM_SETCHECK = 0x00F1
 CMD_VIEW_DARK_MODE = (4 << 12) | 14
 CMD_MACRO_RECORD = (8 << 12) | 1
 CMD_MACRO_PLAY = (8 << 12) | 3
@@ -3981,6 +3991,8 @@ def run():
         failed = True
     if not test_structured_format(root):
         failed = True
+    if not test_run_command(root):
+        failed = True
     if not test_auto_complete(root):
         failed = True
     if not test_associated_commands(root):
@@ -3995,7 +4007,7 @@ def run():
           "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + "
           "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + UDL + 暗色模式 + "
           "宏 + 文件夹工作区 + 函数列表 + 导出与打印 + 插件宿主 + JSON/XML 格式化 + "
-          "自动完成 + 文件关联 + 绿色打包）")
+          "运行命令 + 自动完成 + 文件关联 + 绿色打包）")
     return 0
 
 
@@ -4145,6 +4157,240 @@ def test_structured_format(root):
 
     print("  JSON/XML 格式化：美化与压缩结果正确（值一个字节没动）、一次撤销回到原文、"
           "混合内容整段原样、非法内容弹说明且文档未改动")
+    return True
+
+
+def test_run_command(root):
+    """运行命令（F5）：变量真的展开了、输出真的收进新文档、存的命令真的能从文件读回来。
+
+    这一段刻意**不**只看"命令发出去了"：每条命令都要求出现真实证据——落盘的 side.txt
+    里有展开后的字面量、输出文档里有命令自己打印的那一行。变量展开错了、工作目录不对、
+    捕获管道接错，这三种失败都只会让证据消失，不会让断言"看起来还行"。
+    """
+    work = os.path.join(root, "build", "run_test")
+    os.makedirs(work, exist_ok=True)
+    cfg = os.path.join(root, "build", "bin", "config")
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    shortcuts = os.path.join(cfg, "shortcuts.xml")
+
+    def clean_config():
+        for name in ("config.xml", "session.xml", "shortcuts.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    def open_dialog(window, command, capture):
+        """发 F5、填命令行、设好捕获开关；返回对话框句柄（没等到就是 None）。"""
+        user32.PostMessageW(window, WM_COMMAND, CMD_RUN_DIALOG, 0)
+        dialog = None
+        deadline = time.time() + 8.0
+        while time.time() < deadline:
+            dialog = user32.FindWindowW(RUN_DIALOG_CLASS, None)
+            if dialog:
+                break
+            time.sleep(0.2)
+        if not dialog:
+            return None
+        time.sleep(0.3)
+        set_text(dialog, RUN_COMBO, command)
+        send_bounded(user32.GetDlgItem(dialog, RUN_CAPTURE), BM_SETCHECK, 1 if capture else 0, 0)
+        return dialog
+
+    def wait_dialog_gone(timeout=10.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not user32.FindWindowW(RUN_DIALOG_CLASS, None):
+                return True
+            time.sleep(0.2)
+        return False
+
+    def wait_output(window, needle, timeout=25.0):
+        """等"捕获型命令跑完并开出了输出文档"：返回那份文档的全文，等不到返回 None。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            scinti = visible_scintilla(window)
+            if scinti is not None:
+                text = scinti_text(scinti)
+                if needle in text and "[运行结束：退出码" in text:
+                    return text
+            time.sleep(0.3)
+        return None
+
+    sample = os.path.join(work, "sample.txt")
+    with open(sample, "w", encoding="utf-8", newline="") as handle:
+        handle.write("hello\n")
+    side = os.path.join(work, "side.txt")
+    if os.path.exists(side):
+        os.remove(side)
+
+    clean_config()
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", sample], cwd=root)
+    window = wait_for_main_window("notepadcc - sample.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None or scinti_text(scinti) != "hello\n":
+            print(f"  FAIL: 初始内容不对 {scinti_text(scinti)!r}")
+            return False
+
+        # 1) 先按一次真的 F5（走加速键表那一层），核对对话框弹出来了
+        user32.PostMessageW(window, WM_KEYDOWN, VK_F5, 0)
+        dialog = None
+        deadline = time.time() + 6.0
+        while time.time() < deadline:
+            dialog = user32.FindWindowW(RUN_DIALOG_CLASS, None)
+            if dialog:
+                break
+            time.sleep(0.2)
+        if not dialog:
+            print("  FAIL: 按 F5 应当弹出运行命令对话框")
+            return False
+        user32.PostMessageW(dialog, WM_COMMAND, RUN_CANCEL, 0)
+        if not wait_dialog_gone():
+            print("  FAIL: 取消之后对话框没关掉")
+            return False
+
+        # 2) 不勾捕获：变量展开 + 工作目录（= 当前文件所在目录）
+        dialog = open_dialog(window, "cmd /c echo $(NAME_PART)-$(CURRENT_LINE) > side.txt", False)
+        if not dialog:
+            print("  FAIL: 第二次 F5 没有弹出对话框")
+            return False
+        user32.PostMessageW(dialog, WM_COMMAND, RUN_GO, 0)
+        if not wait_dialog_gone():
+            print("  FAIL: 点了运行之后对话框没关掉")
+            return False
+        deadline = time.time() + 20.0
+        while time.time() < deadline and not os.path.exists(side):
+            time.sleep(0.3)
+        if not os.path.exists(side):
+            print("  FAIL: 命令没有跑起来（build\\run_test\\side.txt 没出现）")
+            return False
+        with open(side, "r", encoding="utf-8", errors="replace") as handle:
+            produced = handle.read().strip()
+        if produced != "sample-1":
+            print(f"  FAIL: 变量展开不对，side.txt 里是 {produced!r}（期望 'sample-1'）")
+            return False
+        if len(visible_scintillas_sorted(window)) != 1:
+            print("  FAIL: 不勾选捕获时不该多出一个输出文档")
+            return False
+
+        # 3) 勾上捕获：输出进新文档，末尾带退出码
+        dialog = open_dialog(window, "cmd /c echo 运行输出-$(FILE_NAME)", True)
+        if not dialog:
+            print("  FAIL: 第三次 F5 没有弹出对话框")
+            return False
+        user32.PostMessageW(dialog, WM_COMMAND, RUN_GO, 0)
+        if not wait_dialog_gone():
+            print("  FAIL: 对话框没关掉")
+            return False
+        text = wait_output(window, "运行输出-sample.txt")
+        if text is None:
+            print("  FAIL: 没等到带结果的运行输出文档（输出没进新文档？）")
+            return False
+        if "[运行结束：退出码 0" not in text:
+            print(f"  FAIL: 输出文档末尾应当有退出码说明\n{text!r}")
+            return False
+        if user32.SendMessageW(visible_scintilla(window), SCI_GETMODIFY, 0, 0) != 0:
+            print("  FAIL: 刚生成的输出文档不该是「已修改」状态")
+            return False
+
+        # 4) 保存成命名命令：写进 shortcuts.xml，用户命令不进 <InternalCommands>
+        dialog = open_dialog(window, "cmd /c echo saved-$(CURRENT_LINE)", True)
+        if not dialog:
+            print("  FAIL: 第四次 F5 没有弹出对话框")
+            return False
+        user32.PostMessageW(dialog, WM_COMMAND, RUN_SAVE, 0)
+        time.sleep(0.6)
+        name_dialog = user32.FindWindowW(MACRO_NAME_CLASS, None)
+        if not name_dialog:
+            print("  FAIL: 点「保存为命令」之后应当弹出取名框")
+            return False
+        set_text(name_dialog, MACRO_EDIT, "我的命令")
+        time.sleep(0.3)
+        if not close_macro_dialog(MACRO_NAME_CLASS):
+            print("  FAIL: 取名框点不掉")
+            return False
+        if not wait_dialog_gone():
+            print("  FAIL: 保存之后运行命令对话框没关掉")
+            return False
+        time.sleep(0.8)
+        if not os.path.exists(shortcuts):
+            print(f"  FAIL: 保存命令之后没有写出 {shortcuts}")
+            return False
+        with open(shortcuts, "r", encoding="utf-8", errors="replace") as handle:
+            saved = handle.read()
+        if "<UserDefinedCommands>" not in saved or 'name="我的命令"' not in saved:
+            print(f"  FAIL: shortcuts.xml 里没有这条运行命令\n{saved[-800:]}")
+            return False
+        if "cmd /c echo saved-$(CURRENT_LINE)" not in saved:
+            print(f"  FAIL: 命令行应当按原文（含变量）存进文件\n{saved[-800:]}")
+            return False
+        if 'name="run.我的命令"' in saved:
+            print(f"  FAIL: 用户定义的命令不该出现在 <InternalCommands> 里\n{saved[-800:]}")
+            return False
+
+        # 5) 立刻从「运行」菜单执行这条命令
+        user32.PostMessageW(window, WM_COMMAND, CMD_RUN_FIRST_SAVED, 0)
+        if wait_output(window, "saved-1") is None:
+            print("  FAIL: 从菜单执行刚保存的运行命令没有效果")
+            return False
+
+        # 6) 起不来的命令要弹说明，而且不该多出一个空的输出文档
+        before = len(visible_scintillas_sorted(window))
+        dialog = open_dialog(window, "definitely-not-here-xyz-1234 --help", True)
+        if not dialog:
+            print("  FAIL: 第五次 F5 没有弹出对话框")
+            return False
+        user32.PostMessageW(dialog, WM_COMMAND, RUN_GO, 0)
+        if not wait_dialog_gone():
+            print("  FAIL: 对话框没关掉")
+            return False
+        if not dismiss_dialog("运行命令", IDOK, timeout=8.0):
+            print("  FAIL: 启动失败应当弹出说明")
+            return False
+        time.sleep(0.6)
+        if len(visible_scintillas_sorted(window)) != before:
+            print("  FAIL: 启动失败不该多出一个输出文档")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    # 7) 重启：那条命令应当从 shortcuts.xml 读回来，菜单里照样能点
+    session = os.path.join(cfg, "session.xml")
+    if os.path.exists(session):
+        os.remove(session)
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", sample], cwd=root)
+    window = wait_for_main_window("notepadcc - sample.txt")
+    try:
+        if not window:
+            print("  FAIL: 重启后找不到主窗口")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_RUN_FIRST_SAVED, 0)
+        if wait_output(window, "saved-1") is None:
+            print("  FAIL: 重启之后从菜单执行那条运行命令没有效果"
+                  "（命令没有从 shortcuts.xml 读回来？）")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        for name in ("config.xml", "session.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    print("  运行命令：F5 弹窗、变量展开与工作目录正确、捕获输出进新文档、"
+          "保存成命名命令能立刻用也能重启后读回来、起不来的命令被挡下且不留空文档")
     return True
 
 

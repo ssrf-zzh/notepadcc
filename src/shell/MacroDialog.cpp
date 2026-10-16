@@ -315,6 +315,26 @@ bool AskMacroName(HWND owner, const std::wstring& suggested, std::wstring& out) 
     return true;
 }
 
+bool AskRunCommandName(HWND owner, const std::wstring& suggested, std::wstring& out) {
+    DialogSpec spec;
+    spec.windowClass = kNameClass;
+    spec.title = L"保存运行命令";
+    spec.prompt = L"给这条命令起个名字（同名会覆盖已有的命令）：";
+    spec.value = suggested;
+    spec.hint = L"名字会出现在「运行」菜单里，也可以像别的命令一样绑快捷键。";
+    spec.maxLength = 60;
+    SmallDialog dialog;
+    if (!dialog.Show(owner, spec)) {
+        return false;
+    }
+    if (spec.value.empty()) {
+        ::MessageBoxW(owner, L"名字不能是空的。", L"保存运行命令", MB_ICONWARNING);
+        return false;
+    }
+    out = spec.value;
+    return true;
+}
+
 bool AskMacroRunOptions(HWND owner, const std::wstring& macroName, MacroRunOptions& out) {
     DialogSpec spec;
     spec.windowClass = kRunClass;

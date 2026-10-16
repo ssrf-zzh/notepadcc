@@ -4885,6 +4885,260 @@ int main() {
         }
     }
 
+    Section("运行命令（变量展开 / UserDefinedCommands 持久化）");
+    {
+        using npcc::core::ExpandRunCommand;
+        using npcc::core::ReadRunCommandsXml;
+        using npcc::core::RunCommandDef;
+        using npcc::core::RunContext;
+
+        RunContext context;
+        context.fullPath = L"D:\\work\\demo\\a.tar.gz";
+        context.appDirectory = L"C:\\Tools\\notepadcc";
+        context.currentWord = L"Widget";
+        context.currentLine = 42;
+        context.encodingName = L"UTF-8-BOM";
+        context.eolName = L"CRLF";
+
+        // ---- 变量展开 ----
+        CheckWide(ExpandRunCommand(L"echo $(FULL_CURRENT_PATH)", context),
+                  L"echo D:\\work\\demo\\a.tar.gz", "$(FULL_CURRENT_PATH) 是完整路径");
+        CheckWide(ExpandRunCommand(L"$(CURRENT_DIRECTORY)", context), L"D:\\work\\demo",
+                  "$(CURRENT_DIRECTORY) 不带结尾分隔符");
+        CheckWide(ExpandRunCommand(L"$(FILE_NAME)", context), L"a.tar.gz",
+                  "$(FILE_NAME) 带扩展名");
+        CheckWide(ExpandRunCommand(L"$(NAME_PART)", context), L"a.tar",
+                  "$(NAME_PART) 去掉最后一个扩展名");
+        CheckWide(ExpandRunCommand(L"$(EXT_PART)", context), L"gz", "$(EXT_PART) 不带点");
+        CheckWide(ExpandRunCommand(L"$(CURRENT_WORD)", context), L"Widget", "$(CURRENT_WORD)");
+        CheckWide(ExpandRunCommand(L"$(CURRENT_LINE)", context), L"42",
+                  "$(CURRENT_LINE) 是 1 基行号");
+        CheckWide(ExpandRunCommand(L"$(NPP_DIRECTORY)", context), L"C:\\Tools\\notepadcc",
+                  "$(NPP_DIRECTORY) 是程序目录");
+        CheckWide(ExpandRunCommand(L"$(CURRENT_ENCODING)", context), L"UTF-8-BOM",
+                  "$(CURRENT_ENCODING)");
+        CheckWide(ExpandRunCommand(L"$(CURRENT_EOL)", context), L"CRLF", "$(CURRENT_EOL)");
+        CheckWide(ExpandRunCommand(L"$(file_name)", context), L"a.tar.gz",
+                  "变量名大小写不敏感");
+        CheckWide(ExpandRunCommand(L"gcc \"$(FULL_CURRENT_PATH)\" -o out.exe", context),
+                  L"gcc \"D:\\work\\demo\\a.tar.gz\" -o out.exe", "命令中间的变量照样展开");
+        // 认不出来的变量原样留着：换成空串会让命令悄悄跑错目标，比报错难查得多
+        CheckWide(ExpandRunCommand(L"$(UNKNOWN) $(FILE_NAME)", context), L"$(UNKNOWN) a.tar.gz",
+                  "不认识的变量原样保留");
+        CheckWide(ExpandRunCommand(L"echo $(FILE_NAME", context), L"echo $(FILE_NAME",
+                  "少了右括号时原样保留");
+        CheckWide(ExpandRunCommand(L"echo $HOME $$ $", context), L"echo $HOME $$ $",
+                  "单个 $ 不动");
+        CheckWide(ExpandRunCommand(L"", context), L"", "空命令行返回空");
+        {
+            // 未保存的文档：路径类变量全空（与对标产品一致）
+            RunContext blank;
+            blank.appDirectory = L"C:\\Tools\\notepadcc";
+            CheckWide(ExpandRunCommand(L"[$(FULL_CURRENT_PATH)]", blank), L"[]",
+                      "未保存的文档没有完整路径");
+            CheckWide(ExpandRunCommand(L"[$(CURRENT_DIRECTORY)]", blank), L"[]",
+                      "未保存的文档没有目录");
+            CheckWide(ExpandRunCommand(L"[$(NAME_PART)]", blank), L"[]",
+                      "没有文件名就没有名字部分");
+            CheckWide(ExpandRunCommand(L"$(NPP_DIRECTORY)", blank), L"C:\\Tools\\notepadcc",
+                      "没有文档也能拿到程序目录");
+        }
+        {
+            RunContext plain;
+            plain.fullPath = L"C:\\t\\README";
+            CheckWide(ExpandRunCommand(L"$(NAME_PART)|$(EXT_PART)", plain), L"README|",
+                      "没有扩展名时 NAME_PART 是整名、EXT_PART 为空");
+            RunContext dotted;
+            dotted.fullPath = L"C:\\t\\.gitignore";
+            CheckWide(ExpandRunCommand(L"$(NAME_PART)|$(EXT_PART)", dotted), L".gitignore|",
+                      "以点开头的文件名不切成空名字");
+        }
+
+        // ---- 写出去再读回来（走完整的转义路径） ----
+        RunCommandDef sample;
+        sample.name = L"编译并运行";
+        sample.command = L"gcc \"$(FULL_CURRENT_PATH)\" -o run.exe && run.exe > out.txt";
+        sample.modifiers = npcc::core::kModCtrl | npcc::core::kModAlt;
+        sample.keyCode = 'B';
+        sample.captureOutput = false;
+        RunCommandDef plain;
+        plain.name = L"打开所在目录";
+        plain.command = L"explorer \"$(CURRENT_DIRECTORY)\"";
+        {
+            npcc::infra::XmlDocument document;
+            npcc::infra::XmlElementPtr root = document.CreateRoot(L"NotepadPlusCompat");
+            npcc::core::AppendRunCommandsXml(*root, {sample, plain});
+            const std::string xml = document.ToUtf8();
+            Check(xml.find("UserDefinedCommands") != std::string::npos,
+                  "写出了 <UserDefinedCommands>");
+            Check(xml.find("&amp;&amp;") != std::string::npos, "命令行里的 & 被转义");
+            Check(xml.find("&gt;") != std::string::npos, "命令行里的 > 被转义");
+
+            npcc::infra::XmlDocument parsed;
+            std::wstring parseError;
+            Check(npcc::infra::XmlDocument::Parse(xml, parsed, &parseError),
+                  "写出去的 XML 能被自己读回来");
+            std::vector<std::wstring> warnings;
+            const std::vector<RunCommandDef> back = ReadRunCommandsXml(*parsed.Root(), warnings);
+            Check(back.size() == 2, "两条命令都读回来了");
+            Check(warnings.empty(), "正常内容不产生警告");
+            if (back.size() == 2) {
+                CheckWide(back[0].name, sample.name, "名字往返一致");
+                CheckWide(back[0].command, sample.command, "命令行往返一致（含引号与重定向）");
+                Check(back[0].modifiers == (npcc::core::kModCtrl | npcc::core::kModAlt),
+                      "修饰键往返一致");
+                Check(back[0].keyCode == 'B', "键码往返一致");
+                Check(!back[0].captureOutput, "capture=no 往返一致");
+                Check(back[1].keyCode == 0, "没绑快捷键时 Key 是 0");
+                Check(back[1].captureOutput, "没写 capture 时按「捕获」处理");
+            }
+            // 一条都没有时不写空壳，免得文件里多出个没用的节
+            npcc::infra::XmlDocument emptier;
+            npcc::infra::XmlElementPtr emptyRoot = emptier.CreateRoot(L"NotepadPlusCompat");
+            npcc::core::AppendRunCommandsXml(*emptyRoot, {});
+            Check(emptier.ToUtf8().find("UserDefinedCommands") == std::string::npos,
+                  "没有命令时不写空节");
+        }
+        {
+            // 坏记录只跳过自己，不让整份文件失效
+            const std::string xml =
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<NotepadPlusCompat>\n"
+                "  <UserDefinedCommands>\n"
+                "    <Command Ctrl=\"yes\" Key=\"66\">没有名字</Command>\n"
+                "    <Command name=\"空的\"></Command>\n"
+                "    <Command name=\"好的\">echo ok</Command>\n"
+                "  </UserDefinedCommands>\n"
+                "</NotepadPlusCompat>\n";
+            npcc::infra::XmlDocument document;
+            std::wstring parseError;
+            Check(npcc::infra::XmlDocument::Parse(xml, document, &parseError), "解析手工写的文件");
+            std::vector<std::wstring> warnings;
+            const std::vector<RunCommandDef> back = ReadRunCommandsXml(*document.Root(), warnings);
+            Check(back.size() == 1, "坏记录被跳过，好的留下");
+            Check(warnings.size() == 2, "两条坏记录各给一条警告");
+            if (back.size() == 1) {
+                CheckWide(back[0].name, L"好的", "留下的是那一条好的");
+            }
+        }
+
+        // ---- shortcuts.xml 端到端 ----
+        npcc::infra::InitializePaths(true);
+        const std::filesystem::path shortcutPath = npcc::core::ShortcutStore::Path();
+        std::error_code shortcutEc;
+        std::filesystem::remove(shortcutPath, shortcutEc);
+        {
+            const std::string custom =
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<NotepadPlusCompat schemaVersion=\"1\">\n"
+                "  <UserDefinedCommands>\n"
+                "    <Command name=\"跑一下\" Ctrl=\"yes\" Alt=\"no\" Shift=\"no\" Key=\"66\" "
+                "capture=\"no\">cmd /c echo hi</Command>\n"
+                "  </UserDefinedCommands>\n"
+                "</NotepadPlusCompat>\n";
+            Check(WriteFileDirect(shortcutPath, custom), "写入带运行命令的 shortcuts.xml");
+            npcc::core::ShortcutStore store;
+            npcc::core::CommandRegistry registry;
+            std::vector<std::wstring> warnings;
+            std::wstring error;
+            Check(store.Load(registry, &error, &warnings), "加载成功");
+            Check(error.empty(), "正常文件不报错");
+            Check(warnings.empty(), "正常文件不产生警告");
+            Check(store.RunCommands().size() == 1, "读出一条运行命令");
+            if (store.RunCommands().size() == 1) {
+                const RunCommandDef& def = store.RunCommands()[0];
+                CheckWide(def.name, L"跑一下", "名字读对了");
+                CheckWide(def.command, L"cmd /c echo hi", "命令行读对了");
+                Check(def.modifiers == npcc::core::kModCtrl, "修饰键读对了");
+                Check(def.keyCode == 'B', "快捷键读对了");
+                Check(!def.captureOutput, "capture=\"no\" 读对了");
+            }
+        }
+        {
+            // 保存：运行命令进 <UserDefinedCommands>，不进 <InternalCommands>；
+            // 内置的"运行…"（没有 kCmdUserDefined）照旧进 <InternalCommands>
+            npcc::core::ShortcutStore store;
+            store.SetRunCommands({sample, plain});
+            npcc::core::CommandRegistry registry;
+            const npcc::core::CmdId first =
+                npcc::core::MakeCmdId(static_cast<uint8_t>(npcc::core::CmdCategory::Run),
+                                      static_cast<uint16_t>(npcc::core::kRunCommandBase));
+            for (std::size_t index = 0; index < 2; ++index) {
+                npcc::core::Command command;
+                command.id = npcc::core::MakeCmdId(
+                    static_cast<uint8_t>(npcc::core::CmdCategory::Run),
+                    static_cast<uint16_t>(npcc::core::kRunCommandBase + index));
+                command.category = npcc::core::CmdCategory::Run;
+                command.key = L"run." + store.RunCommands()[index].name;
+                command.text = store.RunCommands()[index].name;
+                command.flags = npcc::core::kCmdUserDefined;
+                registry.Register(command);
+            }
+            const npcc::core::CmdId dialogCommand =
+                AddTestCommand(registry, npcc::core::CmdCategory::Run, L"cmd.run.dialog",
+                               L"运行(&R)...");
+            registry.AssignShortcut(dialogCommand, npcc::core::kModNone, VK_F5);
+            // 与外壳一致：文件里写的快捷键在注册命令时绑进注册表
+            registry.BindShortcut(first, sample.modifiers, sample.keyCode, true);
+            store.SyncRunCommandShortcuts(registry);
+            std::wstring error;
+            Check(store.Save(registry, &error), "保存 shortcuts.xml 成功");
+            const npcc::io::ReadResult read = npcc::io::ReadWholeFile(shortcutPath.wstring());
+            Check(read.ok, "读回 shortcuts.xml");
+            const std::string& text = read.bytes;
+            Check(text.find("<UserDefinedCommands>") != std::string::npos,
+                  "写出了 <UserDefinedCommands>");
+            Check(text.find("run.编译并运行") == std::string::npos,
+                  "用户定义的命令不进 <InternalCommands>");
+            Check(text.find("cmd.run.dialog") != std::string::npos,
+                  "内置的运行命令照旧进 <InternalCommands>");
+            Check(text.find("Key=\"116\"") != std::string::npos, "F5(116) 写进了文件");
+            Check(text.find("capture=\"yes\"") != std::string::npos, "capture 属性写出去了");
+            Check(text.find("Ctrl=\"yes\" Alt=\"yes\"") != std::string::npos,
+                  "命令的快捷键按 Ctrl/Alt/Shift 分开写");
+        }
+        {
+            // 用户定义的命令如果（手工）出现在 <InternalCommands> 里，要忽略并给警告：
+            // 真实启动时注册发生在读文件之后，那条记录根本认不出命令来，
+            // 静默丢掉会让用户以为"快捷键没生效"是别的原因
+            const std::string mixed =
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<NotepadPlusCompat schemaVersion=\"1\">\n"
+                "  <InternalCommands>\n"
+                "    <Shortcut name=\"cmd.run.dialog\" Ctrl=\"no\" Alt=\"no\" Shift=\"no\" "
+                "Key=\"116\"/>\n"
+                "    <Shortcut name=\"run.编译并运行\" Ctrl=\"yes\" Alt=\"no\" Shift=\"no\" "
+                "Key=\"66\"/>\n"
+                "  </InternalCommands>\n"
+                "</NotepadPlusCompat>\n";
+            Check(WriteFileDirect(shortcutPath, mixed), "写入混有用户命令的 shortcuts.xml");
+            npcc::core::CommandRegistry registry;
+            const npcc::core::CmdId dialogCommand =
+                AddTestCommand(registry, npcc::core::CmdCategory::Run, L"cmd.run.dialog",
+                               L"运行(&R)...");
+            // 模拟外壳注册出来的用户命令（真实流程里它也是带这个标志的）
+            npcc::core::Command userCommand;
+            userCommand.id = npcc::core::MakeCmdId(
+                static_cast<uint8_t>(npcc::core::CmdCategory::Run),
+                static_cast<uint16_t>(npcc::core::kRunCommandBase));
+            userCommand.category = npcc::core::CmdCategory::Run;
+            userCommand.key = L"run.编译并运行";
+            userCommand.text = L"编译并运行";
+            userCommand.flags = npcc::core::kCmdUserDefined;
+            registry.Register(userCommand);
+
+            npcc::core::ShortcutStore store;
+            std::vector<std::wstring> warnings;
+            std::wstring error;
+            Check(store.Load(registry, &error, &warnings), "加载成功");
+            Check(!warnings.empty(), "用户定义的命令出现在 <InternalCommands> 里要给出警告");
+            Check(registry.BindingsOf(userCommand.id).empty(), "那一条被忽略，没有建立绑定");
+            Check(registry.ResolveShortcut(npcc::core::kModNone, VK_F5) == dialogCommand,
+                  "同文件里的内置命令记录照常生效");
+        }
+        std::filesystem::remove(shortcutPath, shortcutEc);
+    }
+
     Section("JSON / XML 格式化");
     {
         using npcc::core::FormatJson;

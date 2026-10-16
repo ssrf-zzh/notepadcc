@@ -174,6 +174,21 @@ void EditView::SetText(std::string_view bytes) const {
     Send(SCI_SETTEXT, 0, reinterpret_cast<intptr_t>(owned.c_str()));
 }
 
+std::string EditView::WordAtCaret() const {
+    if (hwnd_ == nullptr) {
+        return {};
+    }
+    const int32_t caret = static_cast<int32_t>(Send(SCI_GETCURRENTPOS));
+    // 单词字符集用 Scintilla 自己认的那套（SCI_WORDSTARTPOSITION 的第 3 个参数为 true
+    // 表示"按 SCI_SETWORDCHARS 设的字符集算"），这样与双击选词、自动完成的说法一致
+    const int32_t start = static_cast<int32_t>(Send(SCI_WORDSTARTPOSITION, caret, 1));
+    const int32_t end = static_cast<int32_t>(Send(SCI_WORDENDPOSITION, caret, 1));
+    if (end <= start) {
+        return {};
+    }
+    return TextRange(start, end);
+}
+
 std::string EditView::TextRange(int32_t start, int32_t end) const {
     if (end <= start) {
         return {};

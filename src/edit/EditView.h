@@ -128,6 +128,9 @@ public:
     void    SetFirstVisibleLine(int32_t line) const;
     int32_t FirstVisibleLine() const;
     int32_t CaretPosition() const;
+    // 光标处的词（按 Scintilla 的单词字符定义）。没有词（点在空白上）返回空串。
+    // 运行命令的 $(CURRENT_WORD) 用它（设计文档 2.13 第 3 条）。
+    std::string WordAtCaret() const;
     void    ScrollToLine(int32_t line) const;
     int64_t PositionFromLine(int32_t line) const;
 

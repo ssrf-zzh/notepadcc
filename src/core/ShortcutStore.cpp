@@ -158,6 +158,9 @@ bool ShortcutStore::Load(CommandRegistry& registry, std::wstring* error,
             return 0;
         },
         sink);
+    // 运行命令同样顺手读进来。它们的快捷键跟着 <Command> 走，由外壳注册命令时绑定
+    // （那时命令才存在），所以这里不往注册表里写东西。
+    runCommands_ = ReadRunCommandsXml(*root, sink);
 
     const infra::XmlElement* section = root->Child(kInternalSection);
     if (section == nullptr) {
@@ -174,6 +177,13 @@ bool ShortcutStore::Load(CommandRegistry& registry, std::wstring* error,
         }
         const Command* command = ResolveCommand(registry, *node, sink);
         if (command == nullptr) {
+            continue;
+        }
+        if ((command->flags & kCmdUserDefined) != 0) {
+            // 宏与运行命令的快捷键记在它们自己的元素上（见头文件里的理由）
+            sink.push_back(command->key +
+                           L"：这是用户定义的命令，快捷键要写在 <Macros> / "
+                           L"<UserDefinedCommands> 里，<InternalCommands> 里的这一条已忽略");
             continue;
         }
         const CmdId id = command->id;
@@ -223,6 +233,9 @@ bool ShortcutStore::Save(const CommandRegistry& registry, std::wstring* error) c
         if ((command.flags & kCmdHidden) != 0) {
             continue;   // 隐藏命令不进文件
         }
+        if ((command.flags & kCmdUserDefined) != 0) {
+            continue;   // 宏与运行命令的快捷键记在它们自己的元素上（见头文件）
+        }
         const std::vector<ShortcutBinding> bindings = registry.BindingsOf(command.id);
         if (bindings.empty()) {
             // 明确记成"不绑定"，否则下次读的时候默认快捷键会复活
@@ -243,6 +256,8 @@ bool ShortcutStore::Save(const CommandRegistry& registry, std::wstring* error) c
     }
     // 宏跟着一起写：这份文件只有一个写者，改快捷键这条路径不会把宏抹掉
     AppendMacrosXml(*root, macros_);
+    // 运行命令同理
+    AppendRunCommandsXml(*root, runCommands_);
     return io::SaveXmlFile(Path().wstring(), document, error);
 }
 
@@ -255,6 +270,34 @@ std::size_t ShortcutStore::AddOrReplaceMacro(Macro macro) {
     }
     macros_.push_back(std::move(macro));
     return macros_.size() - 1;
+}
+
+std::size_t ShortcutStore::AddOrReplaceRunCommand(RunCommandDef command) {
+    for (std::size_t index = 0; index < runCommands_.size(); ++index) {
+        if (runCommands_[index].name == command.name) {
+            runCommands_[index] = std::move(command);   // 命令名就是它的标识
+            return index;
+        }
+    }
+    runCommands_.push_back(std::move(command));
+    return runCommands_.size() - 1;
+}
+
+void ShortcutStore::SyncRunCommandShortcuts(const CommandRegistry& registry) {
+    for (std::size_t index = 0; index < runCommands_.size(); ++index) {
+        // 命令 ID 的算法与 MainWindow::RegisterRunCommands 一致：
+        // 运行类（9）里第 128 号起按顺序排
+        const CmdId id = MakeCmdId(static_cast<uint8_t>(CmdCategory::Run),
+                                   static_cast<uint16_t>(kRunCommandBase + index));
+        const std::vector<ShortcutBinding> bindings = registry.BindingsOf(id);
+        if (bindings.empty()) {
+            runCommands_[index].modifiers = kModNone;
+            runCommands_[index].keyCode = 0;
+            continue;
+        }
+        runCommands_[index].modifiers = bindings.front().modifiers;
+        runCommands_[index].keyCode = bindings.front().keyCode;
+    }
 }
 
 }  // namespace npcc::core

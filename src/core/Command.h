@@ -46,6 +46,11 @@ enum CmdFlags : uint32_t {
     kCmdNeedsWritable = 1u << 3,   // 需要可写缓冲区
     kCmdRecordable    = 1u << 4,   // 可被宏录制
     kCmdHidden        = 1u << 5,   // 不出现在菜单，仅供快捷键/插件调用
+    // 用户自己造出来的命令（宏、运行命令）：它的快捷键记在**自己那个 XML 元素**上
+    // （<Macro Ctrl=…> / <Command Ctrl=…>），不进 <InternalCommands>。
+    // 原因是加载顺序：<InternalCommands> 是按命令键查注册表的，而这些命令要到外壳
+    // 注册之后才存在，写在那儿下次启动会认不出来、绑定被丢掉。
+    kCmdUserDefined   = 1u << 6,
 };
 
 struct CmdContext {

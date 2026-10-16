@@ -9,6 +9,7 @@
 #include "core/CommandRegistry.h"
 #include "core/DocumentManager.h"
 #include "core/Macro.h"
+#include "core/RunCommand.h"
 #include "core/Messages.h"
 #include "core/ExportHtml.h"
 #include "core/ShortcutStore.h"
@@ -137,6 +138,26 @@ private:
     void RegisterMacroCommands();
     void RefreshMacroMenuEntries();
     void FlushRecordingToStore();   // 停止录制 → 取名 → 存文件 → 注册菜单
+    // ---- 运行命令（设计文档 2.13 第 3 条）----
+    void CommandShowRunDialog();                         // F5：填一条命令行
+    void CommandRunSaved(std::size_t index);             // 跑一条已保存的命令
+    core::RunContext MakeRunContext() const;             // 变量展开的输入
+    void ExecuteRunCommand(std::wstring_view command, bool captureOutput);
+    void RegisterRunCommands();
+    bool PollRunCommand();                               // 后台命令跑完了吗
+    void FinishRunCommand();                             // 收尾：读输出 → 开文档
+    void CancelPendingRun(bool deleteOutput);            // 退出时清理
+    // 正在跑的那条命令（捕获输出时才有：不捕获就是"丢出去不管"）
+    struct PendingRun {
+        HANDLE        process = nullptr;
+        std::wstring  outputPath;      // 捕获时的临时文件
+        std::uint64_t startedMs = 0;
+    };
+    PendingRun   pendingRun_;
+    bool         pendingRunActive_ = false;
+    std::wstring lastRunCommand_;   // 下次打开 F5 时预填
+    int          runOutputCounter_ = 0;
+    int          runTempCounter_ = 0;
     // ---- 文件夹工作区（设计文档 2.11）----
     void CommandOpenWorkspace();      // 选一个目录当工作区
     void CommandCloseWorkspace();

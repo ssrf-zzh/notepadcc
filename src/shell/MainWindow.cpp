@@ -6,8 +6,10 @@
 #include <windowsx.h>   // GET_X_LPARAM / GET_Y_LPARAM
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <cwchar>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <utility>
@@ -28,10 +30,12 @@
 #include "shell/ShortcutDialog.h"
 #include "shell/StyleConfigDialog.h"
 #include "shell/MacroDialog.h"
+#include "shell/RunCommandDialog.h"
 #include "core/ExportHtml.h"
 #include "core/ExportRtf.h"
 #include "core/JsonFormat.h"
 #include "core/XmlFormat.h"
+#include "core/RunCommand.h"
 #include "core/PrintText.h"
 #include "core/PrintPaging.h"
 #include "shell/PluginAdminDialog.h"
@@ -50,6 +54,7 @@ namespace {
 constexpr UINT_PTR kTimerAutosave = 1;
 constexpr UINT_PTR kTimerCrashTest = 2;
 constexpr UINT_PTR kTimerFunctionList = 3;   // 函数列表的节流定时器（一次性）
+constexpr UINT_PTR kTimerRunCommand = 4;     // 轮询后台命令有没有跑完（捕获输出时才用）
 
 enum : npcc::core::CmdId {
     kCmdFileNew     = npcc::core::MakeCmdId(1, 1),
@@ -157,6 +162,8 @@ enum : npcc::core::CmdId {
     kCmdToolFormatJson      = npcc::core::MakeCmdId(14, 32),
     kCmdToolMinifyJson      = npcc::core::MakeCmdId(14, 33),
     kCmdToolFormatXml       = npcc::core::MakeCmdId(14, 34),
+    // 运行类（9）：第 1 号是 F5 那个对话框，第 kRunCommandBase 号起是用户存的命令
+    kCmdRunDialog           = npcc::core::MakeCmdId(9, npcc::core::kRunCommandDialogIndex),
     kCmdEditAutoComplete = npcc::core::MakeCmdId(2, 33),
 
     kCmdWindowNext = npcc::core::MakeCmdId(11, 1),
@@ -338,6 +345,8 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             // 宏也要在菜单建出来之前注册好，否则宏菜单里空空如也
             // （读文件时的警告由 ShortcutStore 自己记日志，这里不重复）
             RegisterMacroCommands();
+            // 运行命令同理：存过的命令要变成"运行"菜单里的条目才能点
+            RegisterRunCommands();
             // 函数列表面板：开关记在配置里
             functionListVisible_ = config_.General().functionListVisible;
             functionListPanel_.SetVisible(functionListVisible_);
@@ -604,6 +613,15 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
                 StartFunctionParse();   // 里面会 KillTimer：这是一次性定时器
                 return 0;
             }
+            if (wParam == kTimerRunCommand) {
+                // 命令跑完了就收尾（读输出、开文档、关定时器）。
+                // 用定时器轮询而不是后台线程：等待与"拿到结果"都在 UI 线程上做，
+                // 没有跨线程的所有权问题，退出时也不必操心线程还活着
+                if (PollRunCommand()) {
+                    FinishRunCommand();
+                }
+                return 0;
+            }
             break;
         case WM_DROPFILES: {
             const HDROP drop = reinterpret_cast<HDROP>(wParam);
@@ -633,6 +651,9 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             }
             // 会话要在关闭文档之前取快照——CloseAllDocuments 之后就没得记了
             const core::SessionSnapshot snapshot = BuildSessionSnapshot();
+            // 还在跑的捕获型命令：不再等它（子进程由用户自己收），临时输出文件尽量删掉。
+            // 一定要在窗口销毁之前做——定时器与消息都挂在这个窗口上
+            CancelPendingRun(true);
             if (CloseAllDocuments()) {
                 // 正常退出：未保存的内容已经逐一问过了，快照不该留到下次启动再问一遍
                 ::KillTimer(hwnd_, kTimerAutosave);
@@ -1085,6 +1106,11 @@ void MainWindow::RegisterCommands() {
         L"插件管理器(&G)...", core::kCmdNone,
         [this](const CmdContext&) { CommandPluginManager(); });
 
+    // ---- 运行 ----
+    // 用户自己存的那些命令由 RegisterRunCommands() 在加载配置之后补上
+    add(kCmdRunDialog, CmdCategory::Run, L"cmd.run.dialog", L"运行(&R)...", core::kCmdNone,
+        [this](const CmdContext&) { CommandShowRunDialog(); });
+
     // ---- 帮助 ----
     add(kCmdHelpAbout, CmdCategory::Help, L"cmd.help.about", L"关于 notepadcc(&A)",
         core::kCmdNone, [this](const CmdContext&) { CommandAbout(); });
@@ -1168,6 +1194,8 @@ void MainWindow::RegisterCommands() {
     registry_.BindShortcut(kCmdMacroRecord, ctrlShift, 'R', true);
     registry_.BindShortcut(kCmdMacroPlayLast, ctrlShift, 'P', true);
     registry_.BindShortcut(kCmdMacroRunMultiple, ctrlShift, 'L', true);
+    // 运行命令：与对标产品一致，F5 打开"运行…"
+    registry_.BindShortcut(kCmdRunDialog, core::kModNone, VK_F5, true);
 }
 
 void MainWindow::RebuildMenu() {
@@ -3237,7 +3265,10 @@ void MainWindow::RegisterMacroCommands() {
         command.category = core::CmdCategory::Macro;
         command.key = L"macro." + macros[index].name;
         command.text = macros[index].name;
-        command.flags = core::kCmdNone;   // 宏自己不该被录进另一条宏（会套娃）
+        // 不设 kCmdRecordable：宏自己不该被录进另一条宏（会套娃）。
+        // kCmdUserDefined：它的快捷键记在 <Macro> 那个元素上，不进 <InternalCommands>
+        //（理由见 Command.h 里这个标志的说明）。
+        command.flags = core::kCmdUserDefined;
         const std::size_t captured = index;
         command.execute = [this, captured](const core::CmdContext&) { CommandRunSavedMacro(captured); };
         if (!registry_.UpdateCommand(id, command.text, command.execute)) {
@@ -3246,6 +3277,312 @@ void MainWindow::RegisterMacroCommands() {
         // 宏自带的快捷键（文件里写的）也一并生效
         if (macros[index].keyCode != 0 && macros[index].modifiers != core::kModNone) {
             registry_.BindShortcut(id, macros[index].modifiers, macros[index].keyCode, true);
+        }
+    }
+}
+
+// ---- 运行命令（设计文档 2.13 第 3 条）----
+
+namespace {
+
+// UTF-8 字节 → 宽字符（变量展开要的是宽字符）
+std::wstring FromUtf8(std::string_view text) {
+    if (text.empty()) {
+        return {};
+    }
+    const int need = ::MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
+                                           nullptr, 0);
+    if (need <= 0) {
+        return {};
+    }
+    std::wstring out(static_cast<std::size_t>(need), L'\0');
+    ::MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), need);
+    return out;
+}
+
+// 外部程序的输出字节 → UTF-8。
+//
+// 先按 UTF-8 试一次，不合法再按本地 ANSI 代码页解释。理由：现在常见的编译器与工具
+// （gcc / clang / node / git）输出的是 UTF-8，而 cmd 自己的重定向、老工具、本地化过的
+// 消息多半是本地代码页。**顺序不能反**：GBK 的中文按 UTF-8 解会变成乱码但不报错，
+// UTF-8 的中文按 GBK 解同样不报错——所以只能靠"是不是合法 UTF-8"来判。
+std::string OutputToUtf8(std::string_view bytes) {
+    if (edit::IsValidUtf8(bytes)) {
+        return std::string(bytes);
+    }
+    const int need = ::MultiByteToWideChar(CP_ACP, 0, bytes.data(), static_cast<int>(bytes.size()),
+                                           nullptr, 0);
+    if (need <= 0) {
+        return std::string(bytes);
+    }
+    std::wstring wide(static_cast<std::size_t>(need), L'\0');
+    ::MultiByteToWideChar(CP_ACP, 0, bytes.data(), static_cast<int>(bytes.size()), wide.data(),
+                          need);
+    return ToUtf8(wide);
+}
+
+std::string SecondsText(std::uint64_t milliseconds) {
+    char buffer[32] = {};
+    std::snprintf(buffer, sizeof(buffer), "%.2f", static_cast<double>(milliseconds) / 1000.0);
+    return buffer;
+}
+
+}  // namespace
+
+core::RunContext MainWindow::MakeRunContext() const {
+    core::RunContext context;
+    context.appDirectory = infra::ModuleDir().wstring();
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr) {
+        return context;   // 一个文档都没有也能跑命令（变量全空）
+    }
+    context.fullPath = document->buffer.filePath;
+    context.encodingName = edit::EncodingName(document->buffer.encoding);
+    context.eolName = edit::EolName(document->buffer.eol);
+    if (document->view != nullptr) {
+        context.currentLine = static_cast<int>(document->view->CurrentLine()) + 1;   // 1 基
+        context.currentWord = FromUtf8(document->view->WordAtCaret());
+    }
+    return context;
+}
+
+void MainWindow::CommandShowRunDialog() {
+    RunDialogResult result;
+    if (!ShowRunCommandDialog(hwnd_, shortcutStore_.RunCommands(), lastRunCommand_, result)) {
+        return;
+    }
+    if (result.action == RunDialogAction::Save) {
+        core::RunCommandDef def;
+        def.name = result.name;
+        def.command = result.command;
+        def.captureOutput = result.captureOutput;
+        shortcutStore_.AddOrReplaceRunCommand(std::move(def));
+        RegisterRunCommands();
+        // 存的这一刻把注册表里的实际绑定回填一遍再落盘："管理快捷键"里改过的键才写得回去
+        shortcutStore_.SyncRunCommandShortcuts(registry_);
+        std::wstring error;
+        if (!shortcutStore_.Save(registry_, &error)) {
+            ::MessageBoxW(hwnd_, (L"命令已经记下，但写入 shortcuts.xml 失败：\n" + error).c_str(),
+                          L"运行命令", MB_ICONWARNING);
+        }
+        RebuildMenu();
+        RebuildAccelerators();
+        statusBar_.SetMessage(L"已保存运行命令：" + result.name);
+        return;   // 点了"保存"就只保存：跑不跑由用户再点一次决定
+    }
+    lastRunCommand_ = result.command;
+    ExecuteRunCommand(result.command, result.captureOutput);
+}
+
+void MainWindow::CommandRunSaved(std::size_t index) {
+    const std::vector<core::RunCommandDef>& saved = shortcutStore_.RunCommands();
+    if (index >= saved.size()) {
+        return;
+    }
+    ExecuteRunCommand(saved[index].command, saved[index].captureOutput);
+}
+
+void MainWindow::ExecuteRunCommand(std::wstring_view command, bool captureOutput) {
+    lastRunCommand_ = std::wstring(command);
+    if (captureOutput && pendingRunActive_) {
+        ::MessageBoxW(hwnd_, L"上一个命令还在跑，等它的输出收完再开下一个。", L"运行命令",
+                      MB_ICONINFORMATION);
+        return;
+    }
+    const std::wstring expanded = core::ExpandRunCommand(command, MakeRunContext());
+    infra::LogInfo(L"run", L"运行命令: " + expanded);
+
+    // 工作目录 = 当前文件所在目录（未保存的文档用程序目录）。这样命令里写
+    // $(FILE_NAME) 这种相对写法也能直接找到文件；对话框里也是这么提示的
+    std::wstring workingDir = infra::ModuleDir().wstring();
+    if (const edit::Document* document = ActiveDocument();
+        document != nullptr && document->buffer.HasPath()) {
+        std::wstring directory = core::DocumentManager::DirectoryOf(document->buffer.filePath);
+        if (!directory.empty()) {
+            workingDir = std::move(directory);
+        }
+    }
+
+    SECURITY_ATTRIBUTES security{};
+    security.nLength = sizeof(security);
+    security.bInheritHandle = TRUE;   // 输出文件句柄要被继承，子进程才写得到
+
+    std::wstring outputPath;
+    HANDLE outputHandle = nullptr;
+    HANDLE inputHandle = nullptr;
+    if (captureOutput) {
+        std::error_code ignored;
+        std::filesystem::create_directories(infra::TempDir(), ignored);
+        outputPath = (infra::TempDir() / (L"run-" + std::to_wstring(::GetCurrentProcessId()) +
+                                          L"-" + std::to_wstring(++runTempCounter_) + L".out"))
+                         .wstring();
+        outputHandle = ::CreateFileW(outputPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &security,
+                                     CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (outputHandle == INVALID_HANDLE_VALUE) {
+            outputHandle = nullptr;
+            ::MessageBoxW(hwnd_, L"建不出收输出用的临时文件，命令没有执行。", L"运行命令",
+                          MB_ICONWARNING);
+            return;
+        }
+        // 子进程读标准输入时给它一个 NUL：我们这里没有可交互的控制台，
+        // 拿无效句柄当 stdin 有些程序会直接报错退出
+        inputHandle = ::CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                    &security, OPEN_EXISTING, 0, nullptr);
+        if (inputHandle == INVALID_HANDLE_VALUE) {
+            inputHandle = nullptr;
+        }
+    }
+
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    if (captureOutput) {
+        startup.dwFlags = STARTF_USESTDHANDLES;
+        startup.hStdOutput = outputHandle;
+        startup.hStdError = outputHandle;
+        startup.hStdInput = inputHandle;
+    }
+    std::vector<wchar_t> line(expanded.begin(), expanded.end());
+    line.push_back(L'\0');   // CreateProcessW 会就地改这串，必须是可写的
+    PROCESS_INFORMATION info{};
+    // 捕获输出时另起一个不带控制台窗口的进程；不捕获就让它自己弹控制台（那是用户
+    // 看得见输出的方式）。命令行整串交给系统解析，所以 .bat 要写成 cmd /c xxx.bat
+    const BOOL started = ::CreateProcessW(
+        nullptr, line.data(), nullptr, nullptr, captureOutput ? TRUE : FALSE,
+        captureOutput ? CREATE_NO_WINDOW : 0, nullptr,
+        workingDir.empty() ? nullptr : workingDir.c_str(), &startup, &info);
+    const DWORD startError = ::GetLastError();
+    if (outputHandle != nullptr) {
+        ::CloseHandle(outputHandle);
+    }
+    if (inputHandle != nullptr) {
+        ::CloseHandle(inputHandle);
+    }
+    if (started == FALSE) {
+        if (!outputPath.empty()) {
+            ::DeleteFileW(outputPath.c_str());
+        }
+        ::MessageBoxW(hwnd_,
+                      (L"启动命令失败（" + io::DescribeWin32Error(startError) + L"）：\n" + expanded)
+                          .c_str(),
+                      L"运行命令", MB_ICONWARNING);
+        statusBar_.SetMessage(L"运行命令：启动失败");
+        return;
+    }
+    ::CloseHandle(info.hThread);
+    if (captureOutput) {
+        pendingRun_.process = info.hProcess;
+        pendingRun_.outputPath = std::move(outputPath);
+        pendingRun_.startedMs = ::GetTickCount64();
+        pendingRunActive_ = true;
+        ::SetTimer(hwnd_, kTimerRunCommand, 150, nullptr);
+        statusBar_.SetMessage(L"命令已启动，输出会收进一个新文档");
+    } else {
+        // 不跟踪进程：与"丢出去不管"的语义一致。否则跑一个记事本会把
+        // "一次只跑一个"这条限制一直占着
+        ::CloseHandle(info.hProcess);
+        statusBar_.SetMessage(L"命令已启动（输出不进编辑器）");
+    }
+}
+
+bool MainWindow::PollRunCommand() {
+    if (!pendingRunActive_ || pendingRun_.process == nullptr) {
+        return false;
+    }
+    return ::WaitForSingleObject(pendingRun_.process, 0) == WAIT_OBJECT_0;
+}
+
+void MainWindow::FinishRunCommand() {
+    if (!pendingRunActive_) {
+        return;
+    }
+    DWORD exitCode = 0;
+    ::GetExitCodeProcess(pendingRun_.process, &exitCode);
+    ::CloseHandle(pendingRun_.process);
+    const std::uint64_t elapsedMs = ::GetTickCount64() - pendingRun_.startedMs;
+    const std::wstring outputPath = pendingRun_.outputPath;
+    pendingRun_ = PendingRun{};
+    pendingRunActive_ = false;
+    ::KillTimer(hwnd_, kTimerRunCommand);
+
+    // 上限 8 MB：编译器刷屏的时候不该把整份输出搬进内存再搬进文档
+    constexpr std::uint64_t kMaxOutputBytes = 8ull * 1024 * 1024;
+    const io::ReadResult read = io::ReadWholeFile(outputPath, kMaxOutputBytes);
+    std::string text;
+    if (read.ok) {
+        text = OutputToUtf8(read.bytes);
+    } else if (read.tooLarge) {
+        text = "（输出超过 8 MB，没有收进来）\n";
+    } else {
+        text = "（读不到命令的输出：" + ToUtf8(read.message) + "）\n";
+    }
+    if (!text.empty() && text.back() != '\n') {
+        text.push_back('\n');
+    }
+    text += "[运行结束：退出码 " + std::to_string(exitCode) + "，用时 " + SecondsText(elapsedMs) +
+            " 秒]\n";
+
+    if (edit::Document* document = documents_->CreateUntitled(); document != nullptr) {
+        // 输出文档的形态定死：UTF-8 + CRLF。它不该跟着"新建文档"那几项配置跑，
+        // 否则用户在 ANSI 配置下会拿到一份看不懂的输出
+        document->buffer.displayName = L"运行输出 " + std::to_wstring(++runOutputCounter_);
+        document->buffer.encoding.uniMode = edit::UniMode::Utf8;
+        document->buffer.encoding.codePage = edit::kCodePageUtf8;
+        document->buffer.encoding.confidence = 100;
+        document->buffer.eol = edit::EolMode::Crlf;
+        document->buffer.detectedEol = edit::EolMode::Crlf;
+        document->buffer.isModified = false;
+        if (document->view != nullptr) {
+            document->view->SetCodePage(edit::kCodePageUtf8);
+            document->view->SetText(text);
+            // 刚生成的输出不该显得"改过"：清掉撤销栈、钉在保存点上
+            document->view->ClearUndoBuffer();
+            document->view->MarkSavePoint();
+        }
+        SyncTabBar();
+        ActivateDocument(document->buffer.id);
+    }
+    statusBar_.SetMessage(L"命令结束：退出码 " + std::to_wstring(exitCode) + L"，用时 " +
+                          FromUtf8(SecondsText(elapsedMs)) + L" 秒");
+    ::DeleteFileW(outputPath.c_str());
+}
+
+void MainWindow::CancelPendingRun(bool deleteOutput) {
+    if (!pendingRunActive_) {
+        return;
+    }
+    ::KillTimer(hwnd_, kTimerRunCommand);
+    if (pendingRun_.process != nullptr) {
+        ::CloseHandle(pendingRun_.process);   // 子进程继续跑，我们只是不再等它
+    }
+    if (deleteOutput && !pendingRun_.outputPath.empty()) {
+        // 子进程可能还开着这个文件，删不掉就算了（它就在 config\tmp 下，不碍事）
+        ::DeleteFileW(pendingRun_.outputPath.c_str());
+    }
+    pendingRun_ = PendingRun{};
+    pendingRunActive_ = false;
+}
+
+void MainWindow::RegisterRunCommands() {
+    const std::vector<core::RunCommandDef>& saved = shortcutStore_.RunCommands();
+    for (std::size_t index = 0; index < saved.size(); ++index) {
+        const core::CmdId id =
+            core::MakeCmdId(static_cast<uint8_t>(core::CmdCategory::Run),
+                            static_cast<uint16_t>(core::kRunCommandBase + index));
+        core::Command command;
+        command.id = id;
+        command.category = core::CmdCategory::Run;
+        command.key = L"run." + saved[index].name;
+        command.text = saved[index].name;
+        // 用户定义的命令：快捷键记在 <UserDefinedCommands> 里（见 Command.h）
+        command.flags = core::kCmdUserDefined;
+        const std::size_t captured = index;
+        command.execute = [this, captured](const core::CmdContext&) { CommandRunSaved(captured); };
+        if (!registry_.UpdateCommand(id, command.text, command.execute)) {
+            registry_.Register(command);
+        }
+        // 文件里写的快捷键也一并生效
+        if (saved[index].keyCode != 0 && saved[index].modifiers != core::kModNone) {
+            registry_.BindShortcut(id, saved[index].modifiers, saved[index].keyCode, true);
         }
     }
 }
