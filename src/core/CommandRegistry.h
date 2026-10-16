@@ -12,6 +12,10 @@ public:
     // id 为 0 时自动分配。重复 id 会被拒绝（返回已存在的 id）。
     CmdId Register(Command command);
 
+    // 就地改一条命令的显示文本与执行体（宏列表会随录制变化：重名覆盖后菜单项要跟着变）。
+    // 只放开这两样：类别、flags、快捷键都不该被外部随手改。返回 false = 没这条命令。
+    bool UpdateCommand(CmdId id, std::wstring text, std::function<void(const CmdContext&)> execute);
+
     const Command* Find(CmdId id) const;
     const std::vector<Command>& All() const noexcept { return commands_; }
     std::vector<CmdId> ByCategory(CmdCategory category) const;
@@ -19,6 +23,12 @@ public:
     ExecResult Execute(CmdId id, const CmdContext& context);
     bool IsEnabled(CmdId id, const CmdContext& context) const;
     bool IsChecked(CmdId id, const CmdContext& context) const;
+
+    // 录制钩子（设计文档 2.9）：宏录制期间由外壳装上，凡是带 kCmdRecordable 的命令
+    // 在执行成功之后回调一次。钩子放在这里而不是各个命令的实现里，是因为 Execute()
+    // 是全程序唯一的执行入口——菜单、快捷键、宏自己都从这里过。
+    using RecordHook = std::function<void(const Command&)>;
+    void SetRecordHook(RecordHook hook) { recordHook_ = std::move(hook); }
 
     bool BindShortcut(CmdId id, uint8_t modifiers, uint16_t keyCode, bool replace);
     const std::vector<ShortcutBinding>& AllBindings() const noexcept { return bindings_; }
@@ -39,6 +49,7 @@ private:
     std::vector<Command>         commands_;
     std::vector<ShortcutBinding> bindings_;
     CmdId                        nextAutoId_ = 1;
+    RecordHook                   recordHook_;
 };
 
 }  // namespace npcc::core

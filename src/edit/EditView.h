@@ -41,6 +41,7 @@ struct EditorNotification {
     int32_t  updated = 0;          // SCN_UPDATEUI 的 SC_UPDATE_* 位
     int32_t  line = 0;             // SCN_MARGINCLICK
     int32_t  margin = 0;           // SCN_MARGINCLICK
+    int32_t  character = 0;        // SCN_CHARADDED：刚敲进去的那个字符（宏录制要用）
 };
 
 // Scintilla 的唯一适配层。全程序只有这里调用 Scintilla 消息（设计文档 2.2 第 1 条）。

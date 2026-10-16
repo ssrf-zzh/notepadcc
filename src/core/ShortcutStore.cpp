@@ -116,7 +116,7 @@ bool IsBindableShortcut(uint8_t modifiers, uint16_t keyCode) {
 }
 
 bool ShortcutStore::Load(CommandRegistry& registry, std::wstring* error,
-                         std::vector<std::wstring>* warnings) const {
+                         std::vector<std::wstring>* warnings) {
     std::vector<std::wstring> localWarnings;
     std::vector<std::wstring>& sink = warnings != nullptr ? *warnings : localWarnings;
 
@@ -146,8 +146,24 @@ bool ShortcutStore::Load(CommandRegistry& registry, std::wstring* error,
         }
         return false;
     }
+    // 宏那一节与快捷键无关，但它就住在这个文件里，所以顺手读进来（保存时要写回去）
+    macros_ = ReadMacrosXml(
+        *root,
+        [&registry](const std::wstring& key) -> CmdId {
+            for (const Command& command : registry.All()) {
+                if (command.key == key) {
+                    return command.id;
+                }
+            }
+            return 0;
+        },
+        sink);
+
     const infra::XmlElement* section = root->Child(kInternalSection);
     if (section == nullptr) {
+        for (const std::wstring& warning : sink) {
+            infra::LogWarn(L"shortcut", L"快捷键配置: " + warning);
+        }
         return true;
     }
 
@@ -225,7 +241,20 @@ bool ShortcutStore::Save(const CommandRegistry& registry, std::wstring* error) c
             node->SetAttributeInt(L"Key", static_cast<int>(binding.keyCode));
         }
     }
+    // 宏跟着一起写：这份文件只有一个写者，改快捷键这条路径不会把宏抹掉
+    AppendMacrosXml(*root, macros_);
     return io::SaveXmlFile(Path().wstring(), document, error);
+}
+
+std::size_t ShortcutStore::AddOrReplaceMacro(Macro macro) {
+    for (std::size_t index = 0; index < macros_.size(); ++index) {
+        if (macros_[index].name == macro.name) {
+            macros_[index] = std::move(macro);   // 宏名就是它的标识
+            return index;
+        }
+    }
+    macros_.push_back(std::move(macro));
+    return macros_.size() - 1;
 }
 
 }  // namespace npcc::core

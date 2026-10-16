@@ -8,6 +8,8 @@
 
 #include "core/CommandRegistry.h"
 #include "core/DocumentManager.h"
+#include "core/Macro.h"
+#include "core/ShortcutStore.h"
 #include "core/ConfigCenter.h"
 #include "core/SessionManager.h"
 #include "core/SnapshotStore.h"
@@ -115,6 +117,15 @@ private:
     void CommandStyleConfigurator();
     void CommandExportUdlSample();
     void CommandToggleDarkMode();
+    // ---- 宏（设计文档 2.9 / 5.7）----
+    void CommandToggleMacroRecord();
+    void CommandPlayLastMacro();
+    void CommandRunMacroMultiple();
+    void CommandRunSavedMacro(std::size_t index);
+    void RunMacro(const core::Macro& macro, int repeatCount, bool stopOnError);
+    void RegisterMacroCommands();
+    void RefreshMacroMenuEntries();
+    void FlushRecordingToStore();   // 停止录制 → 取名 → 存文件 → 注册菜单
     void ApplyStyleSchemeToAllViews();
     void CommandAutoComplete();
     const edit::LanguageDef* ActiveLanguage() const;
@@ -188,6 +199,12 @@ private:
     bool showLineNumbers_ = true;
     bool wrapEnabled_ = false;
     bool darkMode_ = false;
+    // 宏：录到的步骤、上次录制/执行的宏（"播放"与"重复执行"都作用在它上面）、
+    // 保存在 shortcuts.xml 里的宏表由 shortcutStore_ 持有（一份文件只留一个写者）
+    core::MacroRecorder   macroRecorder_;
+    core::Macro           lastMacro_;
+    core::ShortcutStore   shortcutStore_;
+    std::size_t           macroCommandBase_ = 0;   // 宏命令 ID 的起始序号（8 类里从 128 起）
     // 分屏：左右两个视图共用同一份文档，比例与"在哪一侧编辑"随会话保存
     bool          splitEnabled_ = false;
     int           splitRatioPercent_ = 50;

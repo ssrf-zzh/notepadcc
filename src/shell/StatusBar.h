@@ -19,6 +19,8 @@ public:
     void SetMessage(const std::wstring& text) const;
     void SetDocumentInfo(const std::wstring& encoding, const std::wstring& eol,
                          const std::wstring& language, bool modified) const;
+    // 宏录制指示（设计文档 2.9 第 2 条）：录制期间第 4 段显示 ● REC
+    void SetMacroRecording(bool recording) const;
 
     HWND Handle() const noexcept { return hwnd_; }
     int  Height() const;

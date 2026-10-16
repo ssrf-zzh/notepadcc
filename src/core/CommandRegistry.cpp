@@ -30,6 +30,20 @@ CmdId CommandRegistry::Register(Command command) {
     return commands_.back().id;
 }
 
+bool CommandRegistry::UpdateCommand(CmdId id, std::wstring text,
+                                    std::function<void(const CmdContext&)> execute) {
+    for (Command& command : commands_) {
+        if (command.id == id) {
+            command.text = std::move(text);
+            if (execute) {
+                command.execute = std::move(execute);
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
 const Command* CommandRegistry::Find(CmdId id) const {
     const auto it = std::find_if(commands_.begin(), commands_.end(),
                                  [id](const Command& c) { return c.id == id; });
@@ -58,6 +72,11 @@ ExecResult CommandRegistry::Execute(CmdId id, const CmdContext& context) {
         return ExecResult::Unsupported;
     }
     command->execute(context);
+    // 录制钩子放在"执行之后"：没执行成功的命令（被禁用、不存在）不该进宏，
+    // 否则回放时会莫名其妙地多出一步
+    if (recordHook_ && (command->flags & kCmdRecordable) != 0) {
+        recordHook_(*command);
+    }
     return ExecResult::Ok;
 }
 

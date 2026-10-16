@@ -127,6 +127,7 @@ bool EditView::TranslateNotify(const void* nmhdr, EditorNotification& out) {
     // SCNotification::line 是 Sci_Position（64 位），显式收窄避免 /W4 的 C4244
     out.line = static_cast<int32_t>(notification->line);
     out.margin = notification->margin;
+    out.character = notification->ch;
     return true;
 }
 

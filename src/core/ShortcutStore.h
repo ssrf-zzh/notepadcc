@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "core/CommandRegistry.h"
+#include "core/Macro.h"
 
 namespace npcc::core {
 
@@ -22,15 +23,29 @@ namespace npcc::core {
 // 但命令是用我们自己的 name（命令键）与 id 标识的，所以**还不能直接吞下
 // 对标产品的 shortcuts.xml**（它的 id 是另一套编号）。这件事记在
 // 设计文档附录 D，对应基线的"快捷键迁移预设"。
+//
+// 同一个文件里还有 <Macros> 一节（设计文档 7.3）。**这份文件只有一个写者**：
+// 宏由外壳通过 SetMacros() 交给它，保存时一起写出去。这样"改快捷键"那一路
+// （ShortcutDialog → Save）不会把宏顺手抹掉——把两份内容分给两个写者，
+// 迟早会出现"存了快捷键，宏没了"。
 class ShortcutStore {
 public:
     static std::filesystem::path Path();
 
-    // 文件不存在不算失败（首次运行就该用默认方案）。
+    // 文件不存在不算失败（首次运行就该用默认方案）。读进来的宏留在对象里，随 Save 写回。
     bool Load(CommandRegistry& registry, std::wstring* error = nullptr,
-              std::vector<std::wstring>* warnings = nullptr) const;
+              std::vector<std::wstring>* warnings = nullptr);
 
     bool Save(const CommandRegistry& registry, std::wstring* error = nullptr) const;
+
+    // 当前这份宏表。Load 之后是文件里的那些；随后外壳可以增删（保存宏时）。
+    const std::vector<Macro>& Macros() const noexcept { return macros_; }
+    void SetMacros(std::vector<Macro> macros) { macros_ = std::move(macros); }
+    // 追加一条并返回它的下标；同名时覆盖（宏名就是它的标识）
+    std::size_t AddOrReplaceMacro(Macro macro);
+
+private:
+    std::vector<Macro> macros_;
 };
 
 // 允许绑定到命令的按键组合：必须带 Ctrl 或 Alt，或者本身是功能键 / Insert / Delete。

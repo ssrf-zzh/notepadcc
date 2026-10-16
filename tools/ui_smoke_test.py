@@ -130,6 +130,18 @@ CMD_TOOL_STYLE_CONFIG = (14 << 12) | 30
 CMD_EDIT_AUTOCOMPLETE = (2 << 12) | 33
 CMD_TOOL_EXPORT_UDL = (14 << 12) | 31
 CMD_VIEW_DARK_MODE = (4 << 12) | 14
+CMD_MACRO_RECORD = (8 << 12) | 1
+CMD_MACRO_PLAY = (8 << 12) | 3
+CMD_MACRO_RUN_MULTIPLE = (8 << 12) | 6
+CMD_MACRO_FIRST_SAVED = (8 << 12) | 128   # 已保存的宏在菜单里的命令号（从 128 起）
+
+# 宏对话框（自建窗口类，所以不能用 dismiss_dialog——它只认标准对话框 #32770）
+MACRO_NAME_CLASS = "notepadccMacroName"
+MACRO_RUN_CLASS = "notepadccMacroRun"
+MACRO_EDIT = 1301
+MACRO_OK = 1310
+
+WM_CHAR_INPUT = 0x0102
 
 COLUMN_TEMPLATE_EDIT = 751
 COLUMN_INSERT_BUTTON = 758
@@ -701,6 +713,22 @@ def test_column_editing(root):
             proc.kill()
 
 
+def remove_log_with_retry(root, timeout=8.0):
+    """删掉本次运行的日志文件。
+
+    上一段留下的实例可能还在收尾（日志文件还被它开着），删不掉就等一会儿再试——
+    这不是被测对象的问题，是"同一台机器上刚跑完另一个实例"的现实。
+    """
+    log_path = os.path.join(root, "build", "bin", "config", "logs", "notepadcc.log")
+    deadline = time.time() + timeout
+    while os.path.exists(log_path) and time.time() < deadline:
+        try:
+            os.remove(log_path)
+        except PermissionError:
+            time.sleep(0.3)
+    return log_path
+
+
 def test_large_file(root):
     """大文件分档：真开一个超过 8 MB 的文件，核对应用是否走了大文件路径。
 
@@ -718,9 +746,7 @@ def test_large_file(root):
         print(f"  FAIL: 造的测试文件只有 {size_mb:.1f} MB，够不到大文件阈值")
         return False
 
-    log_path = os.path.join(root, "build", "bin", "config", "logs", "notepadcc.log")
-    if os.path.exists(log_path):
-        os.remove(log_path)
+    log_path = remove_log_with_retry(root)
     session = os.path.join(root, "build", "bin", "config", "session.xml")
     if os.path.exists(session):
         os.remove(session)
@@ -791,9 +817,7 @@ def test_external_change(root):
     with open(path, "w", encoding="utf-8", newline="") as handle:
         handle.write("alpha\n")
 
-    log_path = os.path.join(root, "build", "bin", "config", "logs", "notepadcc.log")
-    if os.path.exists(log_path):
-        os.remove(log_path)
+    log_path = remove_log_with_retry(root)
     session = os.path.join(root, "build", "bin", "config", "session.xml")
     if os.path.exists(session):
         os.remove(session)
@@ -825,6 +849,16 @@ def test_external_change(root):
         # 等程序自己发现（目录通知），弹确认框
         if not dismiss_dialog("文件已被外部修改", IDYES, timeout=15.0):
             print("  FAIL: 外部改动没有被检测到（没等到确认框）")
+            # 这一步失败时最需要的是"程序自己怎么说的"：日志里有监视是否挂上、
+            # 有没有发现改动。没有这段，只能猜是产品没检测还是测试写得太早
+            if os.path.exists(log_path):
+                with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
+                    print("    日志尾部：")
+                    for line in handle.read().splitlines()[-10:]:
+                        print("     ", line)
+            else:
+                print("    日志文件不存在")
+            print(f"    主窗口还在 = {bool(user32.FindWindowW('notepadccMainWindow', None))}")
             return False
         time.sleep(1.0)
 
@@ -1366,6 +1400,198 @@ def test_dark_mode(root):
 
     print("  暗色模式：编辑区/行号边距/语法颜色都跟着变，重启后记住，再切能回浅色，"
           "配置器不会把主题冲掉")
+    return True
+
+
+def close_macro_dialog(class_name, ok_id=MACRO_OK, timeout=6.0):
+    """点掉宏的自建对话框（取名字 / 运行选项）。
+
+    它们不是标准对话框类（#32770），所以 dismiss_dialog 找不到——那三条经验
+    （PostMessage、等就位、按 ID 找按钮）在这里照样适用。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        dialog = user32.FindWindowW(class_name, None)
+        if dialog:
+            time.sleep(0.3)                                    # 等默认按钮挂上
+            user32.PostMessageW(dialog, WM_COMMAND, ok_id, 0)
+            stop = time.time() + 2.0
+            while time.time() < stop and user32.FindWindowW(class_name, None):
+                time.sleep(0.1)
+            if not user32.FindWindowW(class_name, None):
+                return True
+        time.sleep(0.2)
+    return False
+
+
+def test_macro(root):
+    """宏：录一段（打字 + 两个命令）→ 存下来 → 撤回去 → 回放，结果要和录制时一样。
+
+    关键在于核对**结果文本**，而不是"菜单里多了个宏"：宏的价值就是"同样的操作能再来
+    一遍"。回放用两条路径各走一次——菜单里的"播放上次的宏"，以及重启后从
+    shortcuts.xml 读回来的那条宏命令（后者顺带证明了持久化与菜单注册）。
+    最后走一遍"重复执行"，核对次数真的生效。
+    """
+    work = os.path.join(root, "build", "macro_test")
+    os.makedirs(work, exist_ok=True)
+    path = os.path.join(work, "m.txt")
+
+    cfg = os.path.join(root, "build", "bin", "config")
+    shortcuts = os.path.join(cfg, "shortcuts.xml")
+    for name in ("config.xml", "session.xml", "stylers.xml", "langs.xml",
+                 "userlangs.xml", "shortcuts.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    recorded = ""
+    # 文件要**在启动之前**写好：启动时文件还不存在的话，程序开的是一个空文档
+    # （窗口标题照样是 m.txt，但编辑器里没有内容可断言）
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write("beta\nalpha\n")
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - m.txt")
+    try:
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到可见的编辑控件")
+            return False
+        user32.SendMessageW(scinti, SCI_GOTOPOS, len("beta\nalpha\n"), 0)
+
+        # 1) 开始录制，敲两个字（应当合并成一步），再执行两个命令
+        user32.PostMessageW(window, WM_COMMAND, CMD_MACRO_RECORD, 0)
+        time.sleep(0.6)
+        user32.PostMessageW(scinti, WM_CHAR_INPUT, ord("x"), 0)
+        time.sleep(0.15)
+        user32.PostMessageW(scinti, WM_CHAR_INPUT, ord("y"), 0)
+        time.sleep(0.4)
+        after_typing = scinti_text(scinti)
+        if after_typing != "beta\nalpha\nxy":
+            print(f"  FAIL: 录制期间打字之后内容不对 {after_typing!r}")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_SORT_ASC, 0)
+        time.sleep(0.6)
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_UPPERCASE, 0)
+        time.sleep(0.6)
+        recorded = scinti_text(scinti)
+        if recorded != "ALPHA\nBETA\nXY":
+            print(f"  FAIL: 录制期间两个命令的结果不对 {recorded!r}")
+            return False
+
+        # 2) 停止录制 → 取名（用默认名）
+        user32.PostMessageW(window, WM_COMMAND, CMD_MACRO_RECORD, 0)
+        time.sleep(0.8)
+        if not close_macro_dialog(MACRO_NAME_CLASS):
+            print("  FAIL: 停止录制之后应该弹出取名对话框")
+            return False
+        time.sleep(0.6)
+        if not os.path.exists(shortcuts):
+            print(f"  FAIL: 保存宏之后没有写出 {shortcuts}")
+            return False
+        with open(shortcuts, "r", encoding="utf-8", errors="replace") as handle:
+            saved = handle.read()
+        if "<Macros>" not in saved or '<Macro name="Macro 1"' not in saved:
+            print(f"  FAIL: shortcuts.xml 里没有这条宏\n{saved[-600:]}")
+            return False
+        if 'sParam="xy"' not in saved:
+            print(f"  FAIL: 连续输入应当合并成一步（sParam=\"xy\"）\n{saved[-600:]}")
+            return False
+        if saved.count('type="2"') != 1 or saved.count('type="0"') != 2:
+            print(f"  FAIL: 步骤数不对（应当是 1 步文本 + 2 步命令）\n{saved[-600:]}")
+            return False
+        if 'name="cmd.tool.sortAsc"' not in saved or 'name="cmd.tool.upperCase"' not in saved:
+            print(f"  FAIL: 命令步骤没写命令键\n{saved[-600:]}")
+            return False
+
+        # 3) 撤回去（三次工具操作各一步，打字也是一步），核对回到原文
+        for _ in range(4):
+            user32.PostMessageW(window, WM_COMMAND, CMD_EDIT_UNDO, 0)
+            time.sleep(0.3)
+        if scinti_text(scinti) != "beta\nalpha\n":
+            print(f"  FAIL: 撤销之后应当是原文，实际 {scinti_text(scinti)!r}")
+            return False
+
+        # 4) 回放：结果必须与录制时一模一样
+        length = user32.SendMessageW(scinti, SCI_GETLENGTH, 0, 0)
+        user32.SendMessageW(scinti, SCI_GOTOPOS, length, 0)
+        time.sleep(0.3)
+        user32.PostMessageW(window, WM_COMMAND, CMD_MACRO_PLAY, 0)
+        time.sleep(1.5)
+        replayed = scinti_text(scinti)
+        if replayed != recorded:
+            print(f"  FAIL: 回放结果与录制时不一致\n        录制时 {recorded!r}\n"
+                  f"        回放后 {replayed!r}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    # 5) 重启：宏应当从 shortcuts.xml 读回来并出现在菜单里（命令号 = 8 类 128 起）
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write("beta\nalpha\n")
+    for name in ("session.xml",):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - m.txt")
+    try:
+        if not window:
+            print("  FAIL: 重启后找不到主窗口")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到可见的编辑控件")
+            return False
+        length = user32.SendMessageW(scinti, SCI_GETLENGTH, 0, 0)
+        user32.SendMessageW(scinti, SCI_GOTOPOS, length, 0)
+        time.sleep(0.3)
+        user32.PostMessageW(window, WM_COMMAND, CMD_MACRO_FIRST_SAVED, 0)
+        time.sleep(1.5)
+        after_restart = scinti_text(scinti)
+        if after_restart != recorded:
+            print(f"  FAIL: 重启后从菜单执行那条宏，结果应当与录制时一致\n"
+                  f"        期望 {recorded!r}\n        实际 {after_restart!r}")
+            return False
+
+        # 6) 重复执行 2 次：第一次把文本再"拍"一遍（结果不变），第二次再拍一遍
+        user32.PostMessageW(window, WM_COMMAND, CMD_MACRO_RUN_MULTIPLE, 0)
+        time.sleep(0.8)
+        dialog = user32.FindWindowW(MACRO_RUN_CLASS, None)
+        if not dialog:
+            print("  FAIL: 重复执行应当先问次数")
+            return False
+        # 输入框里初值 "1" 是全选的，敲个 2 就替换掉
+        user32.PostMessageW(user32.GetDlgItem(dialog, MACRO_EDIT), WM_CHAR_INPUT, ord("2"), 0)
+        time.sleep(0.3)
+        if not close_macro_dialog(MACRO_RUN_CLASS):
+            print("  FAIL: 重复执行的对话框点不掉")
+            return False
+        time.sleep(2.0)
+        repeated = scinti_text(scinti)
+        if repeated != "ALPHA\nBETA\nXYXYXY":
+            print(f"  FAIL: 重复执行 2 次的结果不对\n        期望 'ALPHA\\nBETA\\nXYXYXY'\n"
+                  f"        实际 {repeated!r}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        for name in ("config.xml", "session.xml", "shortcuts.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    print("  宏：录制（输入合并成一步 + 两个命令）→ 存进 shortcuts.xml → 撤销 → 回放结果一致"
+          " → 重启后从菜单执行仍一致 → 重复执行 2 次次数正确")
     return True
 
 
@@ -3209,6 +3435,8 @@ def run():
         failed = True
     if not test_dark_mode(root):
         failed = True
+    if not test_macro(root):
+        failed = True
     if not test_auto_complete(root):
         failed = True
     if not test_associated_commands(root):
@@ -3222,7 +3450,7 @@ def run():
     print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + "
           "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + "
           "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + UDL + 暗色模式 + "
-          "自动完成 + 文件关联 + 绿色打包）")
+          "宏 + 自动完成 + 文件关联 + 绿色打包）")
     return 0
 
 

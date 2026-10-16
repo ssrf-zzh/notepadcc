@@ -14,6 +14,7 @@
 #include "core/DocumentManager.h"
 #include "core/SessionManager.h"
 #include "core/ShortcutStore.h"
+#include "core/Macro.h"
 #include "core/SnapshotStore.h"
 #include "infra/SingleInstance.h"
 #include "infra/FileAssociation.h"
@@ -2297,6 +2298,286 @@ int main() {
             Check(!error.empty(), "失败时给出可读原因");
         }
         std::filesystem::remove(path, ec);
+    }
+
+    // ---------------------------------------------------------------- 宏
+    // 宏是"把操作序列变成可重复的资产"，所以这一段的重心是：**录下来的东西回放出来
+    // 结果一样**，以及**存进文件再读回来还是同一条宏**。只测"录制器存下了几个步骤"
+    // 是测不到这两件事的。
+    Section("宏（录制 / 回放 / shortcuts.xml 持久化）");
+    {
+        using npcc::core::CmdId;
+        using npcc::core::Command;
+        using npcc::core::Macro;
+        using npcc::core::MacroAction;
+        using npcc::core::MacroRecorder;
+        using npcc::core::MacroRunResult;
+        using npcc::core::MacroRunner;
+
+        npcc::infra::InitializePaths(true);
+
+        Command sampleCommand;
+        sampleCommand.id = 57349;
+        sampleCommand.key = L"cmd.tool.sortAsc";
+        sampleCommand.text = L"升序排序";
+
+        // 1) 录制：文本按空闲合并、命令把文本截断、停止之后不再记
+        {
+            MacroRecorder recorder;
+            Check(!recorder.Recording() && recorder.Empty(), "没开始录制时是空的");
+            recorder.Start();
+            Check(recorder.Recording(), "开始录制");
+            recorder.RecordChar(L'a', 1000);
+            recorder.RecordChar(L'b', 1100);   // 100 ms 内 → 合并进同一步
+            Check(recorder.Actions().size() == 1, "连续输入合并成一步");
+            Check(recorder.Actions()[0].kind == MacroAction::Kind::InsertText &&
+                      recorder.Actions()[0].text == L"ab",
+                  "合并后的文本内容正确");
+            recorder.RecordChar(L'c', 2000);   // 间隔 900 ms → 新的一步
+            Check(recorder.Actions().size() == 2, "空闲超过 300 ms 就另起一步");
+            recorder.RecordCommand(sampleCommand);
+            recorder.RecordChar(L'd', 2100);
+            Check(recorder.Actions().size() == 4, "命令把文本段落截断（命令前后各一段）");
+            Check(recorder.Actions()[2].kind == MacroAction::Kind::Command &&
+                      recorder.Actions()[2].commandId == 57349 &&
+                      recorder.Actions()[2].commandName == L"cmd.tool.sortAsc",
+                  "命令步骤记下了 ID 与命令键");
+            recorder.RecordMessage(2170, 1, 0);
+            Check(recorder.Actions().size() == 5 &&
+                      recorder.Actions()[4].kind == MacroAction::Kind::ScintillaMessage &&
+                      recorder.Actions()[4].message == 2170 && recorder.Actions()[4].wParam == 1,
+                  "Scintilla 消息按数值参数记下来");
+            recorder.Stop();
+            Check(!recorder.Recording(), "停止录制");
+            recorder.RecordCommand(sampleCommand);
+            Check(recorder.Actions().size() == 5, "停止之后不再记录");
+            recorder.Reset();
+            Check(recorder.Empty(), "Reset 清空");
+        }
+
+        // 2) 回放：顺序要对、次数要对、失败要报出"第几步"、能中断
+        {
+            Macro macro;
+            macro.name = L"测试宏";
+            MacroAction text;
+            text.kind = MacroAction::Kind::InsertText;
+            text.text = L"xy";
+            macro.actions.push_back(text);
+            MacroAction command;
+            command.kind = MacroAction::Kind::Command;
+            command.commandId = 42;
+            macro.actions.push_back(command);
+            MacroAction message;
+            message.kind = MacroAction::Kind::ScintillaMessage;
+            message.message = 2170;
+            message.wParam = 3;
+            macro.actions.push_back(message);
+
+            std::vector<std::wstring> trace;
+            MacroRunner runner;
+            runner.insertText = [&trace](std::wstring_view value) {
+                trace.push_back(L"text:" + std::wstring(value));
+            };
+            runner.runCommand = [&trace](CmdId id) {
+                trace.push_back(L"cmd:" + std::to_wstring(id));
+                return true;
+            };
+            runner.sendMessage = [&trace](const MacroAction& action) {
+                trace.push_back(L"msg:" + std::to_wstring(action.message) + L":" +
+                                std::to_wstring(action.wParam));
+            };
+            const MacroRunResult ok = npcc::core::RunMacro(macro, runner, 1, true);
+            Check(ok.ok && ok.completed == 1 && ok.failedStep == -1, "一遍跑完且没有失败");
+            Check(trace.size() == 3 && trace[0] == L"text:xy" && trace[1] == L"cmd:42" &&
+                      trace[2] == L"msg:2170:3",
+                  "步骤按录制顺序执行");
+
+            trace.clear();
+            const MacroRunResult three = npcc::core::RunMacro(macro, runner, 3, true);
+            Check(three.ok && three.completed == 3 && trace.size() == 9, "重复 3 遍就真的跑 3 遍");
+
+            // 第 2 步失败：默认立即停（第 3 步不执行），宽松模式则继续
+            trace.clear();
+            MacroRunner failing = runner;
+            failing.runCommand = [&trace](CmdId id) {
+                trace.push_back(L"cmd:" + std::to_wstring(id));
+                return false;   // 这一条命令失败（比如当前版本里没有它）
+            };
+            const MacroRunResult stopped = npcc::core::RunMacro(macro, failing, 1, true);
+            Check(!stopped.ok && stopped.failedStep == 2 && stopped.failedRepeat == 1,
+                  "失败时报出是第几步");
+            Check(trace.size() == 2, "失败即停：第 3 步没有再执行");
+            Check(stopped.message.find(L"第 2 步") != std::wstring::npos, "说明里写清了第几步");
+
+            trace.clear();
+            const MacroRunResult lenient = npcc::core::RunMacro(macro, failing, 1, false);
+            Check(!lenient.ok && lenient.completed == 1 && trace.size() == 3,
+                  "宽松模式跳过失败步骤继续跑完");
+
+            // 中断：keepGoing 返回 false 之后立刻停手
+            trace.clear();
+            int guard = 0;
+            MacroRunner interruptible = runner;
+            interruptible.keepGoing = [&guard] { return ++guard <= 1; };
+            const MacroRunResult cut = npcc::core::RunMacro(macro, interruptible, 5, true);
+            Check(cut.ok && cut.message == L"已中断" && trace.size() <= 3,
+                  "用户中断时不算失败，但要如实报告");
+
+            Macro empty;
+            Check(!npcc::core::RunMacro(empty, runner, 1, true).ok, "空宏直接报错，不静默成功");
+        }
+
+        // 3) 持久化：写进 shortcuts.xml 再读回来，是同一条宏
+        {
+            Macro macro;
+            macro.name = L"TrimAndSort";
+            macro.modifiers = npcc::core::kModCtrl | npcc::core::kModAlt;
+            macro.keyCode = 84;
+            MacroAction text;
+            text.kind = MacroAction::Kind::InsertText;
+            text.text = L"line1\nline2";   // 带换行的文本要能原样往返
+            macro.actions.push_back(text);
+            MacroAction command;
+            command.kind = MacroAction::Kind::Command;
+            command.commandId = sampleCommand.id;
+            command.commandName = sampleCommand.key;
+            macro.actions.push_back(command);
+            MacroAction message;
+            message.kind = MacroAction::Kind::ScintillaMessage;
+            message.message = 2170;
+            message.wParam = 1;
+            macro.actions.push_back(message);
+
+            npcc::infra::XmlDocument document;
+            npcc::infra::XmlElementPtr root = document.CreateRoot(L"NotepadPlusCompat");
+            npcc::core::AppendMacrosXml(*root, {macro});
+            const std::string xml = document.ToUtf8();
+            Check(xml.find("<Macros>") != std::string::npos &&
+                      xml.find("TrimAndSort") != std::string::npos,
+                  "写出的 XML 里有宏名");
+
+            npcc::infra::XmlDocument reparsed;
+            std::wstring parseError;
+            Check(npcc::infra::XmlDocument::Parse(xml, reparsed, &parseError),
+                  "写出的 XML 能重新解析");
+            std::vector<std::wstring> warnings;
+            const std::vector<Macro> back = npcc::core::ReadMacrosXml(
+                *reparsed.Root(),
+                [&sampleCommand](const std::wstring& key) -> CmdId {
+                    return key == sampleCommand.key ? sampleCommand.id : 0;
+                },
+                warnings);
+            Check(warnings.empty(), "往返没有警告");
+            Check(back.size() == 1, "读回一条宏");
+            if (!back.empty()) {
+                Check(back[0].name == L"TrimAndSort" && back[0].keyCode == 84 &&
+                          back[0].modifiers == (npcc::core::kModCtrl | npcc::core::kModAlt),
+                      "宏名与快捷键往返一致");
+                Check(back[0].actions.size() == 3, "三个步骤都在");
+                Check(back[0].actions[0].kind == MacroAction::Kind::InsertText &&
+                          back[0].actions[0].text == L"line1\nline2",
+                      "带换行的文本往返一致");
+                Check(back[0].actions[1].kind == MacroAction::Kind::Command &&
+                          back[0].actions[1].commandId == sampleCommand.id &&
+                          back[0].actions[1].commandName == sampleCommand.key,
+                      "命令步骤往返一致（ID 与命令键都在）");
+                Check(back[0].actions[2].kind == MacroAction::Kind::ScintillaMessage &&
+                          back[0].actions[2].message == 2170 && back[0].actions[2].wParam == 1,
+                      "消息步骤往返一致");
+            }
+
+            // 只有命令键、没有 ID 的文件（手工写的、或跨版本迁移过来的）也要认
+            const std::string byName =
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<NotepadPlusCompat schemaVersion=\"1\">\n"
+                "  <Macros>\n"
+                "    <Macro name=\"手写的\" Ctrl=\"no\" Alt=\"no\" Shift=\"no\" Key=\"0\">\n"
+                "      <Action type=\"0\" name=\"cmd.tool.sortAsc\"/>\n"
+                "    </Macro>\n"
+                "  </Macros>\n"
+                "</NotepadPlusCompat>\n";
+            npcc::infra::XmlDocument hand;
+            Check(npcc::infra::XmlDocument::Parse(byName, hand, &parseError), "手写的文件能解析");
+            warnings.clear();
+            const std::vector<Macro> resolved = npcc::core::ReadMacrosXml(
+                *hand.Root(),
+                [&sampleCommand](const std::wstring& key) -> CmdId {
+                    return key == sampleCommand.key ? sampleCommand.id : 0;
+                },
+                warnings);
+            Check(resolved.size() == 1 && !resolved.empty() &&
+                      resolved[0].actions[0].commandId == sampleCommand.id,
+                  "只有命令键时按名字换成 ID");
+
+            // 坏文件：认不出的步骤类型、没名字的宏、空文本——跳过并记警告，别整个失效
+            const std::string broken =
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<NotepadPlusCompat schemaVersion=\"1\">\n"
+                "  <Macros>\n"
+                "    <Macro Ctrl=\"no\" Alt=\"no\" Shift=\"no\" Key=\"0\">\n"
+                "      <Action type=\"1\" message=\"2170\"/>\n"
+                "    </Macro>\n"
+                "    <Macro name=\"认不得的步骤\" Key=\"0\">\n"
+                "      <Action type=\"7\" message=\"1\"/>\n"
+                "    </Macro>\n"
+                "    <Macro name=\"半条好的\" Key=\"0\">\n"
+                "      <Action type=\"7\" message=\"1\"/>\n"
+                "      <Action type=\"2\" sParam=\"ok\"/>\n"
+                "    </Macro>\n"
+                "  </Macros>\n"
+                "</NotepadPlusCompat>\n";
+            npcc::infra::XmlDocument bad;
+            Check(npcc::infra::XmlDocument::Parse(broken, bad, &parseError), "坏文件能解析");
+            warnings.clear();
+            const std::vector<Macro> survived = npcc::core::ReadMacrosXml(*bad.Root(), {}, warnings);
+            Check(survived.size() == 1, "只有一条能用的宏留下来");
+            Check(!survived.empty() && survived[0].name == L"半条好的" &&
+                      survived[0].actions.size() == 1,
+                  "认不出的步骤被跳过，剩下的步骤照常留下");
+            Check(warnings.size() >= 3, "每种问题都留了警告");
+        }
+
+        // 4) 与快捷键共用一个文件：改快捷键那条路不能把宏抹掉
+        {
+            npcc::core::CommandRegistry registry;
+            Command command;
+            command.id = 57349;
+            command.key = L"cmd.tool.sortAsc";
+            command.text = L"升序排序";
+            registry.Register(command);
+
+            const std::filesystem::path path = npcc::core::ShortcutStore::Path();
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+
+            Macro macro;
+            macro.name = L"存下来的";
+            MacroAction action;
+            action.kind = MacroAction::Kind::Command;
+            action.commandId = command.id;
+            action.commandName = command.key;
+            macro.actions.push_back(action);
+
+            npcc::core::ShortcutStore store;
+            store.SetMacros({macro});
+            std::wstring error;
+            Check(store.Save(registry, &error), "保存（快捷键 + 宏）成功");
+
+            npcc::core::ShortcutStore reloaded;
+            Check(reloaded.Load(registry, &error), "重新加载成功");
+            Check(reloaded.Macros().size() == 1 && reloaded.Macros()[0].name == L"存下来的",
+                  "宏随文件读回来");
+
+            // 现在模拟"用户改了快捷键又保存"：store 手里有宏，所以写出去的文件里宏还在
+            registry.AssignShortcut(command.id, npcc::core::kModCtrl, 'K');
+            Check(reloaded.Save(registry, &error), "改完快捷键再保存");
+            npcc::core::ShortcutStore again;
+            Check(again.Load(registry, &error), "再读一次");
+            Check(again.Macros().size() == 1, "改快捷键没有把宏抹掉（一份文件只有一个写者）");
+            const std::vector<npcc::core::ShortcutBinding> bindings = registry.BindingsOf(command.id);
+            Check(bindings.size() == 1 && bindings[0].keyCode == 'K', "快捷键改动也生效了");
+            std::filesystem::remove(path, ec);
+        }
     }
 
     Section("崩溃快照（标识映射 / 文件格式 / 落盘与清理）");

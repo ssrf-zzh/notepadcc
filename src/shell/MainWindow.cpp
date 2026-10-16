@@ -27,6 +27,7 @@
 #include "shell/PreferencesDialog.h"
 #include "shell/ShortcutDialog.h"
 #include "shell/StyleConfigDialog.h"
+#include "shell/MacroDialog.h"
 #include "core/ShortcutStore.h"
 #include "infra/SingleInstance.h"
 #include "infra/FileAssociation.h"
@@ -85,6 +86,12 @@ enum : npcc::core::CmdId {
     kCmdViewCyclePane     = npcc::core::MakeCmdId(4, 12),
     kCmdViewScrollSync    = npcc::core::MakeCmdId(4, 13),
     kCmdViewDarkMode      = npcc::core::MakeCmdId(4, 14),
+
+    // 宏（8 类）
+    kCmdMacroRecord       = npcc::core::MakeCmdId(8, 1),
+    kCmdMacroPlayLast     = npcc::core::MakeCmdId(8, 3),
+    kCmdMacroSaveLast     = npcc::core::MakeCmdId(8, 5),
+    kCmdMacroRunMultiple  = npcc::core::MakeCmdId(8, 6),
 
     // 格式（5 类）：行尾转换
     kCmdFormatEolCrlf = npcc::core::MakeCmdId(5, 1),
@@ -294,9 +301,13 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             // 默认方案先留一份（"恢复默认"要用），随后让 shortcuts.xml 覆盖它
             defaultShortcuts_ = registry_.AllBindings();
             std::wstring shortcutError;
-            if (!core::ShortcutStore().Load(registry_, &shortcutError)) {
+            std::vector<std::wstring> shortcutWarnings;
+            if (!shortcutStore_.Load(registry_, &shortcutError, &shortcutWarnings)) {
                 infra::LogWarn(L"shortcut", L"快捷键配置加载失败，改用默认方案: " + shortcutError);
             }
+            // 宏也要在菜单建出来之前注册好，否则宏菜单里空空如也
+            // （读文件时的警告由 ShortcutStore 自己记日志，这里不重复）
+            RegisterMacroCommands();
             menu_ = BuildMainMenu(registry_);
             if (menu_ != nullptr) {
                 ::SetMenu(hwnd_, menu_);
@@ -643,6 +654,10 @@ void MainWindow::RegisterCommands() {
 
     const uint32_t needsBuffer = core::kCmdNeedsBuffer;
     const uint32_t needsWritable = core::kCmdNeedsBuffer | core::kCmdNeedsWritable;
+    // 工具菜单里的动作（行操作、排序、去重、空白、大小写、编解码、注释）都是
+    // "只依赖文档当前内容"的纯操作，所以都能进宏；撤销/重做、剪贴板、打开/保存这些
+    // 依赖历史、剪贴板或用户交互的**不进宏**（回放时会做出与录制时不同的结果）
+    const uint32_t needsWritableRecordable = needsWritable | core::kCmdRecordable;
 
     // ---- 文件 ----
     add(kCmdFileNew, CmdCategory::File, L"cmd.file.new", L"新建(&N)",
@@ -787,6 +802,18 @@ void MainWindow::RegisterCommands() {
     add(kCmdViewDarkMode, CmdCategory::View, L"cmd.view.darkMode", L"暗色模式(&D)",
         core::kCmdCheckable, [this](const CmdContext&) { CommandToggleDarkMode(); });
 
+    // ---- 宏 ----
+    add(kCmdMacroRecord, CmdCategory::Macro, L"cmd.macro.record", L"开始/停止录制宏(&R)",
+        core::kCmdCheckable,
+        [this](const CmdContext&) { CommandToggleMacroRecord(); });
+    add(kCmdMacroPlayLast, CmdCategory::Macro, L"cmd.macro.playLast", L"播放上次的宏(&P)",
+        core::kCmdNone, [this](const CmdContext&) { CommandPlayLastMacro(); });
+    add(kCmdMacroRunMultiple, CmdCategory::Macro, L"cmd.macro.runMultiple",
+        L"重复执行上次的宏(&L)...", core::kCmdNone,
+        [this](const CmdContext&) { CommandRunMacroMultiple(); });
+    add(kCmdMacroSaveLast, CmdCategory::Macro, L"cmd.macro.saveLast", L"保存录制的宏(&S)...",
+        core::kCmdNone, [this](const CmdContext&) { FlushRecordingToStore(); });
+
     // ---- 格式（行尾转换）----
     add(kCmdFormatEolCrlf, CmdCategory::Format, L"cmd.format.eolCrlf", L"转为 Windows 行尾（CRLF）",
         needsWritable, [this](const CmdContext&) { CommandConvertEol(edit::EolMode::Crlf); });
@@ -824,14 +851,14 @@ void MainWindow::RegisterCommands() {
     };
     auto addTool = [&](core::CmdId id, const wchar_t* key, const wchar_t* text,
                        std::function<std::string(std::string_view, std::uint32_t)> tool) {
-        add(id, CmdCategory::Tools, key, text, needsWritable,
+        add(id, CmdCategory::Tools, key, text, needsWritableRecordable,
             [this, tool = std::move(tool), text](const CmdContext&) {
                 ApplyTextTool(tool, text);
             });
     };
     auto addLineOp = [&](core::CmdId id, const wchar_t* key, const wchar_t* text,
                          void (edit::EditView::*operation)() const) {
-        add(id, CmdCategory::Tools, key, text, needsWritable,
+        add(id, CmdCategory::Tools, key, text, needsWritableRecordable,
             [this, operation](const CmdContext&) {
                 if (edit::Document* document = ActiveDocument();
                     document != nullptr && document->view) {
@@ -933,10 +960,10 @@ void MainWindow::RegisterCommands() {
 
     addSeparator(L"cmd.tool.sepComment");
     add(kCmdToolToggleComment, CmdCategory::Tools, L"cmd.tool.toggleComment",
-        L"注释/取消注释(&Q)", needsWritable,
+        L"注释/取消注释(&Q)", needsWritableRecordable,
         [this](const CmdContext&) { CommandToggleComment(false); });
     add(kCmdToolBlockComment, CmdCategory::Tools, L"cmd.tool.blockComment",
-        L"区块注释/取消(&B)", needsWritable,
+        L"区块注释/取消(&B)", needsWritableRecordable,
         [this](const CmdContext&) { CommandToggleComment(true); });
     add(kCmdToolExportLanguages, CmdCategory::Tools, L"cmd.tool.exportLanguages",
         L"导出语言定义到配置目录", core::kCmdNone,
@@ -986,6 +1013,7 @@ void MainWindow::RegisterCommands() {
     bindChecked(kCmdViewSplitToggle, [this] { return splitEnabled_; });
     bindChecked(kCmdViewScrollSync, [this] { return splitScrollSync_; });
     bindChecked(kCmdViewDarkMode, [this] { return darkMode_; });
+    bindChecked(kCmdMacroRecord, [this] { return macroRecorder_.Recording(); });
 
     // ---- 默认快捷键 ----
     const uint8_t ctrl = core::kModCtrl;
@@ -1041,6 +1069,10 @@ void MainWindow::RegisterCommands() {
     registry_.BindShortcut(kCmdToolToggleComment, ctrl, 'Q', true);
     registry_.BindShortcut(kCmdToolBlockComment, ctrlShift, 'Q', true);
     registry_.BindShortcut(kCmdEditAutoComplete, ctrl, VK_SPACE, true);
+    // 宏：与对标产品的默认键一致（附录 A）
+    registry_.BindShortcut(kCmdMacroRecord, ctrlShift, 'R', true);
+    registry_.BindShortcut(kCmdMacroPlayLast, ctrlShift, 'P', true);
+    registry_.BindShortcut(kCmdMacroRunMultiple, ctrlShift, 'L', true);
 }
 
 void MainWindow::RebuildMenu() {
@@ -1886,6 +1918,13 @@ void MainWindow::HandleEditorNotify(const NMHDR& header) {
     // 关键：修改标记记在"发出通知的那个文档"上，而不是当前活动文档。
     // 打开文件时会先给隐藏的控件 SetText，此时活动文档还不是它。
     switch (note.event) {
+        case edit::EditorEvent::CharAdded:
+            // 宏录制：敲进去的字按空闲合并成一步（设计文档 5.7 第 4 条）。
+            // 只从活动文档录：录到别的标签上会得到"看着对、回放跑偏"的宏
+            if (macroRecorder_.Recording() && document == documents_->Active()) {
+                macroRecorder_.RecordChar(note.character, static_cast<int64_t>(::GetTickCount64()));
+            }
+            break;
         case edit::EditorEvent::SavePointLeft:
             document->buffer.isModified = true;
             // 崩溃抢救只看"有没有未保存的改动"，所以这一刻必须同步刷新槽位：
@@ -2875,6 +2914,205 @@ void MainWindow::ApplyStyleSchemeToAllViews() {
     tabBar_.SetDark(styles_.IsDark());
 }
 
+namespace {
+
+// 宽字符 → UTF-8 字节（回放"插入文本"那一步要用）
+std::string ToUtf8(std::wstring_view text) {
+    if (text.empty()) {
+        return {};
+    }
+    const int need = ::WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
+                                           nullptr, 0, nullptr, nullptr);
+    if (need <= 0) {
+        return {};
+    }
+    std::string out(static_cast<std::size_t>(need), '\0');
+    ::WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(),
+                          need, nullptr, nullptr);
+    return out;
+}
+
+}  // namespace
+
+void MainWindow::CommandToggleMacroRecord() {
+    if (macroRecorder_.Recording()) {
+        FlushRecordingToStore();
+        return;
+    }
+    // 录制期间把注册表的执行事件接过来。放在 Execute() 那个唯一入口上，
+    // 菜单、快捷键、宏自己走的都是这条路
+    macroRecorder_.Start();
+    registry_.SetRecordHook([this](const core::Command& command) {
+        macroRecorder_.RecordCommand(command);
+    });
+    statusBar_.SetMacroRecording(true);
+    infra::LogInfo(L"macro", L"开始录制宏");
+}
+
+void MainWindow::FlushRecordingToStore() {
+    if (!macroRecorder_.Recording()) {
+        return;
+    }
+    registry_.SetRecordHook(nullptr);
+    macroRecorder_.Stop();
+    statusBar_.SetMacroRecording(false);
+    const std::vector<core::MacroAction>& actions = macroRecorder_.Actions();
+    if (actions.empty()) {
+        ::MessageBoxW(hwnd_, L"这段录制里没有任何步骤（可能只是点了菜单或按了 Esc）。",
+                      L"录制宏", MB_ICONINFORMATION);
+        return;
+    }
+    core::Macro macro;
+    macro.actions = actions;
+    const std::wstring suggested = L"Macro " + std::to_wstring(shortcutStore_.Macros().size() + 1);
+    if (!AskMacroName(hwnd_, suggested, macro.name)) {
+        return;   // 取消：丢弃这段录制（已经停止录制了，状态是干净的）
+    }
+    lastMacro_ = macro;   // 录完即可播放/保存
+    shortcutStore_.AddOrReplaceMacro(macro);
+    std::wstring error;
+    if (!shortcutStore_.Save(registry_, &error)) {
+        infra::LogWarn(L"macro", L"宏保存失败: " + error);
+        ::MessageBoxW(hwnd_, (L"宏已生效，但写入 shortcuts.xml 失败：\n" + error).c_str(),
+                      L"保存宏失败", MB_ICONWARNING);
+    }
+    RegisterMacroCommands();
+    RebuildMenu();
+    statusBar_.SetMessage(L"宏「" + macro.name + L"」已保存（" +
+                          std::to_wstring(macro.actions.size()) + L" 步）");
+    infra::LogInfo(L"macro", L"宏已保存: " + macro.name + L"，共 " +
+                                std::to_wstring(macro.actions.size()) + L" 步");
+}
+
+void MainWindow::CommandPlayLastMacro() {
+    if (lastMacro_.Empty()) {
+        ::MessageBoxW(hwnd_, L"还没有可播放的宏：先录制一段，或从宏菜单里执行一条已保存的宏。",
+                      L"播放宏", MB_ICONINFORMATION);
+        return;
+    }
+    RunMacro(lastMacro_, 1, true);
+}
+
+void MainWindow::CommandRunMacroMultiple() {
+    if (lastMacro_.Empty()) {
+        ::MessageBoxW(hwnd_, L"还没有可执行的宏：先录制一段，或从宏菜单里执行一条已保存的宏。",
+                      L"执行宏", MB_ICONINFORMATION);
+        return;
+    }
+    MacroRunOptions options;
+    if (!AskMacroRunOptions(hwnd_, lastMacro_.name.empty() ? L"(未命名)" : lastMacro_.name,
+                            options)) {
+        return;
+    }
+    RunMacro(lastMacro_, options.repeatCount, options.stopOnError);
+}
+
+void MainWindow::CommandRunSavedMacro(std::size_t index) {
+    const std::vector<core::Macro>& macros = shortcutStore_.Macros();
+    if (index >= macros.size()) {
+        return;
+    }
+    lastMacro_ = macros[index];   // 之后"播放上次的宏"就是这一条
+    RunMacro(lastMacro_, 1, true);
+}
+
+void MainWindow::RunMacro(const core::Macro& macro, int repeatCount, bool stopOnError) {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr) {
+        ::MessageBoxW(hwnd_, L"没有打开的文档，宏没有地方可跑。", L"执行宏", MB_ICONINFORMATION);
+        return;
+    }
+    if (macroRecorder_.Recording()) {
+        // 录制中回放会把回放的命令又录进宏里，越滚越大
+        ::MessageBoxW(hwnd_, L"正在录制宏：请先停止录制再执行。", L"执行宏", MB_ICONINFORMATION);
+        return;
+    }
+
+    core::MacroRunner runner;
+    runner.runCommand = [this](core::CmdId id) {
+        const core::Command* command = registry_.Find(id);
+        if (command == nullptr) {
+            return false;   // 宏里记的命令在当前版本不存在（比如换了版本）
+        }
+        core::CmdContext context{};
+        if (edit::Document* active = ActiveDocument(); active != nullptr) {
+            context.buffer = &active->buffer;
+            context.view = active->view.get();
+        }
+        return registry_.Execute(id, context) == core::ExecResult::Ok;
+    };
+    runner.sendMessage = [document](const core::MacroAction& action) {
+        if (document->view != nullptr && document->view->Valid()) {
+            document->view->Send(action.message, static_cast<uintptr_t>(action.wParam),
+                                 action.lParam);
+        }
+    };
+    runner.insertText = [document](std::wstring_view text) {
+        if (document->view != nullptr && document->view->Valid()) {
+            document->view->InsertTextAt(document->view->CaretPosition(), ToUtf8(text));
+        }
+    };
+    // 每步之间抽一次消息：否则回放期间窗口完全没反应，连"按 Esc 中断"都做不到。
+    // 代价是这段时间里点菜单能插进来——真要做成"事务式"回放得把编辑操作排队到结束后，
+    // 那是另一件事（记在设计说明书 2.9 的差异里）。
+    runner.keepGoing = [this] {
+        MSG message{};
+        while (::PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE) != 0) {
+            if (message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE) {
+                return false;
+            }
+            if (message.message == WM_QUIT) {
+                ::PostQuitMessage(static_cast<int>(message.wParam));
+                return false;
+            }
+            ::TranslateMessage(&message);
+            ::DispatchMessageW(&message);
+        }
+        return true;
+    };
+
+    statusBar_.SetMessage(L"正在执行宏…（按 Esc 中断）");
+    const core::MacroRunResult result = core::RunMacro(macro, runner, repeatCount, stopOnError);
+    UpdateStatus();
+    infra::LogInfo(L"macro", L"宏执行结束: " + (result.ok ? L"全部成功" : result.message) +
+                                 L"，完成 " + std::to_wstring(result.completed) + L" 遍");
+    if (!result.ok) {
+        std::wstring text = result.message;
+        if (result.failedRepeat > 1) {
+            text += L"（第 " + std::to_wstring(result.failedRepeat) + L" 遍里出的问题）";
+        }
+        text += L"\n\n已经完成的 " + std::to_wstring(result.completed) + L" 遍不会回退。";
+        ::MessageBoxW(hwnd_, text.c_str(), L"执行宏", MB_ICONWARNING);
+    }
+}
+
+void MainWindow::RegisterMacroCommands() {
+    // 每条宏一个命令：菜单里显示宏名，也能像别的命令一样绑快捷键
+    if (macroCommandBase_ == 0) {
+        macroCommandBase_ = 128;   // 宏类（8）里前 128 个号留给内置的宏命令
+    }
+    const std::vector<core::Macro>& macros = shortcutStore_.Macros();
+    for (std::size_t index = 0; index < macros.size(); ++index) {
+        const core::CmdId id = core::MakeCmdId(static_cast<uint8_t>(core::CmdCategory::Macro),
+                                              static_cast<uint16_t>(macroCommandBase_ + index));
+        core::Command command;
+        command.id = id;
+        command.category = core::CmdCategory::Macro;
+        command.key = L"macro." + macros[index].name;
+        command.text = macros[index].name;
+        command.flags = core::kCmdNone;   // 宏自己不该被录进另一条宏（会套娃）
+        const std::size_t captured = index;
+        command.execute = [this, captured](const core::CmdContext&) { CommandRunSavedMacro(captured); };
+        if (!registry_.UpdateCommand(id, command.text, command.execute)) {
+            registry_.Register(command);
+        }
+        // 宏自带的快捷键（文件里写的）也一并生效
+        if (macros[index].keyCode != 0 && macros[index].modifiers != core::kModNone) {
+            registry_.BindShortcut(id, macros[index].modifiers, macros[index].keyCode, true);
+        }
+    }
+}
+
 void MainWindow::CommandToggleDarkMode() {
     darkMode_ = !darkMode_;
     // 主题名落进 config.xml；配色本身（两套）在 stylers.xml 里
@@ -3224,7 +3462,9 @@ void MainWindow::CommandManageShortcuts() {
         return;
     }
     std::wstring error;
-    if (!core::ShortcutStore().Save(registry_, &error)) {
+    // 用外壳持有的那个 store：它手里有当前这份宏表，一起写出去。
+    // （用一个临时对象会写出"只有快捷键、没有宏"的文件——那是数据丢失，不是小毛病）
+    if (!shortcutStore_.Save(registry_, &error)) {
         infra::LogWarn(L"shortcut", L"快捷键保存失败: " + error);
         ::MessageBoxW(hwnd_, (L"快捷键已经生效，但写入 shortcuts.xml 失败：\n" + error).c_str(),
                       L"保存快捷键失败", MB_ICONWARNING);
