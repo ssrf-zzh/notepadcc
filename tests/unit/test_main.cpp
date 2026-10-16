@@ -15,6 +15,8 @@
 #include "core/SessionManager.h"
 #include "core/ShortcutStore.h"
 #include "core/Macro.h"
+#include "core/FolderTree.h"
+#include "shell/FolderPanel.h"
 #include "core/SnapshotStore.h"
 #include "infra/SingleInstance.h"
 #include "infra/FileAssociation.h"
@@ -158,6 +160,34 @@ npcc::core::CmdId AddTestCommand(npcc::core::CommandRegistry& registry,
 
 LRESULT CALLBACK TestHostProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     return ::DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+// 文件夹工作区面板向外壳发的那种通知，测试里需要一个能把它收下来的宿主窗口
+std::wstring g_lastFolderNotifyPath;
+int          g_folderNotifyCount = 0;
+
+LRESULT CALLBACK NotifyHostProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == WM_NOTIFY) {
+        const auto* header = reinterpret_cast<const NMHDR*>(lParam);
+        if (header != nullptr && header->code == npcc::shell::kFolderNotifyCode) {
+            const auto* notification = reinterpret_cast<const npcc::shell::FolderNotify*>(lParam);
+            g_lastFolderNotifyPath = notification->path;
+            ++g_folderNotifyCount;
+        }
+    }
+    return ::DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+HWND CreateNotifyHost() {
+    const HINSTANCE instance = ::GetModuleHandleW(nullptr);
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = &NotifyHostProc;
+    wc.hInstance = instance;
+    wc.lpszClassName = L"notepadccNotifyHost";
+    ::RegisterClassExW(&wc);
+    return ::CreateWindowExW(0, L"notepadccNotifyHost", L"", 0, 0, 0, 200, 200, nullptr, nullptr,
+                             instance, nullptr);
 }
 
 // 直接写文件。不要用 WriteFileAtomic——它走"临时文件 + 改名替换"，
@@ -2578,6 +2608,142 @@ int main() {
             Check(bindings.size() == 1 && bindings[0].keyCode == 'K', "快捷键改动也生效了");
             std::filesystem::remove(path, ec);
         }
+    }
+
+    // ---------------------------------------------------------------- 文件夹工作区
+    // 两半分开测：目录树模型是纯函数（造目录、比对结构与顺序）；面板是窗口层的活
+    //（选中 → 向父窗口发通知），后者在**同进程**里驱动——跨进程传不了树节点的句柄，
+    // 键盘导航那一路由界面回归负责。
+    Section("文件夹工作区（目录树模型 + 面板通知）");
+    {
+        using npcc::core::BuildFolderTree;
+        using npcc::core::FolderNode;
+        using npcc::core::FolderTreeOptions;
+        using npcc::core::ReadFolderChildren;
+
+        npcc::infra::InitializePaths(true);
+        const std::filesystem::path base =
+            std::filesystem::temp_directory_path() / "notepadcc_folder_test";
+        std::error_code ec;
+        std::filesystem::remove_all(base, ec);
+        std::filesystem::create_directories(base / L"sub" / L"deep", ec);
+        WriteFileDirect((base / L"a.txt").wstring(), "a\n");
+        WriteFileDirect((base / L"alpha.md").wstring(), "#a\n");
+        WriteFileDirect((base / L"Zed.txt").wstring(), "z\n");
+        WriteFileDirect((base / L"sub" / L"b.cpp").wstring(), "int main() {}\n");
+        WriteFileDirect((base / L"sub" / L"deep" / L"c.txt").wstring(), "c\n");
+
+        // 1) 建树：结构、顺序、目录优先
+        {
+            const FolderNode tree = BuildFolderTree(base.wstring());
+            Check(!tree.Empty() && tree.isFolder, "根节点就是一个目录");
+            Check(tree.children.size() == 4, "根下有 4 个子项（1 个目录 + 3 个文件）");
+            Check(tree.children[0].name == L"sub" && tree.children[0].isFolder,
+                  "目录排在最前");
+            Check(tree.children[1].name == L"a.txt" && tree.children[2].name == L"alpha.md" &&
+                      tree.children[3].name == L"Zed.txt",
+                  "文件按名字不区分大小写排序（Zed 排在最后）");
+            Check(tree.children[0].children.size() == 2,
+                  "子目录里也有内容（目录优先：deep 在 b.cpp 之前）");
+            Check(tree.children[0].children[0].name == L"deep" &&
+                      tree.children[0].children[1].name == L"b.cpp",
+                  "深层目录的顺序也对");
+            Check(tree.children[0].children[0].children.size() == 1 &&
+                      tree.children[0].children[0].children[0].name == L"c.txt",
+                  "第三层也读到了");
+            Check(tree.children[1].path == (base / L"a.txt").wstring(), "每个节点带完整路径");
+        }
+
+        // 2) 深度与子项数上限：超大目录不该把界面拖死
+        {
+            FolderTreeOptions shallow;
+            shallow.maxDepth = 1;
+            const FolderNode limited = BuildFolderTree(base.wstring(), shallow);
+            Check(limited.children.size() == 4, "深度 1 时根的子项照常列出");
+            Check(limited.children[0].children.empty(), "但下钻被上限拦住了");
+
+            FolderTreeOptions few;
+            few.maxChildren = 2;
+            const FolderNode capped = BuildFolderTree(base.wstring(), few);
+            Check(capped.children.size() == 2, "子项数上限生效");
+        }
+
+        // 3) 读一层（按需展开用）与"目录不存在"的边界
+        {
+            const std::vector<FolderNode> children = ReadFolderChildren(base.wstring());
+            Check(children.size() == 4, "单独读一层拿到 4 项");
+            Check(ReadFolderChildren((base / L"并不存在").wstring()).empty(),
+                  "目录不存在时返回空，不抛异常");
+            Check(BuildFolderTree(L"").Empty(), "空路径返回空节点");
+            Check(BuildFolderTree((base / L"a.txt").wstring()).Empty(),
+                  "给的是文件而不是目录时也返回空");
+        }
+
+        // 4) 面板：把目录挂上去，树里真的有那么多节点
+        {
+            const HWND host = CreateHiddenHost();
+            if (host == nullptr) {
+                Check(false, "创建隐藏宿主窗口失败");
+            } else {
+                Check(npcc::shell::FolderPanel::RegisterWindowClass(::GetModuleHandleW(nullptr)),
+                      "注册面板窗口类");
+                npcc::shell::FolderPanel panel;
+                Check(panel.Create(host, 900), "创建面板");
+                panel.SetRoot(base.wstring());
+                Check(panel.Root() == base.wstring(), "根目录记住了");
+                const HWND tree = panel.Tree();
+                Check(tree != nullptr, "树控件在");
+                // 根 + 4 个子项 + sub 下的 2 项 + deep 下的 1 项 = 8
+                Check(tree != nullptr && ::SendMessageW(tree, TVM_GETCOUNT, 0, 0) == 8,
+                      "树里一共 8 个节点（根 + 4 + 2 + 1）");
+                // 选中第 1 个子项（目录 sub）：只展开，不发通知；
+                // 再选它下面的 b.cpp：发一条"打开这个文件"的通知给父窗口
+                const HWND notifyHost = CreateNotifyHost();
+                if (notifyHost != nullptr) {
+                    ::DestroyWindow(host);
+                    Check(npcc::shell::FolderPanel::RegisterWindowClass(
+                              ::GetModuleHandleW(nullptr)),
+                          "注册面板窗口类（复用）");
+                    panel.Destroy();
+                    Check(panel.Create(notifyHost, 901), "在新宿主上重建面板");
+                    panel.SetRoot(base.wstring());
+                    const HWND newTree = panel.Tree();
+                    const HTREEITEM rootItem = reinterpret_cast<HTREEITEM>(
+                        ::SendMessageW(newTree, TVM_GETNEXTITEM, TVGN_ROOT, 0));
+                    const HTREEITEM subItem = reinterpret_cast<HTREEITEM>(::SendMessageW(
+                        newTree, TVM_GETNEXTITEM, TVGN_CHILD, reinterpret_cast<LPARAM>(rootItem)));
+                    Check(subItem != nullptr, "找得到根的第一个子项");
+                    ::SendMessageW(newTree, TVM_SELECTITEM, TVGN_CARET,
+                                   reinterpret_cast<LPARAM>(subItem));
+                    g_folderNotifyCount = 0;
+                    panel.ActivateSelection();
+                    Check(g_folderNotifyCount == 0, "选中的是目录：只展开，不发打开通知");
+                    // 子目录里第一个子项是它自己的子目录（目录仍然排在前），
+                    // 所以要往后挪一格才是 b.cpp
+                    const HTREEITEM firstOfSub = reinterpret_cast<HTREEITEM>(::SendMessageW(
+                        newTree, TVM_GETNEXTITEM, TVGN_CHILD, reinterpret_cast<LPARAM>(subItem)));
+                    const HTREEITEM fileItem = reinterpret_cast<HTREEITEM>(::SendMessageW(
+                        newTree, TVM_GETNEXTITEM, TVGN_NEXT, reinterpret_cast<LPARAM>(firstOfSub)));
+                    Check(fileItem != nullptr, "找得到子目录里的文件项");
+                    // 先展开子目录：折叠着的子项没法被选中（控件会拒绝）
+                    ::SendMessageW(newTree, TVM_EXPAND, TVE_EXPAND,
+                                   reinterpret_cast<LPARAM>(subItem));
+                    ::SendMessageW(newTree, TVM_SELECTITEM, TVGN_CARET,
+                                   reinterpret_cast<LPARAM>(fileItem));
+                    panel.ActivateSelection();
+                    Check(g_folderNotifyCount == 1, "选中的是文件：发出了一条打开通知");
+                    Check(g_lastFolderNotifyPath == (base / L"sub" / L"b.cpp").wstring(),
+                          "通知里的路径就是那个文件");
+                    ::DestroyWindow(notifyHost);
+                }
+                panel.SetRoot(L"");
+                const HWND liveTree = panel.Tree();
+                Check(liveTree != nullptr && ::SendMessageW(liveTree, TVM_GETCOUNT, 0, 0) == 0,
+                      "清空根目录之后树也空了");
+            }
+        }
+
+        std::filesystem::remove_all(base, ec);
     }
 
     Section("崩溃快照（标识映射 / 文件格式 / 落盘与清理）");

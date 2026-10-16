@@ -20,6 +20,7 @@
 #include "infra/CrashGuard.h"
 #include "shell/StatusBar.h"
 #include "shell/TabBar.h"
+#include "shell/FolderPanel.h"
 #include "shell/FindBar.h"
 #include "shell/SearchPanel.h"
 #include "search/CrossFileSearch.h"
@@ -126,6 +127,15 @@ private:
     void RegisterMacroCommands();
     void RefreshMacroMenuEntries();
     void FlushRecordingToStore();   // 停止录制 → 取名 → 存文件 → 注册菜单
+    // ---- 文件夹工作区（设计文档 2.11）----
+    void CommandOpenWorkspace();      // 选一个目录当工作区
+    void CommandCloseWorkspace();
+    void CommandRefreshWorkspace();
+    void CommandOpenWorkspaceSelection();   // 打开树里选中的文件（双击/回车也走它）
+    void ApplyWorkspace(const std::wstring& folder, bool persist);
+    void HandleFolderNotify(const FolderNotify& notification);
+    // 打开一个具体路径（工作区双击、单实例转交都用它，免得两处各写一遍）
+    bool OpenDocumentPath(const std::wstring& path);
     void ApplyStyleSchemeToAllViews();
     void CommandAutoComplete();
     const edit::LanguageDef* ActiveLanguage() const;
@@ -182,6 +192,7 @@ private:
     bool crashTest_ = false;
     std::unique_ptr<core::DocumentManager> documents_;
     TabBar                     tabBar_;
+    FolderPanel                folderPanel_;
     StatusBar                  statusBar_;
     FindBar                    findBar_;
     SearchPanel                searchPanel_;

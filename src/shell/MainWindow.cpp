@@ -86,6 +86,10 @@ enum : npcc::core::CmdId {
     kCmdViewCyclePane     = npcc::core::MakeCmdId(4, 12),
     kCmdViewScrollSync    = npcc::core::MakeCmdId(4, 13),
     kCmdViewDarkMode      = npcc::core::MakeCmdId(4, 14),
+    kCmdViewWorkspaceOpen    = npcc::core::MakeCmdId(4, 15),
+    kCmdViewWorkspaceClose   = npcc::core::MakeCmdId(4, 16),
+    kCmdViewWorkspaceRefresh = npcc::core::MakeCmdId(4, 17),
+    kCmdViewWorkspaceOpenSel = npcc::core::MakeCmdId(4, 18),
 
     // 宏（8 类）
     kCmdMacroRecord       = npcc::core::MakeCmdId(8, 1),
@@ -257,6 +261,8 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
 
             tabBar_.Create(hwnd_, 1);
             statusBar_.Create(hwnd_, 2);
+            FolderPanel::RegisterWindowClass(::GetModuleHandleW(nullptr));
+            folderPanel_.Create(hwnd_, 3);
             findBar_.Create(hwnd_);
             searchPanel_.Create(hwnd_);
             documents_ = std::make_unique<core::DocumentManager>(hwnd_);
@@ -308,6 +314,16 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             // 宏也要在菜单建出来之前注册好，否则宏菜单里空空如也
             // （读文件时的警告由 ShortcutStore 自己记日志，这里不重复）
             RegisterMacroCommands();
+            // 工作区目录来自配置：目录不在了就当"没有工作区"，配置留着不动
+            if (!config_.General().workspaceFolder.empty()) {
+                std::error_code ec;
+                if (std::filesystem::is_directory(config_.General().workspaceFolder, ec)) {
+                    ApplyWorkspace(config_.General().workspaceFolder, false);
+                } else {
+                    infra::LogWarn(L"workspace", L"配置里的工作区目录打不开，本次不显示面板: " +
+                                                    config_.General().workspaceFolder);
+                }
+            }
             menu_ = BuildMainMenu(registry_);
             if (menu_ != nullptr) {
                 ::SetMenu(hwnd_, menu_);
@@ -452,6 +468,10 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
                 HandleTabBarNotify(*reinterpret_cast<const TabBarNotify*>(lParam));
                 return 0;
             }
+            if (header->hwndFrom == folderPanel_.Handle()) {
+                HandleFolderNotify(*reinterpret_cast<const FolderNotify*>(lParam));
+                return 0;
+            }
             if (DocumentOfView(header->hwndFrom) != nullptr) {
                 HandleEditorNotify(*header);
                 return 0;
@@ -512,18 +532,7 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             // 别的实例把文件交过来了（或者刚启动时被双击了文件）
             const std::vector<std::wstring> pending = infra::TakePendingFiles();
             for (const std::wstring& path : pending) {
-                const core::OpenOutcome outcome = documents_->Open(path);
-                if (outcome.status != core::OpenStatus::Ok &&
-                    outcome.status != core::OpenStatus::AlreadyOpen) {
-                    infra::LogWarn(L"file", L"打开失败: " + path + L" / " + outcome.message);
-                    ::MessageBoxW(hwnd_, outcome.message.c_str(), L"打开文件失败", MB_ICONWARNING);
-                    continue;
-                }
-                lastDirectory_ = core::DocumentManager::DirectoryOf(path);
-            }
-            SyncTabBar();
-            if (edit::Document* document = documents_->Active(); document != nullptr) {
-                ActivateDocument(document->buffer.id);
+                OpenDocumentPath(path);
             }
             // 用户刚双击了一个文件，把窗口提到前面来
             if (::IsIconic(hwnd_) != 0) {
@@ -814,6 +823,20 @@ void MainWindow::RegisterCommands() {
     add(kCmdMacroSaveLast, CmdCategory::Macro, L"cmd.macro.saveLast", L"保存录制的宏(&S)...",
         core::kCmdNone, [this](const CmdContext&) { FlushRecordingToStore(); });
 
+    // ---- 视图：文件夹工作区 ----
+    add(kCmdViewWorkspaceOpen, CmdCategory::View, L"cmd.view.workspaceOpen",
+        L"打开文件夹作为工作区(&F)...", core::kCmdNone,
+        [this](const CmdContext&) { CommandOpenWorkspace(); });
+    add(kCmdViewWorkspaceClose, CmdCategory::View, L"cmd.view.workspaceClose",
+        L"关闭工作区(&C)", core::kCmdNone,
+        [this](const CmdContext&) { CommandCloseWorkspace(); });
+    add(kCmdViewWorkspaceRefresh, CmdCategory::View, L"cmd.view.workspaceRefresh",
+        L"刷新工作区(&R)", core::kCmdNone,
+        [this](const CmdContext&) { CommandRefreshWorkspace(); });
+    add(kCmdViewWorkspaceOpenSel, CmdCategory::View, L"cmd.view.workspaceOpenSelected",
+        L"打开选中的文件(&O)", core::kCmdNone,
+        [this](const CmdContext&) { CommandOpenWorkspaceSelection(); });
+
     // ---- 格式（行尾转换）----
     add(kCmdFormatEolCrlf, CmdCategory::Format, L"cmd.format.eolCrlf", L"转为 Windows 行尾（CRLF）",
         needsWritable, [this](const CmdContext&) { CommandConvertEol(edit::EolMode::Crlf); });
@@ -1014,6 +1037,8 @@ void MainWindow::RegisterCommands() {
     bindChecked(kCmdViewScrollSync, [this] { return splitScrollSync_; });
     bindChecked(kCmdViewDarkMode, [this] { return darkMode_; });
     bindChecked(kCmdMacroRecord, [this] { return macroRecorder_.Recording(); });
+    bindChecked(kCmdViewWorkspaceClose, [this] { return !folderPanel_.Root().empty(); });
+    bindChecked(kCmdViewWorkspaceOpenSel, [this] { return !folderPanel_.SelectedPath().empty(); });
 
     // ---- 默认快捷键 ----
     const uint8_t ctrl = core::kModCtrl;
@@ -1148,8 +1173,21 @@ void MainWindow::LayoutChildren() const {
         bottomInset += findHeight;
     }
 
+    // 文件夹工作区：向左停靠，占住客户区左侧一条。编辑区（含分屏）在剩下的区域里排
+    const int panelWidth = folderPanel_.Width();
+    if (panelWidth > 0 && folderPanel_.Handle() != nullptr) {
+        RECT panelRect{};
+        panelRect.left = 0;
+        panelRect.top = tabHeight;
+        panelRect.right = panelWidth;
+        panelRect.bottom = client.bottom - bottomInset;
+        if (panelRect.bottom > panelRect.top) {
+            folderPanel_.Resize(panelRect);
+        }
+    }
+
     RECT viewRect{};
-    viewRect.left = 0;
+    viewRect.left = panelWidth;
     viewRect.top = tabHeight;
     viewRect.right = client.right;
     viewRect.bottom = client.bottom - bottomInset;
@@ -2565,8 +2603,13 @@ void MainWindow::CommandFindInFiles() {
     findBar_.Hide();
     searchPanel_.Show();
 
-    if (edit::Document* document = ActiveDocument();
-        document != nullptr && document->buffer.HasPath()) {
+    // 目录优先级：**工作区根** > 当前文件所在目录 > 上次用过的目录。
+    // 工作区排第一是因为它本身就是用户明确选的"我在这儿干活"，在项目里搜是常见意图
+    // （对标产品的文件夹工作区插件也是这么接的）；没有工作区时保持原来的规则
+    if (!folderPanel_.Root().empty()) {
+        searchPanel_.SetDirectory(folderPanel_.Root());
+    } else if (edit::Document* document = ActiveDocument();
+               document != nullptr && document->buffer.HasPath()) {
         searchPanel_.SetDirectory(core::DocumentManager::DirectoryOf(document->buffer.filePath));
     } else if (!lastDirectory_.empty()) {
         searchPanel_.SetDirectory(lastDirectory_);
@@ -3110,6 +3153,80 @@ void MainWindow::RegisterMacroCommands() {
         if (macros[index].keyCode != 0 && macros[index].modifiers != core::kModNone) {
             registry_.BindShortcut(id, macros[index].modifiers, macros[index].keyCode, true);
         }
+    }
+}
+
+bool MainWindow::OpenDocumentPath(const std::wstring& path) {
+    const core::OpenOutcome outcome = documents_->Open(path);
+    if (outcome.status != core::OpenStatus::Ok &&
+        outcome.status != core::OpenStatus::AlreadyOpen) {
+        infra::LogWarn(L"file", L"打开失败: " + path + L" / " + outcome.message);
+        ::MessageBoxW(hwnd_, outcome.message.c_str(), L"打开文件失败", MB_ICONWARNING);
+        return false;
+    }
+    lastDirectory_ = core::DocumentManager::DirectoryOf(path);
+    SyncTabBar();
+    if (edit::Document* document = documents_->Active(); document != nullptr) {
+        ActivateDocument(document->buffer.id);
+    }
+    return true;
+}
+
+void MainWindow::ApplyWorkspace(const std::wstring& folder, bool persist) {
+    folderPanel_.SetRoot(folder);
+    if (persist) {
+        config_.General().workspaceFolder = folder;
+        config_.RequestSave();
+    }
+    // 面板占掉左侧之后，编辑区要重新排一次
+    LayoutChildren();
+    if (!folder.empty()) {
+        statusBar_.SetMessage(L"工作区：" + folder);
+        infra::LogInfo(L"workspace", L"工作区已打开: " + folder);
+    }
+}
+
+void MainWindow::CommandOpenWorkspace() {
+    // 用系统的"选择文件夹"对话框（Vista 之后的样式；XP 时代的 SHBrowseForFolder 太丑）。
+    // 免管理员、也不需要自己画一个目录选择器
+    BROWSEINFOW browse{};
+    browse.hwndOwner = hwnd_;
+    browse.lpszTitle = L"选择要作为工作区打开的文件夹：";
+    browse.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX;
+    PIDLIST_ABSOLUTE item = ::SHBrowseForFolderW(&browse);
+    if (item == nullptr) {
+        return;   // 用户取消
+    }
+    wchar_t buffer[MAX_PATH] = {};
+    const bool ok = ::SHGetPathFromIDListW(item, buffer) != 0;
+    ::CoTaskMemFree(item);
+    if (!ok) {
+        return;
+    }
+    ApplyWorkspace(buffer, true);
+}
+
+void MainWindow::CommandCloseWorkspace() {
+    if (folderPanel_.Root().empty()) {
+        return;
+    }
+    ApplyWorkspace(std::wstring(), true);
+}
+
+void MainWindow::CommandRefreshWorkspace() {
+    if (folderPanel_.Root().empty()) {
+        return;
+    }
+    folderPanel_.Refresh();
+}
+
+void MainWindow::CommandOpenWorkspaceSelection() {
+    folderPanel_.ActivateSelection();
+}
+
+void MainWindow::HandleFolderNotify(const FolderNotify& notification) {
+    if (notification.action == FolderAction::OpenFile) {
+        OpenDocumentPath(notification.path);
     }
 }
 

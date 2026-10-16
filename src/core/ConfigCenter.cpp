@@ -184,6 +184,9 @@ bool ConfigCenter::Load(std::wstring* error) {
                             L"\"，已改回 light");
         general_.theme = L"light";
     }
+    // 工作区目录：不在这里校验"存在不存在"——目录可能只是暂时不在（U 盘、网络盘），
+    // 启动时打不开就当空工作区，配置保留着，等人把盘接回来
+    general_.workspaceFolder = ReadString(general, L"workspaceFolder", general_.workspaceFolder);
 
     const infra::XmlElement* editor = Section(root, L"edit");
     if (editor != nullptr) {
@@ -295,6 +298,7 @@ bool ConfigCenter::Save(bool force, std::wstring* error) {
     general->SetAttributeBool(L"multiInstance", general_.multiInstance);
     general->SetAttributeInt(L"recentFileCount", static_cast<int>(general_.recentFileCount));
     general->SetAttribute(L"theme", general_.theme);
+    general->SetAttribute(L"workspaceFolder", general_.workspaceFolder);
 
     infra::XmlElementPtr editor = root->AddChild(L"edit");
     editor->SetAttributeBool(L"tabToSpaces", edit_.tabToSpaces);

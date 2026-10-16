@@ -18,6 +18,9 @@ struct GeneralConfig {
     // 放配置里而不是 stylers.xml 里：用户可以把配色文件整份换成别人的，
     // 而"我要深色"是这台机器上的使用偏好，不该被换文件带走。
     std::wstring theme = L"light";
+    // 文件夹工作区的根目录（空 = 不用工作区）。放配置里而不是会话里：
+    // "我常在这个目录下干活"是使用偏好，不该因为某次没保存会话就丢掉。
+    std::wstring workspaceFolder;
 };
 
 struct EditConfig {

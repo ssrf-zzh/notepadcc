@@ -134,6 +134,11 @@ CMD_MACRO_RECORD = (8 << 12) | 1
 CMD_MACRO_PLAY = (8 << 12) | 3
 CMD_MACRO_RUN_MULTIPLE = (8 << 12) | 6
 CMD_MACRO_FIRST_SAVED = (8 << 12) | 128   # 已保存的宏在菜单里的命令号（从 128 起）
+CMD_WORKSPACE_CLOSE = (4 << 12) | 16
+CMD_WORKSPACE_REFRESH = (4 << 12) | 17
+FOLDER_PANEL_CLASS = "notepadccFolderPanel"
+TREE_CLASS = "SysTreeView32"
+TVM_GETCOUNT = 0x1105
 
 # 宏对话框（自建窗口类，所以不能用 dismiss_dialog——它只认标准对话框 #32770）
 MACRO_NAME_CLASS = "notepadccMacroName"
@@ -1592,6 +1597,162 @@ def test_macro(root):
 
     print("  宏：录制（输入合并成一步 + 两个命令）→ 存进 shortcuts.xml → 撤销 → 回放结果一致"
           " → 重启后从菜单执行仍一致 → 重复执行 2 次次数正确")
+    return True
+
+
+def test_workspace(root):
+    """文件夹工作区：面板列出目录树、键盘选中即打开文件、刷新看到外部新增、随配置记住。
+
+    驱动方式是**键盘**（Down 几次再回车），不是给树控件发"选中某一项"：
+    跨进程传不了树节点的句柄（`TVM_GETNEXTITEM(TVGN_CHILD, 句柄)` 从别的进程调用
+    永远返回 0，程序自己调用正常）——键盘路径本来也更像用户。
+    """
+    work = os.path.join(root, "build", "workspace_test")
+    ws = os.path.join(work, "proj")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(os.path.join(ws, "sub"))
+    for name, text in (("a.txt", "file a\n"), ("alpha.md", "# note\n"), ("Zed.txt", "zed\n")):
+        with open(os.path.join(ws, name), "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+    with open(os.path.join(ws, "sub", "b.cpp"), "w", encoding="utf-8", newline="") as handle:
+        handle.write("int main() { return 0; }\n")
+    with open(os.path.join(ws, "sub", "c.txt"), "w", encoding="utf-8", newline="") as handle:
+        handle.write("c\n")
+
+    cfg = os.path.join(root, "build", "bin", "config")
+    config = os.path.join(cfg, "config.xml")
+    for name in ("config.xml", "session.xml", "stylers.xml", "langs.xml", "userlangs.xml",
+                 "shortcuts.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+    # 工作区目录写在配置里：应用启动时自己打开（"选目录"那个对话框没法跨进程驱动）
+    with open(config, "w", encoding="utf-8", newline="") as handle:
+        handle.write('<?xml version="1.0" encoding="UTF-8"?>\n'
+                     '<NotepadccConfig schemaVersion="1">\n'
+                     '  <general uiLanguage="zh-CN" restoreSessionOnStart="yes"\n'
+                     '           multiInstance="no" recentFileCount="20" theme="light"\n'
+                     '           workspaceFolder="' + ws + '"/>\n'
+                     '</NotepadccConfig>\n')
+
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable"], cwd=root)
+    window = wait_for_main_window("notepadcc - 新建 1")
+    try:
+        with open(os.path.join(work, "note.txt"), "w", encoding="utf-8", newline="") as handle:
+            handle.write("x\n")   # 造一个待会儿要打开的文件
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        panel = user32.FindWindowExW(window, None, FOLDER_PANEL_CLASS, None)
+        if not panel or not user32.IsWindowVisible(panel):
+            print("  FAIL: 配置里写了工作区目录，面板却没有出现")
+            return False
+        tree = user32.FindWindowExW(panel, None, TREE_CLASS, None)
+        if not tree:
+            print("  FAIL: 面板里没有树控件")
+            return False
+        count = user32.SendMessageW(tree, TVM_GETCOUNT, 0, 0)
+        if count != 7:
+            print(f"  FAIL: 树里应当有 7 个节点（根 + 4 子项 + sub 下 2 项），实际 {count}")
+            return False
+
+        # "在文件中查找"的目录默认取工作区根（有工作区时它比"当前文件所在目录"更贴意图）
+        user32.PostMessageW(window, WM_COMMAND, CMD_FIND_IN_FILES, 0)
+        time.sleep(0.8)
+        # 搜索面板的控件挂在面板窗口下，不在主窗口下（GetDlgItem(主窗口) 会拿到 0）
+        search_panel = find_child(window, "notepadccSearchPanel")
+        directory = window_text(user32.GetDlgItem(search_panel, PANEL_DIR)) if search_panel else ""
+        if directory != ws:
+            print(f"  FAIL: 在文件中查找的目录应当默认是工作区根，实际 {directory!r}")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_FIND_IN_FILES, 0)   # 关掉面板
+        time.sleep(0.4)
+
+        # 键盘：根 → sub → a.txt，回车打开
+        for _ in range(3):
+            user32.PostMessageW(tree, WM_KEYDOWN, 0x28, 0)   # VK_DOWN
+            time.sleep(0.3)
+        user32.PostMessageW(tree, WM_KEYDOWN, 0x0D, 0)       # VK_RETURN
+        time.sleep(1.2)
+        if window_text(window) != "notepadcc - a.txt":
+            print(f"  FAIL: 在工作区里回车应当打开 a.txt，实际标题 {window_text(window)!r}")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None or scinti_text(scinti) != "file a\n":
+            print(f"  FAIL: 打开的文件内容不对 {scinti_text(scinti)!r}")
+            return False
+
+        # 外部新增一个文件 → 刷新 → 树里多一个节点
+        with open(os.path.join(ws, "brand-new.txt"), "w", encoding="utf-8", newline="") as handle:
+            handle.write("new\n")
+        user32.PostMessageW(window, WM_COMMAND, CMD_WORKSPACE_REFRESH, 0)
+        time.sleep(0.8)
+        if user32.SendMessageW(tree, TVM_GETCOUNT, 0, 0) != 8:
+            print(f"  FAIL: 刷新之后应当多一个节点，实际 "
+                  f"{user32.SendMessageW(tree, TVM_GETCOUNT, 0, 0)}")
+            return False
+
+        # 关掉工作区：面板收起，配置里也清空（否则下次启动又冒出来）
+        user32.PostMessageW(window, WM_COMMAND, CMD_WORKSPACE_CLOSE, 0)
+        time.sleep(0.8)
+        if user32.IsWindowVisible(panel):
+            print("  FAIL: 关闭工作区之后面板应当收起")
+            return False
+        with open(config, "r", encoding="utf-8", errors="replace") as handle:
+            saved = handle.read()
+        if 'workspaceFolder=""' not in saved:
+            print(f"  FAIL: 关闭工作区之后配置里应当清空\n{saved[:400]}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+
+    # 重启：工作区已经关掉了，面板不该再出现（配置确实生效了）
+    for name in ("session.xml", "config.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+    with open(config, "w", encoding="utf-8", newline="") as handle:
+        handle.write('<?xml version="1.0" encoding="UTF-8"?>\n'
+                     '<NotepadccConfig schemaVersion="1">\n'
+                     '  <general uiLanguage="zh-CN" restoreSessionOnStart="yes"\n'
+                     '           multiInstance="no" recentFileCount="20" theme="light"\n'
+                     '           workspaceFolder="' + ws + '"/>\n'
+                     '</NotepadccConfig>\n')
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable"], cwd=root)
+    window = wait_for_main_window("notepadcc - 新建 1")
+    try:
+        if not window:
+            print("  FAIL: 重启后找不到主窗口")
+            return False
+        panel = user32.FindWindowExW(window, None, FOLDER_PANEL_CLASS, None)
+        tree = user32.FindWindowExW(panel, None, TREE_CLASS, None) if panel else None
+        if not panel or not user32.IsWindowVisible(panel) or not tree:
+            print("  FAIL: 重启后工作区面板没有恢复")
+            return False
+        count = user32.SendMessageW(tree, TVM_GETCOUNT, 0, 0)
+        if count != 8:
+            print(f"  FAIL: 重启后树里应当有 8 个节点（含刚新建的），实际 {count}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        for name in ("config.xml", "session.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    print("  文件夹工作区：配置里的目录启动即展开（7 个节点）、在文件中查找默认用它、"
+          "键盘选中回车真的打开了文件、刷新看到外部新增、关闭后配置清空且重启不再出现")
     return True
 
 
@@ -3437,6 +3598,8 @@ def run():
         failed = True
     if not test_macro(root):
         failed = True
+    if not test_workspace(root):
+        failed = True
     if not test_auto_complete(root):
         failed = True
     if not test_associated_commands(root):
@@ -3450,7 +3613,7 @@ def run():
     print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + "
           "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + "
           "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + UDL + 暗色模式 + "
-          "宏 + 自动完成 + 文件关联 + 绿色打包）")
+          "宏 + 文件夹工作区 + 自动完成 + 文件关联 + 绿色打包）")
     return 0
 
 

@@ -99,7 +99,11 @@ void EditView::SetVisible(bool visible) const {
 
 void EditView::Resize(const RECT& client) const {
     if (hwnd_ != nullptr) {
-        ::MoveWindow(hwnd_, 0, 0, client.right - client.left, client.bottom - client.top, TRUE);
+        // 位置也要照用：主编辑区不一定从父窗口的 (0,0) 开始（左侧还有文件夹工作区面板）。
+        // 原先这里写死 (0,0)，面板一上线就表现为"编辑控件盖住了面板"——
+        // 布局算得再对也没用，因为控件没被挪到那个位置
+        ::MoveWindow(hwnd_, client.left, client.top, client.right - client.left,
+                     client.bottom - client.top, TRUE);
     }
 }
 
