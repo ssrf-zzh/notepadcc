@@ -157,6 +157,9 @@ private:
     };
     PendingRun   pendingRun_;
     bool         pendingRunActive_ = false;
+    // 命令行里要打开的文件（在建窗口之前就填好）。WM_CREATE 用它判断"要不要顺手
+    // 建一个空白文档"——有文件要开就别建，否则用户会看到一个多余的空标签（见附录 B）
+    std::vector<std::wstring> startupFiles_;
     std::wstring lastRunCommand_;   // 下次打开 F5 时预填
     int          runOutputCounter_ = 0;
     int          runTempCounter_ = 0;
@@ -189,6 +192,11 @@ private:
     void ScheduleMarkdownPreview();     // 内容变了之后节流刷新（300 ms）
     void RefreshMarkdownPreview();      // 立刻按活动文档重排面板
     bool ActiveDocumentIsMarkdown() const;
+    // ---- 比较（设计文档第 10 章 M3 的内置 Compare）----
+    void CommandCompareWithDocument();   // 与另一个**已打开**的文档比
+    void CommandCompareWithDisk();       // 与这份文档在磁盘上的版本比（"我改了哪些"）
+    void ShowComparison(edit::Document& left, const std::string& leftText,
+                        const std::string& rightText, const std::wstring& rightName);
     // ---- 文件夹工作区（设计文档 2.11）----
     void CommandOpenWorkspace();      // 选一个目录当工作区
     void CommandCloseWorkspace();

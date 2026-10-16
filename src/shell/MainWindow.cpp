@@ -33,6 +33,8 @@
 #include "shell/MacroDialog.h"
 #include "shell/RunCommandDialog.h"
 #include "shell/Clipboard.h"
+#include "shell/ComparePickDialog.h"
+#include "core/Diff.h"
 #include "core/ExportHtml.h"
 #include "core/ExportRtf.h"
 #include "core/JsonFormat.h"
@@ -173,6 +175,8 @@ enum : npcc::core::CmdId {
     kCmdToolMinifyJson      = npcc::core::MakeCmdId(14, 33),
     kCmdToolFormatXml       = npcc::core::MakeCmdId(14, 34),
     kCmdToolExportLangPack  = npcc::core::MakeCmdId(14, 35),
+    kCmdToolCompareDocument = npcc::core::MakeCmdId(14, 36),
+    kCmdToolCompareDisk     = npcc::core::MakeCmdId(14, 37),
     // 运行类（9）：第 1 号是 F5 那个对话框，第 kRunCommandBase 号起是用户存的命令
     kCmdRunDialog           = npcc::core::MakeCmdId(9, npcc::core::kRunCommandDialogIndex),
     kCmdEditAutoComplete = npcc::core::MakeCmdId(2, 33),
@@ -256,6 +260,9 @@ bool MainWindow::RegisterWindowClass(HINSTANCE instance) const {
 
 bool MainWindow::Create(HINSTANCE instance, const std::vector<std::wstring>& filesToOpen) {
     instance_ = instance;
+    // 先记下来：WM_CREATE 里要据此决定"要不要建一个空白文档"。
+    // 真正的打开动作放在 CreateWindowExW 之后（那时候 documents_ 才就位）
+    startupFiles_ = filesToOpen;
     hwnd_ = ::CreateWindowExW(0, kClassName, L"notepadcc", WS_OVERLAPPEDWINDOW,
                               CW_USEDEFAULT, CW_USEDEFAULT, 1100, 720,
                               nullptr, nullptr, instance, this);
@@ -400,8 +407,19 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             ::DragAcceptFiles(hwnd_, TRUE);
             // 单实例交接：告诉它文件该往哪儿送（可能已经有排队的了）
             infra::SetSingleInstanceTarget(hwnd_);
-            // 优先恢复上次会话；没有可用会话时才给一个空白文档
-            if (!RestoreSession()) {
+            // 命令行里带的文件**就在这里同步开掉**，不等消息循环。
+            //
+            // 之前是"先 RestoreSession / EnsureAtLeastOneDocument、再让排队的文件走
+            // kMsgOpenFiles"，结果是"打开一个文件却多出一个空白标签"——用户双击文件时
+            // 第一眼看到的就是那个空标签（已修，见附录 B）。
+            const std::vector<std::wstring> startupFiles = infra::TakePendingFiles();
+            for (const std::wstring& path : startupFiles) {
+                OpenDocumentPath(path);
+            }
+            // 命令行给了文件（或者刚才接下了别人转交的文件）就以文件为准，
+            // **不再恢复上次会话、也不建空白文档**：用户明确说了要看什么；
+            // 什么都没给才按老规矩——先试会话，再退到一个空白文档
+            if (startupFiles.empty() && startupFiles_.empty() && !RestoreSession()) {
                 EnsureAtLeastOneDocument();
             }
 
@@ -1140,6 +1158,13 @@ void MainWindow::RegisterCommands() {
     add(kCmdToolExportLangPack, CmdCategory::Tools, L"cmd.tool.exportLangPack",
         L"导出语言包模板（英文）", core::kCmdNone,
         [this](const CmdContext&) { CommandExportLangPack(); });
+    addSeparator(L"cmd.tool.sepCompare");
+    add(kCmdToolCompareDocument, CmdCategory::Tools, L"cmd.tool.compareDocument",
+        L"与另一个已打开的文档比较(&C)...", needsBuffer,
+        [this](const CmdContext&) { CommandCompareWithDocument(); });
+    add(kCmdToolCompareDisk, CmdCategory::Tools, L"cmd.tool.compareDisk",
+        L"与磁盘上的版本比较(&D)", needsBuffer,
+        [this](const CmdContext&) { CommandCompareWithDisk(); });
 
     addSeparator(L"cmd.tool.sepFormat");
     add(kCmdToolFormatJson, CmdCategory::Tools, L"cmd.tool.formatJson", L"格式化 JSON(&J)",
@@ -4086,6 +4111,117 @@ void MainWindow::RefreshMarkdownPreview() {
         return;
     }
     markdownPreview_.SetMarkdown(document->view->GetAllText());
+}
+
+// ---- 比较：与另一个已打开的文档 / 与磁盘上的版本（设计文档第 10 章 M3 的 Compare）----
+
+void MainWindow::CommandCompareWithDocument() {
+    if (documents_ == nullptr) {
+        return;
+    }
+    edit::Document* current = ActiveDocument();
+    if (current == nullptr || current->view == nullptr) {
+        ::MessageBoxW(hwnd_, L"没有打开的文档。", L"比较", MB_ICONINFORMATION);
+        return;
+    }
+    std::vector<std::wstring> names;
+    std::vector<core::BufferId> ids;
+    for (edit::Document* document : documents_->All()) {
+        if (document == nullptr || document == current) {
+            continue;
+        }
+        names.push_back(document->buffer.displayName);
+        ids.push_back(document->buffer.id);
+    }
+    if (names.empty()) {
+        ::MessageBoxW(hwnd_,
+                      L"只有一份打开的文档。要比的话先打开另一份（两个标签之间比最直观）。",
+                      L"比较", MB_ICONINFORMATION);
+        return;
+    }
+    std::size_t index = 0;
+    if (!PickDocumentToCompare(hwnd_, names, current->buffer.displayName, index) ||
+        index >= ids.size()) {
+        return;   // 用户取消
+    }
+    edit::Document* other = documents_->Find(ids[index]);
+    if (other == nullptr || other->view == nullptr) {
+        return;
+    }
+    ShowComparison(*current, current->view->GetAllText(), other->view->GetAllText(),
+                   other->buffer.displayName);
+}
+
+void MainWindow::CommandCompareWithDisk() {
+    edit::Document* current = ActiveDocument();
+    if (current == nullptr || current->view == nullptr) {
+        return;
+    }
+    if (!current->buffer.HasPath()) {
+        ::MessageBoxW(hwnd_, L"这份文档还没保存到磁盘，没有可比的版本。", L"比较",
+                      MB_ICONINFORMATION);
+        return;
+    }
+    // 磁盘上是**文件原始编码**的字节，编辑器缓冲区里是 UTF-8（ANSI 文档除外），
+    // 所以要先按打开时那套探测走一遍，再按行比——不然中文文档会被判成"全都不一样"
+    constexpr std::uint64_t kMaxCompareBytes = 8ull * 1024 * 1024;
+    const io::ReadResult read =
+        io::ReadWholeFile(current->buffer.filePath, kMaxCompareBytes);
+    if (!read.ok) {
+        ::MessageBoxW(hwnd_, (L"读不了磁盘上的版本：\n" + read.message).c_str(), L"比较",
+                      MB_ICONWARNING);
+        return;
+    }
+    const edit::LoadResult prepared =
+        edit::DetectAndPrepare(read.bytes, current->buffer.encoding.codePage);
+    ShowComparison(*current, current->view->GetAllText(), prepared.editorBytes,
+                   core::DocumentManager::FileNameOf(current->buffer.filePath) + L"（磁盘上）");
+}
+
+void MainWindow::ShowComparison(edit::Document& left, const std::string& leftText,
+                                const std::string& rightText, const std::wstring& rightName) {
+    // 上限与"运行命令收输出"同一档：比到最后是给人看的，几十兆的差异没有人读得完，
+    // 而"算得慢"却会让人以为程序卡死了
+    constexpr std::size_t kMaxCompareBytes = 8ull * 1024 * 1024;
+    if (leftText.size() > kMaxCompareBytes || rightText.size() > kMaxCompareBytes) {
+        ::MessageBoxW(hwnd_,
+                      L"两侧内容太大（超过 8 MB），这一版先不比这么大的："
+                      L"差异结果本身也没法读完。",
+                      L"比较", MB_ICONINFORMATION);
+        return;
+    }
+    core::DiffStats stats;
+    const std::vector<core::DiffRow> rows =
+        core::ComputeLineDiff(core::SplitLines(leftText), core::SplitLines(rightText), &stats);
+
+    core::CompareRenderOptions options;
+    options.leftName = ToUtf8(left.buffer.displayName);
+    options.rightName = ToUtf8(rightName);
+    const std::string rendered = core::RenderComparison(rows, stats, options);
+
+    if (edit::Document* result = documents_->CreateUntitled(); result != nullptr) {
+        result->buffer.displayName = L"比较：" + left.buffer.displayName + L" ↔ " + rightName;
+        result->buffer.encoding.uniMode = edit::UniMode::Utf8;
+        result->buffer.encoding.codePage = edit::kCodePageUtf8;
+        result->buffer.encoding.confidence = 100;
+        result->buffer.eol = edit::EolMode::Crlf;
+        result->buffer.detectedEol = edit::EolMode::Crlf;
+        result->buffer.isModified = false;
+        if (result->view != nullptr) {
+            result->view->SetCodePage(edit::kCodePageUtf8);
+            result->view->SetText(rendered);
+            result->view->ClearUndoBuffer();
+            result->view->MarkSavePoint();
+        }
+        SyncTabBar();
+        ActivateDocument(result->buffer.id);
+    }
+    infra::LogInfo(L"compare", L"比较完成: " + left.buffer.displayName + L" ↔ " + rightName +
+                                   L"，不同 " + std::to_wstring(stats.hunks) + L" 处");
+    statusBar_.SetMessage(L"比较完成：不同 " + std::to_wstring(stats.hunks) + L" 处（改动 " +
+                          std::to_wstring(stats.changed) + L"、删除 " +
+                          std::to_wstring(stats.deleted) + L"、新增 " +
+                          std::to_wstring(stats.inserted) + L"）");
 }
 
 bool MainWindow::OpenDocumentPath(const std::wstring& path) {

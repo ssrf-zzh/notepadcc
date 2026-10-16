@@ -21,6 +21,7 @@
 #include "core/ExportHtml.h"
 #include "core/ExportRtf.h"
 #include "core/MarkdownRender.h"
+#include "core/Diff.h"
 #include "core/PrintText.h"
 #include "core/PrintPaging.h"
 #include "plugin/PluginHost.h"
@@ -4909,6 +4910,205 @@ int main() {
         }
     }
 
+    Section("文本差异比较（行级 LCS / 配对 / 两栏渲染）");
+    {
+        using npcc::core::CompareRenderOptions;
+        using npcc::core::ComputeLineDiff;
+        using npcc::core::DiffKind;
+        using npcc::core::DiffRow;
+        using npcc::core::DiffStats;
+        using npcc::core::DisplayWidth;
+        using npcc::core::RenderComparison;
+        using npcc::core::SplitLines;
+
+        // ---- 显示宽度：中文两格 ----
+        Check(DisplayWidth("abc") == 3, "ASCII 一格一个");
+        Check(DisplayWidth("中文") == 4, "汉字两格一个");
+        Check(DisplayWidth("a中b") == 4, "混排相加");
+        Check(DisplayWidth("") == 0, "空串零格");
+
+        // ---- 切行 ----
+        {
+            const std::vector<std::string> lines = SplitLines("a\r\nb\nc\rd");
+            Check(lines.size() == 4, "三种行尾都切");
+            Check(lines[0] == "a" && lines[1] == "b" && lines[2] == "c" && lines[3] == "d",
+                  "切出来的内容不含行尾符");
+            Check(SplitLines("").empty(), "空内容没有行");
+            Check(SplitLines("one\n").size() == 1, "结尾的换行不产生空行");
+        }
+
+        // ---- 完全相同 ----
+        {
+            DiffStats stats;
+            const std::vector<DiffRow> rows =
+                ComputeLineDiff({"a", "b", "c"}, {"a", "b", "c"}, &stats);
+            Check(rows.size() == 3, "三行对三行");
+            bool allEqual = true;
+            for (const DiffRow& row : rows) {
+                allEqual = allEqual && row.kind == DiffKind::Equal;
+            }
+            Check(allEqual, "全都算相同");
+            Check(stats.hunks == 0, "没有不同之处");
+            Check(stats.equal == 3 && stats.leftLines == 3 && stats.rightLines == 3, "统计对得上");
+        }
+
+        // ---- 只有右边多一行 ----
+        {
+            DiffStats stats;
+            const std::vector<DiffRow> rows =
+                ComputeLineDiff({"a", "c"}, {"a", "b", "c"}, &stats);
+            Check(rows.size() == 3, "左边两行、右边三行 → 三行结果");
+            Check(rows[0].kind == DiffKind::Equal && rows[2].kind == DiffKind::Equal,
+                  "首尾相同");
+            Check(rows[1].kind == DiffKind::Inserted && rows[1].rightNumber == 2 &&
+                      rows[1].leftNumber == 0,
+                   "中间那行是「只有右边有」，且只带右边的行号");
+            Check(rows[1].rightText == "b" && rows[1].leftText.empty(), "文本只落在右边");
+            Check(stats.inserted == 1 && stats.hunks == 1, "统计：新增一处");
+            // 相同的行必须**留在原位**（曾经把中间段的相同行先塞进结果，全挤到前面去了）
+            Check(rows[2].leftNumber == 2 && rows[2].rightNumber == 3, "最后一行的行号仍然各算各的");
+        }
+        {
+            DiffStats stats;
+            const std::vector<DiffRow> rows = ComputeLineDiff({"a", "b", "c"}, {"a", "c"}, &stats);
+            Check(rows.size() == 3 && rows[1].kind == DiffKind::Deleted, "只有左边有一行");
+            Check(rows[1].leftNumber == 2 && rows[1].rightNumber == 0, "删除行只有左边的行号");
+            Check(stats.deleted == 1 && stats.inserted == 0, "统计：删除一处");
+        }
+
+        // ---- 一改一：配成"改动行"，而不是"删一行又加一行" ----
+        {
+            DiffStats stats;
+            const std::vector<DiffRow> rows =
+                ComputeLineDiff({"a", "old", "c"}, {"a", "new", "c"}, &stats);
+            Check(rows.size() == 3, "行数不变");
+            Check(rows[1].kind == DiffKind::Changed, "中间那行算「改动」");
+            Check(rows[1].leftText == "old" && rows[1].rightText == "new", "两侧的文本各是各的");
+            Check(rows[1].leftNumber == 2 && rows[1].rightNumber == 2, "两侧行号都在");
+            Check(stats.changed == 1 && stats.hunks == 1 && stats.deleted == 0 &&
+                      stats.inserted == 0,
+                  "统计：改动一处（不算成删除+新增）");
+        }
+        {
+            // 两行换成三行：前两行配对成改动，多出来的那行算新增
+            DiffStats stats;
+            const std::vector<DiffRow> rows =
+                ComputeLineDiff({"a", "x1", "x2", "z"}, {"a", "y1", "y2", "y3", "z"}, &stats);
+            Check(rows.size() == 5, "五行结果");
+            Check(rows[1].kind == DiffKind::Changed && rows[2].kind == DiffKind::Changed,
+                  "前两行配对成改动");
+            Check(rows[3].kind == DiffKind::Inserted, "多出来的那行是新增");
+            Check(stats.changed == 2 && stats.inserted == 1 && stats.hunks == 1,
+                  "两处改动 + 一处新增算**一处**不同（连续的一段）");
+        }
+
+        // ---- 两处相距很远的不同 = 两处 ----
+        {
+            DiffStats stats;
+            const std::vector<DiffRow> rows = ComputeLineDiff(
+                {"a", "b", "c", "d", "e", "f", "g"}, {"a", "B", "c", "d", "e", "f", "G"}, &stats);
+            Check(stats.hunks == 2, "中间隔着相同的行就是两处");
+            Check(stats.changed == 2, "两个改动行");
+        }
+
+        // ---- 边界 ----
+        {
+            DiffStats stats;
+            const std::vector<DiffRow> rows = ComputeLineDiff({}, {"a", "b"}, &stats);
+            Check(rows.size() == 2 && rows[0].kind == DiffKind::Inserted, "左边空 = 全是新增");
+            Check(stats.leftLines == 0 && stats.rightLines == 2, "行数统计对");
+        }
+        {
+            DiffStats stats;
+            const std::vector<DiffRow> rows = ComputeLineDiff({"a", "b"}, {}, &stats);
+            Check(rows.size() == 2 && rows[1].kind == DiffKind::Deleted, "右边空 = 全是删除");
+        }
+        {
+            DiffStats stats;
+            const std::vector<DiffRow> rows = ComputeLineDiff({}, {}, &stats);
+            Check(rows.empty(), "两边都空 → 没有行");
+            Check(stats.hunks == 0, "也没有不同");
+        }
+        {
+            // 超过 DP 上限时退化成"整块替换"：**必须给出结果且要标出来**，
+            // 不能为了精确一直算下去
+            std::vector<std::string> left;
+            std::vector<std::string> right;
+            for (int index = 0; index < 2100; ++index) {
+                left.push_back("left-" + std::to_string(index));
+                right.push_back("right-" + std::to_string(index));
+            }
+            DiffStats stats;
+            const std::vector<DiffRow> rows = ComputeLineDiff(left, right, &stats);
+            Check(stats.coarse, "太大时标成粗略比较");
+            Check(rows.size() == 2100, "仍然一行对一行");
+            Check(rows[0].kind == DiffKind::Changed, "配成改动行");
+        }
+
+        // ---- 两栏渲染 ----
+        {
+            DiffStats stats;
+            const std::vector<DiffRow> rows =
+                ComputeLineDiff({"a", "old", "c"}, {"a", "new", "c"}, &stats);
+            CompareRenderOptions options;
+            options.columnWidth = 20;   // 下限就是 20（见 CompareRenderOptions 的说明）
+            options.leftName = "left.txt";
+            options.rightName = "right.txt";
+            const std::string text = RenderComparison(rows, stats, options);
+            const std::vector<std::string> lines = SplitLines(text);
+            Check(lines.size() >= 3 + 3, "表头两行 + 分隔 + 三行正文");
+            Check(lines[0] == "比较：left.txt  ↔  right.txt", "第一行写清谁跟谁比");
+            Check(lines[1] == "左 3 行，右 3 行；不同 1 处（改动 1、删除 0、新增 0）",
+                  "第二行是统计");
+            const std::string separator = " \xE2\x94\x82 ";   // " │ "
+            const std::string expectedChanged =
+                "~" + std::string("    2 ") + "old" + std::string(17, ' ') + separator +
+                std::string("    2 ") + "new" + std::string(17, ' ');
+            CheckEqual(lines[4], expectedChanged, "改动行：两侧行号 + 两侧文本，按列对齐");
+            const std::string expectedEqual =
+                " " + std::string("    1 ") + "a" + std::string(19, ' ') + separator +
+                std::string("    1 ") + "a" + std::string(19, ' ');
+            CheckEqual(lines[3], expectedEqual, "相同行不写记号");
+        }
+        {
+            DiffStats stats;
+            const std::vector<DiffRow> rows = ComputeLineDiff({"only-left"}, {}, &stats);
+            CompareRenderOptions options;
+            options.columnWidth = 20;
+            options.leftName = "a";
+            options.rightName = "b";
+            const std::vector<std::string> lines = SplitLines(RenderComparison(rows, stats, options));
+            const std::string separator = " \xE2\x94\x82 ";
+            const std::string expected =
+                "-" + std::string("    1 ") + "only-left" + std::string(11, ' ') + separator +
+                std::string(6, ' ') + std::string(20, ' ');
+            CheckEqual(lines[3], expected, "只有左边有的行：右边整栏留空（行号位置也留空）");
+        }
+        {
+            // 太长的行要截断并留记号，而且两栏的宽度必须仍然一致
+            DiffStats stats;
+            const std::vector<DiffRow> rows =
+                ComputeLineDiff({std::string(50, 'x')}, {std::string(50, 'y')}, &stats);
+            CompareRenderOptions options;
+            options.columnWidth = 20;
+            const std::vector<std::string> lines = SplitLines(RenderComparison(rows, stats, options));
+            const std::string body = lines[3];
+            Check(body.find("\xE2\x80\xA6") != std::string::npos, "截断处有记号（…）");
+            // 一行的显示宽度 = 记号 1 + 行号 6 + 左栏 + 分隔 3 + 行号 6 + 右栏
+            Check(DisplayWidth(body) == 1 + 6 + 20 + 3 + 6 + 20, "两栏宽度各按列宽算");
+        }
+        {
+            // 中文按两格对齐：截断与补齐都要按显示宽度走，不然两栏会歪
+            DiffStats stats;
+            const std::vector<DiffRow> rows = ComputeLineDiff({"中文一行"}, {"中文两行"}, &stats);
+            CompareRenderOptions options;
+            options.columnWidth = 14;   // 会被夹到下限 20
+            const std::vector<std::string> lines = SplitLines(RenderComparison(rows, stats, options));
+            Check(DisplayWidth(lines[3]) == 1 + 6 + 20 + 3 + 6 + 20,
+                  "含中文的行宽度也算得对（列宽被夹到下限 20）");
+        }
+    }
+
     Section("Markdown 解析与渲染（预览面板与浏览器预览共用）");
     {
         using npcc::core::BlockPlainLines;
@@ -5313,7 +5513,8 @@ int main() {
                 // cmd.* 是命令、prefs.* 是首选项对话框）
                 const bool knownPrefix = entry.key.compare(0, 4, L"cmd.") == 0 ||
                                          entry.key.compare(0, 4, L"cat.") == 0 ||
-                                         entry.key.compare(0, 6, L"prefs.") == 0;
+                                         entry.key.compare(0, 6, L"prefs.") == 0 ||
+                                         entry.key.compare(0, 8, L"compare.") == 0;
                 if (!knownPrefix) {
                     wellFormed = false;
                 }

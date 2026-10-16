@@ -126,6 +126,7 @@ set(NPCC_CORE_SOURCES
     src/core/Localization.cpp
     src/core/BuiltinLangPacks.cpp
     src/core/MarkdownRender.cpp
+    src/core/Diff.cpp
     src/core/ConfigCenter.cpp
     src/core/DocumentManager.cpp
     src/core/FolderTree.cpp
@@ -187,6 +188,7 @@ set(NPCC_CORE_SOURCES
     src/shell/HexView.cpp
     src/shell/Clipboard.cpp
     src/shell/MarkdownPreview.cpp
+    src/shell/ComparePickDialog.cpp
     src/shell/FindBar.cpp
     src/shell/ColumnDialog.cpp
     src/shell/PreferencesDialog.cpp

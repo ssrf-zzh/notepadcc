@@ -157,6 +157,13 @@ CMD_VIEW_PREVIEW_BROWSER = (4 << 12) | 23
 CMD_VIEW_MARKDOWN_PREVIEW = (4 << 12) | 24
 MD_PREVIEW_CLASS = "notepadccMarkdownPreview"
 PREF_DIALOG_CLASS = "notepadccPreferences"
+COMPARE_PICK_CLASS = "notepadccComparePick"
+COMPARE_PICK_LIST = 1501
+COMPARE_PICK_OK = 1510
+CMD_TOOL_COMPARE_DOCUMENT = (14 << 12) | 36
+CMD_TOOL_COMPARE_DISK = (14 << 12) | 37
+CMD_WINDOW_NEXT = (11 << 12) | 1
+CMD_WINDOW_PREV = (11 << 12) | 2
 PREF_UI_LANGUAGE_COMBO = 1048
 PREF_CANCEL = 1061
 CB_GETCOUNT = 0x0146
@@ -4034,6 +4041,8 @@ def run():
         failed = True
     if not test_dialog_localization(root):
         failed = True
+    if not test_compare(root):
+        failed = True
     if not test_auto_complete(root):
         failed = True
     if not test_associated_commands(root):
@@ -4049,7 +4058,7 @@ def run():
           "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + UDL + 暗色模式 + "
           "宏 + 文件夹工作区 + 函数列表 + 导出与打印 + 插件宿主 + JSON/XML 格式化 + "
           "运行命令 + 界面语言 + 十六进制查看 + 复制为富文本 + Markdown 预览 + 对话框文案 + "
-          "自动完成 + 文件关联 + 绿色打包）")
+          "比较 + 自动完成 + 文件关联 + 绿色打包）")
     return 0
 
 
@@ -4276,6 +4285,163 @@ def dialog_texts(dialog):
         if text:
             found.append(text)
     return found
+
+
+def test_compare(root):
+    """比较：两个文档之间、以及与磁盘上的版本之间，差异结果逐行核对。
+
+    第二个文档是**用单实例交接打开**的（再启动一个带文件的实例，它把路径交给已在跑的
+    那个）——脚本没法驱动系统的"打开"对话框（DirectUI，跨进程驱动不了），
+    而交接这条路本来就在"单实例"那一段验证过。
+    """
+    work = os.path.join(root, "build", "compare_test")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    cfg = os.path.join(root, "build", "bin", "config")
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+
+    leftText = "one\ntwo\nthree\n"
+    rightText = "one\nTWO\nthree\nfour\n"
+    leftPath = os.path.join(work, "a.txt")
+    rightPath = os.path.join(work, "b.txt")
+    for path, text in ((leftPath, leftText), (rightPath, rightText)):
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+
+    for name in ("config.xml", "session.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+    log_file = remove_log_with_retry(root)
+
+    def open_first():
+        # **不加 --multi-instance**：这一段要靠单实例交接把第二份文件送进来
+        #（加了那个开关就等于"我不参与抢占"，第二个实例会自己开一个窗口）
+        proc = subprocess.Popen([exe, "-portable", leftPath], cwd=root)
+        window = wait_for_main_window("notepadcc - a.txt")
+        return proc, window
+
+    def hand_over(path, title):
+        """再启动一个实例打开另一份文件：单实例交接会把标签加到第一个实例里。"""
+        second = subprocess.Popen([exe, "-portable", path], cwd=root)
+        deadline = time.time() + 20.0
+        while time.time() < deadline:
+            if user32.FindWindowW("notepadccMainWindow", f"notepadcc - {title}"):
+                time.sleep(0.5)
+                return True
+            time.sleep(0.3)
+        if second.poll() is None:
+            second.kill()
+        return False
+
+    proc = None
+    window = None
+    try:
+        proc, window = open_first()
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        time.sleep(0.8)
+        # 命令行带了文件时**不该再带出一个空白标签**（这条是踩出来的：先建空白文档、
+        # 再打开文件，用户双击文件第一眼看到的就是那个空标签）
+        user32.PostMessageW(window, WM_COMMAND, CMD_WINDOW_NEXT, 0)
+        time.sleep(0.6)
+        if user32.FindWindowW("notepadccMainWindow", "notepadcc - 新建 1"):
+            print("  FAIL: 带文件启动时不该多出一个空白标签")
+            return False
+        if not user32.FindWindowW("notepadccMainWindow", "notepadcc - a.txt"):
+            print("  FAIL: 只有一个标签时「下一个标签」应当还是自己")
+            return False
+        if not hand_over(rightPath, "b.txt"):
+            print("  FAIL: 第二个文档没有通过单实例交接打开")
+            return False
+        # 切回 a.txt（交接会激活 b.txt，而"比较"拿的是当前文档）
+        user32.PostMessageW(window, WM_COMMAND, CMD_WINDOW_PREV, 0)
+        time.sleep(0.8)
+
+        # 1) 与另一个已打开的文档比较：选列表里的第一项（b.txt）
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_COMPARE_DOCUMENT, 0)
+        deadline = time.time() + 8.0
+        dialog = None
+        while time.time() < deadline:
+            dialog = user32.FindWindowW(COMPARE_PICK_CLASS, None)
+            if dialog:
+                break
+            time.sleep(0.2)
+        if not dialog:
+            print("  FAIL: 没有弹出「选择要比较的文档」")
+            return False
+        if user32.SendMessageW(user32.GetDlgItem(dialog, COMPARE_PICK_LIST), 0x018B, 0, 0) != 1:
+            print("  FAIL: 可选的文档应当正好 1 个（另一个标签）")
+            return False
+        user32.PostMessageW(dialog, WM_COMMAND, COMPARE_PICK_OK, 0)
+        time.sleep(1.2)
+
+        scinti = visible_scintilla(window)
+        diff = scinti_text(scinti)
+        if not diff.startswith("比较：a.txt  ↔  b.txt"):
+            print(f"  FAIL: 比较结果第一行不对：{diff.splitlines()[0]!r}")
+            return False
+        lines = diff.split("\n")
+        # 改动行与新增行之间隔着相同的 "three"，所以算**两**处不同
+        if lines[1] != "左 3 行，右 4 行；不同 2 处（改动 1、删除 0、新增 1）":
+            print(f"  FAIL: 统计行不对：{lines[1]!r}")
+            return False
+        body = [line for line in lines[3:] if line.strip()]
+        # 相同行、改动行、新增行：记号分别是 空格 / ~ / +
+        marks = [line[0] for line in body]
+        if marks != [" ", "~", " ", "+"]:
+            print(f"  FAIL: 改动记号序列不对：{marks}\n{diff}")
+            return False
+        if "two" not in body[1] or "TWO" not in body[1]:
+            print(f"  FAIL: 改动行应当两侧都显示（左边 two、右边 TWO）：{body[1]!r}")
+            return False
+        if "four" not in body[3] or body[3].count("│") != 1:
+            print(f"  FAIL: 新增行应当只在右侧有内容：{body[3]!r}")
+            return False
+
+        # 2) 与磁盘上的版本比较：改一改当前文档（a.txt 那个标签），差异要指出来
+        user32.PostMessageW(window, WM_COMMAND, CMD_WINDOW_NEXT, 0)   # 回到某个标签
+        time.sleep(0.6)
+        # 直接对当前可见的那个编辑控件敲字（哪个标签都行，比较的是"当前文档 vs 磁盘"）
+        scinti = visible_scintilla(window)
+        user32.SendMessageW(scinti, SCI_GOTOPOS, 0, 0)
+        for ch in "X":
+            user32.PostMessageW(scinti, WM_CHAR_INPUT, ord(ch), 0)
+        time.sleep(0.5)
+        user32.PostMessageW(window, WM_COMMAND, CMD_TOOL_COMPARE_DISK, 0)
+        time.sleep(1.2)
+        scinti = visible_scintilla(window)
+        diskDiff = scinti_text(scinti)
+        if "（磁盘上）" not in diskDiff.splitlines()[0]:
+            print(f"  FAIL: 与磁盘比较的标题里应当标明右边是磁盘版本：{diskDiff.splitlines()[0]!r}")
+            return False
+        if diskDiff.splitlines()[1] != "左 3 行，右 3 行；不同 1 处（改动 1、删除 0、新增 0）":
+            print(f"  FAIL: 与磁盘比较的统计不对：{diskDiff.splitlines()[1]!r}")
+            return False
+        if "Xone" not in diskDiff:
+            print(f"  FAIL: 改动后的那一行应当出现在差异里\n{diskDiff}")
+            return False
+        with open(log_file, "r", encoding="utf-8", errors="replace") as handle:
+            log = handle.read()
+        if log.count("比较完成") < 2:
+            print("  FAIL: 两次比较都应当在日志里留下记录")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+        for name in ("config.xml", "session.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    print("  比较：两个文档之间的差异（改动/新增/相同行与两侧行号逐行核对）、"
+          "与磁盘上的版本比较（改一个字就指出来）、日志里有记录")
+    return True
 
 
 def test_dialog_localization(root):

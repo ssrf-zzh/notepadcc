@@ -131,6 +131,12 @@ std::vector<LangPack> MakeBuiltin() {
         Entry(L"cmd.tool.exportLanguages", L"Export Language Definitions to Config Folder"),
         Entry(L"cmd.tool.exportUdlSample", L"Export UDL Sample to Config Folder"),
         Entry(L"cmd.tool.exportLangPack", L"Export Language Pack Template (English)"),
+        Entry(L"cmd.tool.compareDocument", L"Compare with Another Open Document...", L"C"),
+        Entry(L"cmd.tool.compareDisk", L"Compare with Version on Disk", L"D"),
+        Entry(L"compare.pick.title", L"Pick a Document to Compare"),
+        Entry(L"compare.pick.prompt", L"Current document: "),
+        Entry(L"compare.pick.promptTail", L"  --  compare with which one?"),
+        Entry(L"compare.pick.ok", L"Compare(&C)"),
         // ---- 窗口 / 运行 ----
         Entry(L"cmd.window.next", L"Next Tab", L"N"),
         Entry(L"cmd.window.prev", L"Previous Tab", L"P"),
