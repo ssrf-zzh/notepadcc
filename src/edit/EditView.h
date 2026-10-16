@@ -217,7 +217,51 @@ public:
     int32_t StyleAt(int32_t position) const;
     int32_t StyleForeColor(int32_t style) const;
     int32_t StyleBackColor(int32_t style) const;
+    bool    StyleBold(int32_t style) const;
+    bool    StyleItalic(int32_t style) const;
     int32_t DefaultForeColor() const;
+    int32_t DefaultBackColor() const;
+
+    // ---- 导出与打印（设计文档 2.14）----
+    // 逐字节读回"文本 + 样式号"。导出要的是"每个字节属于哪个样式"，
+    // 而这个信息只有控件知道，所以由这里提供原始数据、由 core 的纯函数去生成 HTML/RTF。
+    // styles 与 text 一一对应（长度相同）。
+    void ReadStyledText(int32_t start, int32_t length, std::string& text,
+                        std::vector<int>& styles) const;
+
+    // 打印着色模式与换行模式的取值（与 Scintilla 的 SC_PRINT_* 一致，编译期钉住）
+    enum PrintColourMode : int {
+        kPrintNormal = 0,                       // 白底黑字（省墨）
+        kPrintInvertLight = 1,
+        kPrintBlackOnWhite = 2,
+        kPrintColourOnWhite = 3,                // 彩色、白底
+        kPrintColourOnWhiteDefaultBg = 4,
+        kPrintScreenColours = 5,                // 与屏幕一致（含深色主题的深底）
+    };
+    enum PrintWrapMode : int { kPrintWrapNone = 0, kPrintWrapWord = 1 };
+    void SetPrintColourMode(PrintColourMode mode) const;
+    void SetPrintMagnification(int magnification) const;
+    void SetPrintWrapMode(PrintWrapMode mode) const;
+    // 打印排版的输入输出。**故意只放普通字段**：MainWindow 不该知道 Scintilla 的结构体
+    // （只有这一个文件允许碰 Scintilla 类型），换算由这里做。
+    // 所有长度单位都是 twips（1/1440 英寸）——打印机上排版就是这么算的。
+    struct PrintRange {
+        void*   hdc = nullptr;         // 目标 DC（打印机）
+        void*   hdcTarget = nullptr;   // 用于度量字体/颜色的 DC，通常同一个
+        int32_t rcLeft = 0;
+        int32_t rcTop = 0;
+        int32_t rcRight = 0;
+        int32_t rcBottom = 0;
+        int32_t pageLeft = 0;
+        int32_t pageTop = 0;
+        int32_t pageRight = 0;
+        int32_t pageBottom = 0;
+        int32_t start = 0;             // 从哪个字节开始排
+        int32_t end = 0;               // 排到哪个字节为止（通常是文档长度）
+    };
+    // 把 range.start 起的文本排版到 DC 上；draw=false 只测量不输出。
+    // 返回**排到哪一位**（下一次从这里接着排），失败返回 -1。
+    intptr_t FormatRange(bool draw, PrintRange& range) const;
 
     // ---- 代码折叠（设计文档 2.6）----
     // 折叠层级由 Lexilla 算出来，这里只负责呈现与开关。纯文本（含超大文件模式）

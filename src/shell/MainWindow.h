@@ -10,6 +10,7 @@
 #include "core/DocumentManager.h"
 #include "core/Macro.h"
 #include "core/Messages.h"
+#include "core/ExportHtml.h"
 #include "core/ShortcutStore.h"
 #include "core/ConfigCenter.h"
 #include "core/SessionManager.h"
@@ -139,6 +140,14 @@ private:
     void HandleFolderNotify(const FolderNotify& notification);
     // ---- 函数列表（设计文档 2.6 第 5 条）----
     void CommandToggleFunctionList();
+    // ---- 打印与导出（设计文档 2.14）----
+    void CommandPrint();
+    void CommandExportHtml();
+    void CommandExportRtf();
+    // 收集"当前文档的带样式文本 + 各样式的外观"，导出与打印共用
+    bool CollectStyledDocument(std::vector<core::StyledByte>& bytes,
+                               std::vector<core::ExportStyle>& styles,
+                               core::ExportOptions& options) const;
     void ScheduleFunctionParse();          // 节流之后的解析请求
     void StartFunctionParse();             // 真正提交后台解析（由 WM_TIMER 触发）
     void HandleFunctionNotify(const FunctionNotify& notification);

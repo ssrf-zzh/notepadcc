@@ -28,6 +28,10 @@
 #include "shell/ShortcutDialog.h"
 #include "shell/StyleConfigDialog.h"
 #include "shell/MacroDialog.h"
+#include "core/ExportHtml.h"
+#include "core/ExportRtf.h"
+#include "core/PrintText.h"
+#include "core/PrintPaging.h"
 #include "core/ShortcutStore.h"
 #include "infra/SingleInstance.h"
 #include "infra/FileAssociation.h"
@@ -52,6 +56,9 @@ enum : npcc::core::CmdId {
     kCmdFileClose   = npcc::core::MakeCmdId(1, 5),
     kCmdFileCloseAll= npcc::core::MakeCmdId(1, 6),
     kCmdFileExit    = npcc::core::MakeCmdId(1, 7),
+    kCmdFilePrint      = npcc::core::MakeCmdId(1, 8),
+    kCmdFileExportHtml = npcc::core::MakeCmdId(1, 9),
+    kCmdFileExportRtf  = npcc::core::MakeCmdId(1, 10),
 
     kCmdEditUndo      = npcc::core::MakeCmdId(2, 1),
     kCmdEditRedo      = npcc::core::MakeCmdId(2, 2),
@@ -710,6 +717,13 @@ void MainWindow::RegisterCommands() {
         core::kCmdNone, [this](const CmdContext&) { CommandCloseAll(); });
     add(kCmdFileExit, CmdCategory::File, L"cmd.file.exit", L"退出(&X)",
         core::kCmdNone, [this](const CmdContext&) { ::PostMessageW(hwnd_, WM_CLOSE, 0, 0); });
+    add(kCmdFilePrint, CmdCategory::File, L"cmd.file.print", L"打印(&P)...", needsBuffer,
+        [this](const CmdContext&) { CommandPrint(); });
+    add(kCmdFileExportHtml, CmdCategory::File, L"cmd.file.exportHtml",
+        L"导出为 HTML(&H)...", needsBuffer,
+        [this](const CmdContext&) { CommandExportHtml(); });
+    add(kCmdFileExportRtf, CmdCategory::File, L"cmd.file.exportRtf", L"导出为 RTF(&R)...",
+        needsBuffer, [this](const CmdContext&) { CommandExportRtf(); });
 
     // ---- 编辑 ----
     add(kCmdEditUndo, CmdCategory::Edit, L"cmd.edit.undo", L"撤销(&U)",
@@ -1084,6 +1098,7 @@ void MainWindow::RegisterCommands() {
     registry_.BindShortcut(kCmdFileSaveAs, ctrlShift, 'S', true);
     registry_.BindShortcut(kCmdFileClose, ctrl, 'W', true);
     registry_.BindShortcut(kCmdFileCloseAll, ctrlShift, 'W', true);
+    registry_.BindShortcut(kCmdFilePrint, ctrl, 'P', true);   // 与对标产品一致
     registry_.BindShortcut(kCmdEditUndo, ctrl, 'Z', true);
     registry_.BindShortcut(kCmdEditRedo, ctrl, 'Y', true);
     registry_.BindShortcut(kCmdEditCut, ctrl, 'X', true);
@@ -3300,6 +3315,305 @@ void MainWindow::HandleFunctionNotify(const FunctionNotify& notification) {
     // 焦点交回编辑器：从列表点一下跳过去，接着就要打字了
     ::SetFocus(document->view->Handle());
     UpdateStatus();
+}
+
+bool MainWindow::CollectStyledDocument(std::vector<core::StyledByte>& bytes,
+                                       std::vector<core::ExportStyle>& styles,
+                                       core::ExportOptions& options) const {
+    bytes.clear();
+    styles.clear();
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr) {
+        return false;
+    }
+    edit::EditView& view = *document->view;
+    std::string text;
+    std::vector<int> numbers;
+    const int32_t length = static_cast<int32_t>(view.ByteLength());
+    view.ReadStyledText(0, length, text, numbers);
+    if (text.size() != numbers.size()) {
+        // 长度对不上说明读回的过程被打断了（理论上不会），宁可如实报错也不要导出半截
+        return false;
+    }
+    bytes.reserve(text.size());
+    std::vector<bool> seen(256, false);
+    for (std::size_t index = 0; index < text.size(); ++index) {
+        bytes.push_back(core::StyledByte{text[index], numbers[index]});
+        if (numbers[index] >= 0 && numbers[index] < 256) {
+            seen[static_cast<std::size_t>(numbers[index])] = true;
+        }
+    }
+    // 样式外观从**控件**里读，而不是从配色文件里推：这样导出的颜色与屏幕上看到的一致
+    // （包括用户在样式配置器里改过的、以及逐样式号的覆盖）
+    for (std::size_t index = 0; index < seen.size(); ++index) {
+        if (!seen[index]) {
+            continue;
+        }
+        core::ExportStyle style;
+        style.number = static_cast<int>(index);
+        style.fore = edit::StyleScheme::FromScintillaColour(static_cast<std::uint32_t>(
+            view.StyleForeColor(style.number)));
+        style.bold = view.StyleBold(style.number);
+        style.italic = view.StyleItalic(style.number);
+        styles.push_back(style);
+    }
+    options.title = "notepadcc 导出";
+    if (document->buffer.HasPath()) {
+        // 走 UTF-8 转换，不能按字节截宽字符——中文路径会变成乱码（导出文件里的 <title>
+        // 与页眉都吃这个值）
+        options.title = ToUtf8(document->buffer.filePath);
+    }
+    options.pageFore = edit::StyleScheme::FromScintillaColour(
+        static_cast<std::uint32_t>(view.DefaultForeColor()));
+    options.pageBack = edit::StyleScheme::FromScintillaColour(
+        static_cast<std::uint32_t>(view.DefaultBackColor()));
+    options.fontFace = "Consolas";
+    options.fontSize = 11;
+    return true;
+}
+
+void MainWindow::CommandExportHtml() {
+    std::vector<core::StyledByte> bytes;
+    std::vector<core::ExportStyle> styles;
+    core::ExportOptions options;
+    if (!CollectStyledDocument(bytes, styles, options)) {
+        ::MessageBoxW(hwnd_, L"没有打开的文档，或者读不回带样式的文本。", L"导出 HTML",
+                      MB_ICONINFORMATION);
+        return;
+    }
+    // 默认落在**文档旁边**、用文档名加新后缀：导出的东西通常就是要放在源码旁边的，
+    // 让用户每次都从头选目录没有道理（也让自检脚本不必去驱动系统对话框里的路径输入）
+    std::wstring suggested = L"export.html";
+    std::wstring initialDir;
+    if (edit::Document* document = ActiveDocument(); document != nullptr &&
+                                               document->buffer.HasPath()) {
+        initialDir = core::DocumentManager::DirectoryOf(document->buffer.filePath);
+        suggested = core::DocumentManager::FileNameOf(document->buffer.filePath);
+        const std::size_t dot = suggested.find_last_of(L'.');
+        if (dot != std::wstring::npos) {
+            suggested.resize(dot);
+        }
+        suggested += L".html";
+    }
+    wchar_t file[MAX_PATH] = {};
+    ::wcsncpy_s(file, suggested.c_str(), _TRUNCATE);
+    OPENFILENAMEW dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = hwnd_;
+    dialog.lpstrFilter = L"HTML 文件 (*.html)\0*.html\0所有文件\0*.*\0";
+    dialog.lpstrTitle = L"导出为 HTML";   // 显式标题：既让用户看清在做什么，也让自检脚本找得到这个框
+    dialog.lpstrFile = file;
+    dialog.lpstrInitialDir = initialDir.empty() ? nullptr : initialDir.c_str();
+    dialog.nMaxFile = MAX_PATH;
+    dialog.lpstrDefExt = L"html";
+    dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+    if (::GetSaveFileNameW(&dialog) == 0) {
+        return;   // 用户取消
+    }
+    const std::string html = core::BuildHtml(bytes, styles, options);
+    const io::WriteResult written = io::WriteFileAtomic(file, html);
+    if (!written.ok) {
+        ::MessageBoxW(hwnd_, (L"写入失败：\n" + written.message).c_str(), L"导出 HTML",
+                      MB_ICONWARNING);
+        return;
+    }
+    infra::LogInfo(L"export", L"已导出 HTML: " + std::wstring(file) + L"，" +
+                                 std::to_wstring(html.size()) + L" 字节");
+    statusBar_.SetMessage(L"已导出 HTML：" + std::wstring(file));
+}
+
+void MainWindow::CommandExportRtf() {
+    std::vector<core::StyledByte> bytes;
+    std::vector<core::ExportStyle> styles;
+    core::ExportOptions options;
+    if (!CollectStyledDocument(bytes, styles, options)) {
+        ::MessageBoxW(hwnd_, L"没有打开的文档，或者读不回带样式的文本。", L"导出 RTF",
+                      MB_ICONINFORMATION);
+        return;
+    }
+    std::wstring suggested = L"export.rtf";
+    std::wstring initialDir;
+    if (edit::Document* document = ActiveDocument(); document != nullptr &&
+                                               document->buffer.HasPath()) {
+        initialDir = core::DocumentManager::DirectoryOf(document->buffer.filePath);
+        suggested = core::DocumentManager::FileNameOf(document->buffer.filePath);
+        const std::size_t dot = suggested.find_last_of(L'.');
+        if (dot != std::wstring::npos) {
+            suggested.resize(dot);
+        }
+        suggested += L".rtf";
+    }
+    wchar_t file[MAX_PATH] = {};
+    ::wcsncpy_s(file, suggested.c_str(), _TRUNCATE);
+    OPENFILENAMEW dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = hwnd_;
+    dialog.lpstrFilter = L"RTF 文件 (*.rtf)\0*.rtf\0所有文件\0*.*\0";
+    dialog.lpstrTitle = L"导出为 RTF";
+    dialog.lpstrFile = file;
+    dialog.lpstrInitialDir = initialDir.empty() ? nullptr : initialDir.c_str();
+    dialog.nMaxFile = MAX_PATH;
+    dialog.lpstrDefExt = L"rtf";
+    dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+    if (::GetSaveFileNameW(&dialog) == 0) {
+        return;
+    }
+    const std::string rtf = core::BuildRtf(bytes, styles, options);
+    const io::WriteResult written = io::WriteFileAtomic(file, rtf);
+    if (!written.ok) {
+        ::MessageBoxW(hwnd_, (L"写入失败：\n" + written.message).c_str(), L"导出 RTF",
+                      MB_ICONWARNING);
+        return;
+    }
+    infra::LogInfo(L"export", L"已导出 RTF: " + std::wstring(file));
+    statusBar_.SetMessage(L"已导出 RTF：" + std::wstring(file));
+}
+
+void MainWindow::CommandPrint() {
+    edit::Document* document = ActiveDocument();
+    if (document == nullptr || document->view == nullptr) {
+        return;
+    }
+    edit::EditView& view = *document->view;
+    const int32_t length = static_cast<int32_t>(view.ByteLength());
+    if (length <= 0) {
+        ::MessageBoxW(hwnd_, L"这份文档是空的。", L"打印", MB_ICONINFORMATION);
+        return;
+    }
+
+    // 打印对话框交给系统：打印机、份数、页范围都由用户选。程序**从不自动打印**——
+    // 测试里也只验证到"对话框弹出并能取消"，绝不往真打印机上送纸
+    PRINTDLGW print{};
+    print.lStructSize = sizeof(print);
+    print.hwndOwner = hwnd_;
+    print.Flags = PD_RETURNDC | PD_USEDEVMODECOPIESANDCOLLATE | PD_NOSELECTION;
+    if (::PrintDlgW(&print) == 0) {
+        const DWORD extended = ::CommDlgExtendedError();
+        if (extended != 0) {
+            // 没有打印机、驱动出错之类：明说，不要静默什么都不做
+            ::MessageBoxW(hwnd_, (L"打印对话框打不开（可能没有安装打印机）。\n错误码：" +
+                                  std::to_wstring(extended))
+                                     .c_str(),
+                          L"打印", MB_ICONWARNING);
+        }
+        return;   // 用户取消
+    }
+    HDC printerDc = print.hDC;
+
+    // 页面几何：设备的像素 → twips（1/1440 英寸）。Scintilla 的排版接口用 twips
+    const int dpiX = ::GetDeviceCaps(printerDc, LOGPIXELSX);
+    const int dpiY = ::GetDeviceCaps(printerDc, LOGPIXELSY);
+    const int pageWidth = ::GetDeviceCaps(printerDc, HORZRES);
+    const int pageHeight = ::GetDeviceCaps(printerDc, VERTRES);
+    const auto toTwipsX = [dpiX](int value) { return value * 1440 / (dpiX > 0 ? dpiX : 96); };
+    const auto toTwipsY = [dpiY](int value) { return value * 1440 / (dpiY > 0 ? dpiY : 96); };
+    constexpr int kMarginMm = 15;
+    constexpr int kHeaderMm = 8;
+    const int marginX = toTwipsX(::MulDiv(kMarginMm, dpiX, 25));   // mm → 像素 → twips
+    const int marginY = toTwipsY(::MulDiv(kMarginMm, dpiY, 25));
+    const int headerBand = toTwipsY(::MulDiv(kHeaderMm, dpiY, 25));
+    const int pageWidthTwips = toTwipsX(pageWidth);
+    const int pageHeightTwips = toTwipsY(pageHeight);
+
+    edit::EditView::PrintRange range{};
+    range.hdc = printerDc;
+    range.hdcTarget = printerDc;
+    range.pageLeft = 0;
+    range.pageTop = 0;
+    range.pageRight = pageWidthTwips;
+    range.pageBottom = pageHeightTwips;
+    range.rcLeft = marginX;
+    range.rcTop = marginY + headerBand;
+    range.rcRight = pageWidthTwips - marginX;
+    range.rcBottom = pageHeightTwips - marginY;
+
+    view.SetPrintColourMode(darkMode_ ? edit::EditView::kPrintBlackOnWhite
+                                      : edit::EditView::kPrintColourOnWhite);
+    view.SetPrintWrapMode(edit::EditView::kPrintWrapWord);
+    view.SetPrintMagnification(0);
+
+    // 第一遍只测量：算出总页数（页眉页脚里的 $(PAGES) 要用）。
+    // 外层的收集与防死循环在 core::CollectPageStarts 里，单测直接钉它
+    const std::vector<int32_t> pageStarts =
+        core::CollectPageStarts(length, [&view, &range, length](int32_t start) {
+            range.start = start;
+            range.end = length;
+            return view.FormatRange(false, range);
+        });
+    if (pageStarts.empty()) {
+        ::DeleteDC(printerDc);
+        ::MessageBoxW(hwnd_, L"这份文档没有可打印的内容。", L"打印", MB_ICONINFORMATION);
+        return;
+    }
+
+    DOCINFOW info{};
+    info.cbSize = sizeof(info);
+    const std::wstring title = document->buffer.HasPath() ? document->buffer.filePath
+                                                          : document->buffer.displayName;
+    info.lpszDocName = title.c_str();
+    info.lpszOutput = print.Flags & PD_PRINTTOFILE ? L"PRINT:" : nullptr;
+    if (::StartDocW(printerDc, &info) <= 0) {
+        ::DeleteDC(printerDc);
+        ::MessageBoxW(hwnd_, L"开始打印任务失败（StartDoc）。", L"打印", MB_ICONWARNING);
+        return;
+    }
+
+    SYSTEMTIME now{};
+    ::GetLocalTime(&now);
+    wchar_t dateText[64] = {};
+    ::swprintf_s(dateText, L"%04d-%02d-%02d", now.wYear, now.wMonth, now.wDay);
+    const std::wstring headerPattern = L"$(FILE_NAME)";
+    const std::wstring footerPattern = L"第 $(PAGE) 页 / 共 $(PAGES) 页    $(DATE)";
+    const int totalPages = static_cast<int>(pageStarts.size());
+    HFONT font = ::CreateFontW(-::MulDiv(9, dpiY, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                               CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
+    const HGDIOBJ oldFont = ::SelectObject(printerDc, font);
+    ::SetBkMode(printerDc, TRANSPARENT);
+    ::SetTextColor(printerDc, RGB(0x40, 0x40, 0x40));
+
+    bool started = false;
+    for (int page = 0; page < totalPages; ++page) {
+        if (::StartPage(printerDc) <= 0) {
+            break;
+        }
+        started = true;
+        core::PrintTextContext context;
+        context.fileName = core::DocumentManager::FileNameOf(title);
+        context.filePath = title;
+        context.page = page + 1;
+        context.totalPages = totalPages;
+        context.date = dateText;
+        RECT band{};
+        band.left = marginX;
+        band.right = pageWidthTwips - marginX;
+        band.top = marginY;
+        band.bottom = marginY + headerBand;
+        std::wstring header = core::ExpandPrintTemplate(headerPattern, context);
+        ::DrawTextW(printerDc, header.c_str(), static_cast<int>(header.size()), &band,
+                    DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+        band.top = pageHeightTwips - marginY;
+        band.bottom = pageHeightTwips;
+        std::wstring footer = core::ExpandPrintTemplate(footerPattern, context);
+        ::DrawTextW(printerDc, footer.c_str(), static_cast<int>(footer.size()), &band,
+                    DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
+
+        range.start = pageStarts[static_cast<std::size_t>(page)];
+        range.end = length;
+        view.FormatRange(true, range);
+        ::EndPage(printerDc);
+    }
+    ::SelectObject(printerDc, oldFont);
+    ::DeleteObject(font);
+    if (started) {
+        ::EndDoc(printerDc);
+    } else {
+        ::AbortDoc(printerDc);
+    }
+    ::DeleteDC(printerDc);
+    infra::LogInfo(L"print", L"打印任务结束: " + title + L"，共 " +
+                              std::to_wstring(totalPages) + L" 页");
+    statusBar_.SetMessage(L"已交给打印机：" + std::to_wstring(totalPages) + L" 页");
 }
 
 void MainWindow::CommandToggleFunctionList() {

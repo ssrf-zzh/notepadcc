@@ -17,6 +17,10 @@
 #include "core/Macro.h"
 #include "core/FolderTree.h"
 #include "core/FunctionList.h"
+#include "core/ExportHtml.h"
+#include "core/ExportRtf.h"
+#include "core/PrintText.h"
+#include "core/PrintPaging.h"
 #include "shell/FolderPanel.h"
 #include "shell/FunctionListPanel.h"
 #include "core/SnapshotStore.h"
@@ -2616,6 +2620,222 @@ int main() {
             const std::vector<npcc::core::ShortcutBinding> bindings = registry.BindingsOf(command.id);
             Check(bindings.size() == 1 && bindings[0].keyCode == 'K', "快捷键改动也生效了");
             std::filesystem::remove(path, ec);
+        }
+    }
+
+    // ---------------------------------------------------------------- 导出与打印
+    // 生成器是纯函数：给"字节 + 样式号 + 样式外观"，吐出字符串。导出这条路上最容易错的
+    // 地方（转义、样式去重、行号对齐、颜色表、UTF-8 切断）都能在这里钉死，
+    // 不必靠"导出一份文件再肉眼看"。
+    Section("导出与打印（HTML / RTF / 页眉页脚模板）");
+    {
+        using npcc::core::BuildHtml;
+        using npcc::core::BuildRtf;
+        using npcc::core::EscapeHtmlText;
+        using npcc::core::ExpandPrintTemplate;
+        using npcc::core::ExportOptions;
+        using npcc::core::ExportStyle;
+        using npcc::core::PrintTextContext;
+        using npcc::core::StyledByte;
+
+        // 造一份"两行、三种样式"的输入：默认 / 注释(绿斜) / 关键字(蓝粗)
+        const std::string source = "// 注释\nint x = 1;\n";
+        std::vector<StyledByte> bytes;
+        std::vector<int> styles;
+        for (const char ch : source) {
+            bytes.push_back(StyledByte{ch, 0});
+        }
+        // 手工打样式："// 注释" 按字节算是 3 + 3 + 3 = 9 个（中文一个字三字节），
+        // 接着是换行，再往后是 "int"
+        for (std::size_t index = 0; index < 9; ++index) {
+            bytes[index].style = 2;
+        }
+        for (std::size_t index = 10; index < 13; ++index) {   // "int"
+            bytes[index].style = 5;
+        }
+        ExportOptions options;
+        options.title = "sample.cpp";
+        options.lineNumbers = true;
+        options.pageFore = 0x1E1E1E;
+        options.pageBack = 0xFFFFFF;
+        const std::vector<ExportStyle> styleTable = {
+            {2, 0x2E7D32, false, true},
+            {5, 0x0000C0, true, false},
+            {7, 0x1E1E1E, false, false},   // 与默认前景相同：不该写进 CSS
+        };
+
+        // 1) HTML 转义
+        Check(EscapeHtmlText("a<b>&\"c\"") == "a&lt;b&gt;&amp;&quot;c&quot;",
+              "HTML 转义五个字符（& 先换，不重复转）");
+        Check(EscapeHtmlText("中文") == "中文", "中文原样保留（UTF-8 不被转义）");
+
+        // 2) HTML：行号列、样式类、颜色、粗斜体、转义
+        {
+            const std::string html = BuildHtml(bytes, styleTable, options);
+            Check(html.find("<td class=\"ln\">1</td>") != std::string::npos &&
+                      html.find("<td class=\"ln\">2</td>") != std::string::npos,
+                  "两行各有一格行号");
+            Check(html.find("span.s2 { color: #2E7D32; font-style: italic; }") !=
+                      std::string::npos,
+                  "注释样式：绿色 + 斜体");
+            Check(html.find("span.s5 { color: #0000C0; font-weight: bold; }") !=
+                      std::string::npos,
+                  "关键字样式：蓝色 + 粗体");
+            Check(html.find("span.s7") == std::string::npos,
+                  "与默认色相同又无粗斜体的样式不写 CSS（少写噪音）");
+            Check(html.find("<span class=\"s2\">// 注释</span>") != std::string::npos,
+                  "注释按段包成一个 span（不是一字一个）");
+            Check(html.find("#include") == std::string::npos, "没有凭空多出内容");
+        }
+
+        // 3) HTML：CRLF 不留 CR、纯文本也有一行、转义进正文
+        {
+            std::vector<StyledByte> crlf;
+            for (const char ch : std::string("a<b\r\nc")) {
+                crlf.push_back(StyledByte{ch, 0});
+            }
+            const std::string html = BuildHtml(crlf, {}, options);
+            Check(html.find("a&lt;b") != std::string::npos, "正文里的 < 被转义");
+            Check(html.find('\r') == std::string::npos, "CRLF 不留 CR");
+            Check(html.find("<td class=\"ln\">2</td>") != std::string::npos, "CRLF 也切成两行");
+        }
+
+        // 4) RTF：颜色表、颜色引用、粗斜体开关、转义、\par
+        {
+            const std::string rtf = BuildRtf(bytes, styleTable, options);
+            Check(rtf.rfind("{\\rtf1", 0) == 0, "以 {\\rtf1 开头");
+            Check(rtf.find("\\red46\\green125\\blue50;") != std::string::npos,
+                  "颜色表里有注释色 (#2E7D32)");
+            Check(rtf.find("\\red0\\green0\\blue192;") != std::string::npos,
+                  "颜色表里有关键字色 (#0000C0)");
+            Check(rtf.find("\\cf") != std::string::npos, "正文用 \\cf 引用颜色");
+            Check(rtf.find("\\i") != std::string::npos && rtf.find("\\b") != std::string::npos,
+                  "斜体与粗体开关都出现了");
+            Check(rtf.find("\\par") != std::string::npos, "换行写成 \\par");
+            Check(rtf.find("\\u") != std::string::npos, "非 ASCII 用 \\uN? 形式");
+            // 颜色表只列用到的颜色（注释、关键字、默认 = 3 个）
+            std::size_t semicolons = 0;
+            for (std::size_t index = 0; index < rtf.size(); ++index) {
+                if (rtf[index] == ';' && index < rtf.find("}\\n")) {
+                    ++semicolons;
+                }
+            }
+            Check(semicolons >= 3, "颜色表里至少有默认/注释/关键字三项");
+        }
+
+        // 5) 页眉页脚模板
+        {
+            PrintTextContext context;
+            context.fileName = L"sample.cpp";
+            context.filePath = L"D:\\work\\sample.cpp";
+            context.page = 2;
+            context.totalPages = 7;
+            context.date = L"2026-10-16";
+            Check(ExpandPrintTemplate(L"$(FILE_NAME)", context) == L"sample.cpp", "文件名");
+            Check(ExpandPrintTemplate(L"$(FILE_PATH)", context) == L"D:\\work\\sample.cpp",
+                  "完整路径（不会被 FILE_NAME 抢掉前缀）");
+            Check(ExpandPrintTemplate(L"第 $(PAGE) / $(PAGES) 页", context) == L"第 2 / 7 页",
+                  "页码与总页数");
+            Check(ExpandPrintTemplate(L"$(DATE)", context) == L"2026-10-16", "日期");
+            Check(ExpandPrintTemplate(L"$(UNKNOWN)", context) == L"$(UNKNOWN)",
+                  "不认识的占位符原样留着（不静默吃掉）");
+        }
+
+        // 6) 分页循环：正常、单页、不前进（防死循环）、排不动
+        {
+            using npcc::core::CollectPageStarts;
+            // 100 个字，每页排 30 个 → 4 页（0/30/60/90）
+            const std::vector<int32_t> pages = CollectPageStarts(100, [](int32_t start) {
+                return static_cast<intptr_t>(start + 30);
+            });
+            Check(pages.size() == 4, "100 个字节、每页 30 → 4 页");
+            Check(!pages.empty() && pages[0] == 0 && pages[3] == 90, "每页起点正确");
+
+            const std::vector<int32_t> single = CollectPageStarts(20, [](int32_t start) {
+                return static_cast<intptr_t>(start + 30);
+            });
+            Check(single.size() == 1 && single[0] == 0, "排得下就一页");
+
+            // 不前进必须停下：否则打印任务会卡住、纸一直出
+            int calls = 0;
+            const std::vector<int32_t> stuck = CollectPageStarts(100, [&calls](int32_t start) {
+                ++calls;
+                return static_cast<intptr_t>(start);   // 原地不动
+            });
+            Check(calls == 1 && stuck.size() == 1, "位置不前进时立刻停手（不死循环）");
+
+            Check(CollectPageStarts(0, [](int32_t start) { return start + 10; }).empty(),
+                  "空文档没有页");
+            Check(CollectPageStarts(50, {}).empty(), "没有回调时不硬来");
+            const std::vector<int32_t> failed = CollectPageStarts(50, [](int32_t) {
+                return static_cast<intptr_t>(-1);
+            });
+            Check(failed.empty(), "排不动（-1）时返回空");
+        }
+
+        // 7) 真排版一次：拿内存 DC 当"打印机"，验证 SCI_FORMATRANGE 这条链是通的
+        //    （不往真打印机上送纸；打印对话框那一段由界面回归验证"能弹出"）
+        {
+            const HWND host = CreateHiddenHost();
+            npcc::edit::EditView view;
+            HDC memoryDc = ::CreateCompatibleDC(nullptr);
+            HBITMAP bitmap = ::CreateCompatibleBitmap(memoryDc, 800, 600);
+            const HGDIOBJ oldBitmap = ::SelectObject(memoryDc, bitmap);
+            if (host != nullptr && view.Create(host, 920) && memoryDc != nullptr) {
+                view.ApplyLightTheme();
+                view.SetCodePage(npcc::edit::kCodePageUtf8);
+                std::string text;
+                for (int line = 0; line < 400; ++line) {
+                    text += "int function_" + std::to_string(line) + "() { return " +
+                            std::to_string(line) + "; }\n";
+                }
+                view.SetText(text);
+                const int32_t length = static_cast<int32_t>(text.size());
+
+                // 800x600 像素在 96 DPI 下 = 12000x9000 twips（1 像素 = 15 twips）
+                npcc::edit::EditView::PrintRange range{};
+                range.hdc = memoryDc;
+                range.hdcTarget = memoryDc;
+                range.pageLeft = 0;
+                range.pageTop = 0;
+                range.pageRight = 800 * 15;
+                range.pageBottom = 600 * 15;
+                range.rcLeft = 100;
+                range.rcTop = 100;
+                range.rcRight = 800 * 15 - 100;
+                range.rcBottom = 600 * 15 - 100;
+                view.SetPrintColourMode(npcc::edit::EditView::kPrintColourOnWhite);
+                view.SetPrintWrapMode(npcc::edit::EditView::kPrintWrapNone);
+                view.SetPrintMagnification(0);
+
+                const std::vector<int32_t> pages =
+                    npcc::core::CollectPageStarts(length, [&](int32_t start) {
+                        range.start = start;
+                        range.end = length;
+                        return view.FormatRange(false, range);
+                    });
+                Check(pages.size() > 1, "400 行文本在 600 高的页面上不止一页");
+                Check(!pages.empty() && pages[0] == 0, "第一页从文首开始");
+                // 真画一页：不检查像素，只要求它不崩、且报告了排到哪
+                range.start = pages.empty() ? 0 : pages[0];
+                range.end = length;
+                const intptr_t painted = view.FormatRange(true, range);
+                Check(painted > 0 && painted <= length, "真排版一页能返回「下一处位置」");
+            } else {
+                Check(false, "创建隐藏宿主窗口或内存 DC 失败");
+            }
+            if (oldBitmap != nullptr) {
+                ::SelectObject(memoryDc, oldBitmap);
+            }
+            if (bitmap != nullptr) {
+                ::DeleteObject(bitmap);
+            }
+            if (memoryDc != nullptr) {
+                ::DeleteDC(memoryDc);
+            }
+            if (host != nullptr) {
+                ::DestroyWindow(host);
+            }
         }
     }
 

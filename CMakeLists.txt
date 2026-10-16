@@ -127,6 +127,10 @@ set(NPCC_CORE_SOURCES
     src/core/DocumentManager.cpp
     src/core/FolderTree.cpp
     src/core/FunctionList.cpp
+    src/core/ExportHtml.cpp
+    src/core/ExportRtf.cpp
+    src/core/PrintText.cpp
+    src/core/PrintPaging.cpp
     src/core/Macro.cpp
     src/core/SessionManager.cpp
     src/core/ShortcutStore.cpp

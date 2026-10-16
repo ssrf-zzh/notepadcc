@@ -139,6 +139,9 @@ CMD_WORKSPACE_REFRESH = (4 << 12) | 17
 FOLDER_PANEL_CLASS = "notepadccFolderPanel"
 FUNCTION_PANEL_CLASS = "notepadccFunctionPanel"
 CMD_FUNCTION_JUMP = (4 << 12) | 20
+CMD_FILE_PRINT = (1 << 12) | 8
+CMD_FILE_EXPORT_HTML = (1 << 12) | 9
+CMD_FILE_EXPORT_RTF = (1 << 12) | 10
 TREE_CLASS = "SysTreeView32"
 TVM_GETCOUNT = 0x1105
 
@@ -1866,6 +1869,137 @@ def test_function_list(root):
 
     print("  函数列表：面板列出 4 个符号（含类里的方法）、键盘选中后跳到对应行、"
           "改了代码之后节流到期自动重算（4 → 5）")
+    return True
+
+
+def accept_save_dialog(title, timeout=8.0):
+    """点掉系统的"另存为"：默认文件名与目录都由程序给好了（文档旁边、同名换后缀），
+    所以这里只需要敲一下回车——比去 DirectUI 里找输入框稳得多（实测过：合成
+    WM_COMMAND(IDOK) 对 Vista 风格的保存框无效，框会关但什么都没存）。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        dialog = user32.FindWindowW("#32770", title)
+        if dialog:
+            time.sleep(0.6)   # 等它把默认名与目录填好
+            user32.PostMessageW(dialog, WM_KEYDOWN, 0x0D, 0)
+            stop = time.time() + 4.0
+            while time.time() < stop:
+                if not user32.FindWindowW("#32770", title):
+                    time.sleep(0.4)
+                    return True
+                time.sleep(0.1)
+            return False
+        time.sleep(0.2)
+    return False
+
+
+def test_export_and_print(root):
+    """导出 HTML / RTF 与打印：导出要核对**文件内容**（颜色类、转义、颜色表），
+    打印只验证到"对话框能弹出并取消"——测试**绝不往真打印机上送纸**。
+    """
+    work = os.path.join(root, "build", "export_test")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    source = os.path.join(work, "sample.cpp")
+    with open(source, "w", encoding="utf-8", newline="") as handle:
+        handle.write("// 注释\nint main() {\n    return 42;\n}\n")
+    html = os.path.join(work, "sample.html")
+    rtf = os.path.join(work, "sample.rtf")
+
+    cfg = os.path.join(root, "build", "bin", "config")
+    for name in ("config.xml", "session.xml", "stylers.xml", "langs.xml", "userlangs.xml",
+                 "shortcuts.xml"):
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", source], cwd=root)
+    window = wait_for_main_window("notepadcc - sample.cpp")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        scinti = visible_scintilla(window)
+        if scinti is None:
+            print("  FAIL: 找不到可见的编辑控件")
+            return False
+
+        # 1) 导出 HTML：对话框出来直接回车（默认就是文档旁边的 sample.html）
+        user32.PostMessageW(window, WM_COMMAND, CMD_FILE_EXPORT_HTML, 0)
+        if not accept_save_dialog("导出为 HTML"):
+            print("  FAIL: 导出 HTML 的保存对话框没出来（或回车没能关掉它）")
+            return False
+        if not os.path.exists(html):
+            print(f"  FAIL: 没有导出 {html}")
+            return False
+        with open(html, "r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+        if "span.s2 { color: #2E7D32; font-style: italic; }" not in text:
+            print(f"  FAIL: HTML 里没有注释样式的 CSS\n{text[:400]}")
+            return False
+        if "span.s5 { color: #0000C0; font-weight: bold; }" not in text:
+            print(f"  FAIL: HTML 里没有关键字样式的 CSS\n{text[:400]}")
+            return False
+        if "<td class=\"ln\">1</td>" not in text:
+            print("  FAIL: HTML 里没有行号列")
+            return False
+        if "sample.cpp" not in text:
+            print("  FAIL: HTML 的标题没写文档名")
+            return False
+
+        # 2) 导出 RTF：颜色表与 \cf 引用
+        user32.PostMessageW(window, WM_COMMAND, CMD_FILE_EXPORT_RTF, 0)
+        if not accept_save_dialog("导出为 RTF"):
+            print("  FAIL: 导出 RTF 的保存对话框没出来")
+            return False
+        if not os.path.exists(rtf):
+            print(f"  FAIL: 没有导出 {rtf}")
+            return False
+        with open(rtf, "r", encoding="utf-8", errors="replace") as handle:
+            rtfText = handle.read()
+        if not rtfText.startswith("{\\rtf1"):
+            print(f"  FAIL: RTF 开头不对\n{rtfText[:200]}")
+            return False
+        if "\\red46\\green125\\blue50;" not in rtfText and "\\cf" not in rtfText:
+            print(f"  FAIL: RTF 里没有颜色表/颜色引用\n{rtfText[:300]}")
+            return False
+
+        # 3) 打印：只验证"对话框确实弹出来了"——**绝不出纸**。
+        # Win10 之后的打印对话框是独立进程的现代 UI（类名 ApplicationFrameWindow、
+        # 标题带程序名），投递 WM_CLOSE/WM_ESC 都关不掉它，所以这里**只断言它出现**，
+        # 随后由 finally 直接结束进程（对话框随之消失）。真正的排版那一步在单元测试里
+        # 用内存 DC 跑过一遍（SCI_FORMATRANGE 真画了一页），所以"能不能排"不靠这一条验证
+        user32.PostMessageW(window, WM_COMMAND, CMD_FILE_PRINT, 0)
+        deadline = time.time() + 8.0
+        found_print = False
+        while time.time() < deadline:
+            for cls, text in dump_top_level_windows():
+                if "打印" in text and "notepadcc" in text:
+                    found_print = True
+                    break
+            if found_print:
+                break
+            time.sleep(0.2)
+        if not found_print:
+            print("  FAIL: 打印对话框没有出现")
+            return False
+    finally:
+        if window:
+            # 打印对话框关不掉，所以这里不强求"优雅关闭"，直接结束进程
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            time.sleep(1.0)
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=10)
+        for name in ("config.xml", "session.xml"):
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    print("  导出与打印：HTML 落盘且样式类/行号/标题都对、RTF 有颜色表、"
+          "打印对话框确实弹出（测试不往打印机送纸；排版那一步在单测里用内存 DC 真跑过）")
     return True
 
 
@@ -3715,6 +3849,8 @@ def run():
         failed = True
     if not test_function_list(root):
         failed = True
+    if not test_export_and_print(root):
+        failed = True
     if not test_auto_complete(root):
         failed = True
     if not test_associated_commands(root):
@@ -3728,7 +3864,7 @@ def run():
     print("PASS: 界面回归通过（查找栏 + 在文件中查找 + 书签 + 在文件中替换 + 列编辑 + "
           "大文件 + 外部改动 + 首选项 + 快捷键 + 崩溃快照 + 代码折叠 + 分屏克隆 + "
           "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + UDL + 暗色模式 + "
-          "宏 + 文件夹工作区 + 函数列表 + 自动完成 + 文件关联 + 绿色打包）")
+          "宏 + 文件夹工作区 + 函数列表 + 导出与打印 + 自动完成 + 文件关联 + 绿色打包）")
     return 0
 
 

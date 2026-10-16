@@ -31,6 +31,18 @@ static_assert(npcc::edit::EditView::kVirtualSpaceRectangle == SCVS_RECTANGULARSE
               "kVirtualSpaceRectangle 必须与 SCVS_RECTANGULARSELECTION 一致");
 static_assert(npcc::edit::EditView::kRectModifierAlt == SCMOD_ALT,
               "kRectModifierAlt 必须与 SCMOD_ALT 一致");
+// 打印相关的取值同样钉死：SC_PRINT_* / SC_WRAP_* 改数值的话，编译期就报出来
+static_assert(npcc::edit::EditView::kPrintNormal == SC_PRINT_NORMAL, "打印着色模式");
+static_assert(npcc::edit::EditView::kPrintInvertLight == SC_PRINT_INVERTLIGHT, "打印着色模式");
+static_assert(npcc::edit::EditView::kPrintBlackOnWhite == SC_PRINT_BLACKONWHITE, "打印着色模式");
+static_assert(npcc::edit::EditView::kPrintColourOnWhite == SC_PRINT_COLOURONWHITE, "打印着色模式");
+static_assert(npcc::edit::EditView::kPrintColourOnWhiteDefaultBg ==
+                  SC_PRINT_COLOURONWHITEDEFAULTBG,
+              "打印着色模式");
+static_assert(npcc::edit::EditView::kPrintScreenColours == SC_PRINT_SCREENCOLOURS,
+              "打印着色模式");
+static_assert(npcc::edit::EditView::kPrintWrapNone == SC_WRAP_NONE, "打印换行模式");
+static_assert(npcc::edit::EditView::kPrintWrapWord == SC_WRAP_WORD, "打印换行模式");
 
 namespace npcc::edit {
 namespace {
@@ -667,6 +679,87 @@ int32_t EditView::StyleBackColor(int32_t style) const {
         return -1;
     }
     return static_cast<int32_t>(Send(SCI_STYLEGETBACK, static_cast<uintptr_t>(style)));
+}
+
+bool EditView::StyleBold(int32_t style) const {
+    return style >= 0 && Send(SCI_STYLEGETBOLD, static_cast<uintptr_t>(style)) != 0;
+}
+
+bool EditView::StyleItalic(int32_t style) const {
+    return style >= 0 && Send(SCI_STYLEGETITALIC, static_cast<uintptr_t>(style)) != 0;
+}
+
+int32_t EditView::DefaultBackColor() const {
+    return static_cast<int32_t>(Send(SCI_STYLEGETBACK, static_cast<uintptr_t>(STYLE_DEFAULT)));
+}
+
+void EditView::ReadStyledText(int32_t start, int32_t length, std::string& text,
+                              std::vector<int>& styles) const {
+    text.clear();
+    styles.clear();
+    if (length <= 0 || hwnd_ == nullptr) {
+        return;
+    }
+    // SCI_GETSTYLEDTEXT 一次把"字符 + 样式号"成对取回来（每对两个字节）。
+    // 用块的方式取，是为了不为了 60 MB 的文档先要一大块内存；样式号在 Scintilla 里
+    // 就是 0~255（STYLE_MAX），所以每对里的第二字节够用，不必逐字节去问（那要几十万次消息）
+    constexpr int32_t kChunk = 64 * 1024;
+    text.reserve(static_cast<std::size_t>(length));
+    styles.reserve(static_cast<std::size_t>(length));
+    std::vector<char> buffer(static_cast<std::size_t>(kChunk) * 2 + 2, '\0');
+    for (int32_t offset = 0; offset < length; offset += kChunk) {
+        const int32_t size = std::min(kChunk, length - offset);
+        Sci_TextRange range{};
+        range.chrg.cpMin = start + offset;
+        range.chrg.cpMax = start + offset + size;
+        range.lpstrText = buffer.data();
+        const intptr_t got = Send(SCI_GETSTYLEDTEXT, 0,
+                                  reinterpret_cast<intptr_t>(&range));
+        if (got <= 0) {
+            break;
+        }
+        // got 是**字符数**（不是字节数）；每对两个字节
+        for (intptr_t index = 0; index < got; ++index) {
+            const char ch = buffer[static_cast<std::size_t>(index) * 2];
+            const auto style = static_cast<unsigned char>(
+                buffer[static_cast<std::size_t>(index) * 2 + 1]);
+            text.push_back(ch);
+            styles.push_back(static_cast<int>(style));
+        }
+    }
+}
+
+void EditView::SetPrintColourMode(PrintColourMode mode) const {
+    Send(SCI_SETPRINTCOLOURMODE, static_cast<uintptr_t>(mode));
+}
+
+void EditView::SetPrintMagnification(int magnification) const {
+    Send(SCI_SETPRINTMAGNIFICATION, static_cast<uintptr_t>(magnification));
+}
+
+void EditView::SetPrintWrapMode(PrintWrapMode mode) const {
+    Send(SCI_SETPRINTWRAPMODE, static_cast<uintptr_t>(mode));
+}
+
+intptr_t EditView::FormatRange(bool draw, PrintRange& range) const {
+    if (hwnd_ == nullptr) {
+        return -1;
+    }
+    Sci_RangeToFormatFull scintiRange{};
+    scintiRange.hdc = static_cast<HDC>(range.hdc);
+    scintiRange.hdcTarget = static_cast<HDC>(range.hdcTarget);
+    scintiRange.rc.left = range.rcLeft;
+    scintiRange.rc.top = range.rcTop;
+    scintiRange.rc.right = range.rcRight;
+    scintiRange.rc.bottom = range.rcBottom;
+    scintiRange.rcPage.left = range.pageLeft;
+    scintiRange.rcPage.top = range.pageTop;
+    scintiRange.rcPage.right = range.pageRight;
+    scintiRange.rcPage.bottom = range.pageBottom;
+    scintiRange.chrg.cpMin = range.start;
+    scintiRange.chrg.cpMax = range.end;
+    return Send(SCI_FORMATRANGE, draw ? 1u : 0u,
+                reinterpret_cast<intptr_t>(&scintiRange));
 }
 
 bool EditView::HasBookmark(int32_t line) const {
