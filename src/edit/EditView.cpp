@@ -409,6 +409,14 @@ void EditView::ApplyPalette(const EditorPalette& palette) const {
     Send(SCI_SETCARETLINEVISIBLE, 1);
     Send(SCI_SETCARETLINEBACK, colour(palette.caretLineBack));
     Send(SCI_SETSELBACK, 1, colour(palette.selectionBack));
+    // 配对括号的高亮：这两个样式不在"语法样式"里，词法器永远碰不到它们，
+    // 所以必须跟着皮肤一起铺——否则深色底上默认的浅色高亮几乎看不见
+    Send(SCI_STYLESETFORE, STYLE_BRACELIGHT, colour(palette.braceFore));
+    Send(SCI_STYLESETBACK, STYLE_BRACELIGHT, colour(palette.braceBack));
+    Send(SCI_STYLESETBOLD, STYLE_BRACELIGHT, 1);
+    Send(SCI_STYLESETFORE, STYLE_BRACEBAD, colour(palette.braceFore));
+    Send(SCI_STYLESETBACK, STYLE_BRACEBAD, colour(palette.braceBadBack));
+    Send(SCI_STYLESETBOLD, STYLE_BRACEBAD, 1);
     if (palette.whitespace != 0) {
         Send(SCI_SETWHITESPACEFORE, 1, colour(palette.whitespace));
     } else {
@@ -1138,6 +1146,106 @@ void EditView::ClearIndicator(int indicatorId) const {
     const int64_t length = TextLength();
     Send(SCI_SETINDICATORCURRENT, static_cast<uintptr_t>(indicatorId));
     Send(SCI_INDICATORCLEARRANGE, 0, static_cast<intptr_t>(length));
+}
+
+uint32_t EditView::CodePage() const {
+    return static_cast<uint32_t>(Send(SCI_GETCODEPAGE));
+}
+
+BraceMatch EditView::FindBraceNearCaret(int32_t window) const {
+    BraceMatch result;
+    if (hwnd_ == nullptr) {
+        return result;
+    }
+    const int64_t length = TextLength();
+    const int64_t caret = CaretPosition();
+    // 绝大多数光标移动并不挨着括号。先只问两个字节（SCI_GETCHARAT 不复制文本），
+    // 不是括号就直接返回——省掉"每敲一个键就读 128 KB"
+    const auto isBrace = [](int ch) {
+        return ch == '(' || ch == ')' || ch == '[' || ch == ']' || ch == '{' || ch == '}';
+    };
+    const int ahead = caret < length
+                          ? static_cast<int>(Send(SCI_GETCHARAT, static_cast<uintptr_t>(caret)))
+                          : -1;
+    const int behind = caret > 0
+                           ? static_cast<int>(Send(SCI_GETCHARAT,
+                                                   static_cast<uintptr_t>(caret - 1)))
+                           : -1;
+    if (!isBrace(ahead) && !isBrace(behind)) {
+        return result;
+    }
+
+    const int64_t span = window > 0 ? window : 0;
+    const int64_t start = caret - span > 0 ? caret - span : 0;
+    int64_t end = caret + span;
+    if (end > length) {
+        end = length;
+    }
+    const std::string slice = GetRange(start, end);
+    result = FindBraceMatch(slice, static_cast<int32_t>(caret - start), window);
+    // 位置换算回文档坐标；纯函数只认它拿到的那一段
+    if (result.hasBrace) {
+        result.bracePos += static_cast<int32_t>(start);
+    }
+    if (result.matched) {
+        result.matchPos += static_cast<int32_t>(start);
+    }
+    return result;
+}
+
+void EditView::HighlightBracesNearCaret() const {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+    const BraceMatch match = FindBraceNearCaret();
+    if (!match.hasBrace) {
+        ClearBraceHighlight();
+        return;
+    }
+    if (match.matched) {
+        Send(SCI_BRACEHIGHLIGHT, static_cast<uintptr_t>(match.bracePos),
+             static_cast<intptr_t>(match.matchPos));
+    } else {
+        Send(SCI_BRACEBADLIGHT, static_cast<uintptr_t>(match.bracePos));
+    }
+}
+
+void EditView::ClearBraceHighlight() const {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+    // INVALID_POSITION 清掉高亮；两个都清，免得"上一个是坏括号、这一次是配对"时留下残影
+    Send(SCI_BRACEHIGHLIGHT, static_cast<uintptr_t>(-1), -1);
+    Send(SCI_BRACEBADLIGHT, static_cast<uintptr_t>(-1));
+}
+
+bool EditView::GotoMatchingBrace() const {
+    const BraceMatch match = FindBraceNearCaret();
+    if (!match.matched) {
+        return false;
+    }
+    // SCI_GOTOPOS 自己会把目标位置滚进视野，不用再补一次
+    SetCaretPosition(match.matchPos);
+    return true;
+}
+
+DocumentStats EditView::Statistics() const {
+    DocumentStats stats;
+    if (hwnd_ == nullptr) {
+        return stats;
+    }
+    const int64_t length = TextLength();
+    stats.bytes = length;
+    // 行数直接问 Scintilla：它不复制文本，而且口径就是它自己那套（换行数 + 1）
+    stats.lines = static_cast<int64_t>(Send(SCI_GETLINECOUNT));
+
+    const int64_t limit = static_cast<int64_t>(kStatsTextLimit);
+    const int64_t end = length < limit ? length : limit;
+    const DocumentStats counted = StatsOf(GetRange(0, end), CodePage() != kCodePageUtf8);
+    stats.chars = counted.chars;
+    stats.words = counted.words;
+    stats.truncated = end < length;
+    return stats;
 }
 
 }  // namespace npcc::edit

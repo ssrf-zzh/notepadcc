@@ -122,6 +122,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
 
     MSG message{};
     while (::GetMessageW(&message, nullptr, 0, 0) > 0) {
+        // 全屏里按 Esc 退出（设计文档 2.4 第 6 条）。这件事只能在这里拦：编辑控件拿着焦点，
+        // WM_KEYDOWN 根本不会送到主窗口去；而把 Esc 绑成全局快捷键又会在非全屏时反过来
+        // 触发全屏。所以只在"确实处于全屏"时才吞掉这个键。
+        if (message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE &&
+            window.ExitFullScreenOnEscape()) {
+            continue;
+        }
         // 快捷键可能被用户全部清空，这时 hAccel 是 NULL：
         // 不能把 NULL 递给 TranslateAccelerator，直接走普通分发。
         const HACCEL accelerators = window.Accelerators();

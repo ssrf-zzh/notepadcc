@@ -12,6 +12,7 @@
 #include "edit/LanguageRegistry.h"
 #include "edit/EditorPalette.h"
 #include "edit/StyleScheme.h"
+#include "edit/TextTools.h"
 
 namespace npcc::edit {
 
@@ -323,6 +324,28 @@ public:
     void CancelCompletion() const;
     // 光标处这个词的起点（用于取"已输入的前缀"）
     int32_t WordStartPosition() const;
+
+    // ---- 括号匹配（设计文档 2.1 第 5 条）----
+    // 判断与配对交给纯函数 FindBraceMatch，这里只负责"取哪一段文本、把位置换算回
+    // 文档坐标、把结果交给 Scintilla 显示"。
+    //
+    // **只取光标前后各 window 个字节**：整篇读出来匹配在大文件上会把界面拖死，而现实里的
+    // 配对括号不会隔几十万字节；窗口之外一律按"没配对上"处理（与纯函数的口径一致）。
+    BraceMatch FindBraceNearCaret(int32_t window = 64 * 1024) const;
+    // 把 FindBraceNearCaret 的结果画出来：配上了就把两个括号一起交给 SCI_BRACEHIGHLIGHT，
+    // 没配上就用 SCI_BRACEBADLIGHT 把那个孤立的标出来；一个括号都没挨着就清掉高亮。
+    void HighlightBracesNearCaret() const;
+    void ClearBraceHighlight() const;
+    // 跳到配对的括号上（Ctrl+B）。成功返回 true；没配上返回 false，由调用方给用户一个说法
+    // ——设计里写的是"状态栏提示而非静默无响应"。
+    bool GotoMatchingBrace() const;
+
+    // ---- 文档统计（"摘要"用）----
+    // 行数与字节数直接问 Scintilla（全量、不读数）；字符数与词数走纯函数 StatsOf，
+    // 最多读 kStatsTextLimit 个字节，截断时把 truncated 置真。
+    DocumentStats Statistics() const;
+    static constexpr std::size_t kStatsTextLimit = 8u * 1024u * 1024u;
+    uint32_t CodePage() const;   // 65001 表示缓冲区按 UTF-8 解释
 
 private:
     HWND hwnd_ = nullptr;

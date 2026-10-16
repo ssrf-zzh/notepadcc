@@ -79,6 +79,9 @@ std::vector<LangPack> MakeBuiltin() {
         Entry(L"cmd.view.workspaceOpenSelected", L"Open Selected File", L"O"),
         Entry(L"cmd.view.functionList", L"Function List", L"F"),
         Entry(L"cmd.view.functionJump", L"Jump to Selected Symbol", L"J"),
+        Entry(L"cmd.view.fullScreen", L"Full Screen", L"U"),
+        Entry(L"cmd.view.gotoMatchBrace", L"Go to Matching Brace", L"B"),
+        Entry(L"cmd.view.summary", L"Summary...", L"S"),
         // ---- 宏 ----
         Entry(L"cmd.macro.record", L"Start / Stop Recording", L"R"),
         Entry(L"cmd.macro.playLast", L"Play Last Macro", L"P"),

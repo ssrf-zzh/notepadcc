@@ -37,11 +37,52 @@ user32.GetClipboardData.restype = wintypes.HANDLE
 user32.GetClipboardData.argtypes = [ctypes.c_uint]
 user32.RegisterClipboardFormatW.argtypes = [wintypes.LPCWSTR]
 user32.RegisterClipboardFormatW.restype = ctypes.c_uint
+# 状态栏上的 SB_GETTEXT* 超过 WM_USER，跨进程不封送指针（见 read_status_bar），
+# 所以要自己去目标进程里分配内存、读回来
+kernel32.OpenProcess.restype = wintypes.HANDLE
+kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+kernel32.VirtualAllocEx.restype = ctypes.c_void_p
+kernel32.VirtualAllocEx.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_size_t,
+                                    wintypes.DWORD, wintypes.DWORD]
+kernel32.VirtualFreeEx.restype = wintypes.BOOL
+kernel32.VirtualFreeEx.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_size_t,
+                                   wintypes.DWORD]
+kernel32.ReadProcessMemory.restype = wintypes.BOOL
+kernel32.ReadProcessMemory.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p,
+                                       ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
 # SendMessageTimeoutW 带指针参数，同样必须声明签名
 user32.SendMessageTimeoutW.restype = wintypes.LPARAM
 user32.SendMessageTimeoutW.argtypes = [wintypes.HWND, ctypes.c_uint, ctypes.c_size_t,
                                        ctypes.c_ssize_t, ctypes.c_uint, ctypes.c_uint,
                                        ctypes.POINTER(ctypes.c_size_t)]
+
+
+# 本脚本要跨进程核对窗口坐标（分隔条位置、面板大小），必须和 notepadcc.exe 待在同一个
+# 坐标空间里：程序清单声明的是 PerMonitorV2。脚本若保持"DPI 不感知"，在 125%/150%/200%
+# 这类缩放比例的机器上，GetWindowRect / GetClientRect 拿回来的是**虚拟化**过的坐标
+# （物理值 ÷ 缩放比），而投递过去的鼠标消息里的坐标又会被程序按物理像素读，
+# 于是"分隔条拖动"这类按坐标操作的用例会凭空失败——100% 缩放的机器上两套坐标重合，
+# 所以这个坑一直没暴露（200% 的机器上实测：客户区 537 而不是 1074，分隔条拖动丢目标）。
+def declare_dpi_awareness():
+    try:
+        # -4 = DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+        if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
+    except (AttributeError, OSError):
+        pass
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)   # PROCESS_PER_MONITOR_DPI_AWARE
+        return
+    except (AttributeError, OSError):
+        pass
+    try:
+        user32.SetProcessDPIAware()   # 最后兜底：至少别再看虚拟化坐标
+    except (AttributeError, OSError):
+        pass
+
+
+declare_dpi_awareness()
 
 
 def address_of(buffer):
@@ -166,6 +207,11 @@ CMD_WINDOW_NEXT = (11 << 12) | 1
 CMD_WINDOW_PREV = (11 << 12) | 2
 CMD_VIEW_JSON_TREE = (4 << 12) | 25
 JSON_TREE_CLASS = "notepadccJsonTree"
+# 视图类 26/27/28：全屏（F11）、跳到匹配括号（Ctrl+B）、摘要
+CMD_VIEW_FULL_SCREEN = (4 << 12) | 26
+CMD_VIEW_GOTO_MATCH_BRACE = (4 << 12) | 27
+CMD_VIEW_SUMMARY = (4 << 12) | 28
+MENU_INDEX_VIEW = 3                   # 文件 / 编辑 / 查找 / 视图 …
 PREF_UI_LANGUAGE_COMBO = 1048
 PREF_CANCEL = 1061
 CB_GETCOUNT = 0x0146
@@ -274,6 +320,27 @@ TCM_GETITEMCOUNT = 0x1304            # TCM_FIRST + 4
 BM_SETCHECK = 0x00F1
 BST_UNCHECKED = 0
 MF_BYPOSITION = 0x00000400            # 菜单项按位置而不是按命令号来找
+MF_BYCOMMAND = 0x00000000
+MF_CHECKED = 0x00000008
+
+# ---- 状态栏（系统控件 msctls_statusbar32）----
+STATUS_CLASS = "msctls_statusbar32"
+SB_GETTEXTLENGTHW = 0x040C            # WM_USER + 12
+SB_GETTEXTW = 0x040D                  # WM_USER + 13
+PROCESS_VM_OPERATION = 0x0008
+PROCESS_VM_READ = 0x0010
+PROCESS_VM_WRITE = 0x0020
+MEM_COMMIT = 0x1000
+MEM_RESERVE = 0x2000
+MEM_RELEASE = 0x8000
+PAGE_READWRITE = 0x04
+
+# ---- 全屏（F11）----
+WS_CAPTION = 0x00C00000
+GWL_STYLE = -16
+SPI_GETWORKAREA = 0x0030
+VK_F11 = 0x7A
+VK_ESCAPE = 0x1B
 
 IDYES = 6
 IDNO = 7
@@ -332,6 +399,74 @@ def find_child(parent, cls):
         if class_name(child) == cls:
             return child
     return None
+
+
+def read_status_bar(window, part=0):
+    """读状态栏某一段此刻显示的文本。
+
+    状态栏是系统控件（msctls_statusbar32），读它要用 SB_GETTEXTW——这条消息号超过
+    WM_USER，跨进程**不封送指针**：把本进程的缓冲区地址递过去，控件会往它的地址空间里
+    写，读回来的是垃圾。所以这里在**目标进程**里分配一块内存，把远端地址交给控件去写，
+    再用 ReadProcessMemory 取回来。状态栏上"命令给出的说法"因此也能被核对，
+    而不是只能看"命令发出去了没有"。
+    """
+    bar = find_child(window, STATUS_CLASS)
+    if not bar:
+        return None
+    length = send_bounded(bar, SB_GETTEXTLENGTHW, part, 0)
+    if length is None:
+        return None
+    if length <= 0:
+        return ""
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(bar, ctypes.byref(pid))
+    process = kernel32.OpenProcess(PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE,
+                                   False, pid)
+    if not process:
+        return None
+    size = (length + 1) * 2
+    remote = kernel32.VirtualAllocEx(process, None, size, MEM_COMMIT | MEM_RESERVE,
+                                     PAGE_READWRITE)
+    try:
+        if not remote:
+            return None
+        if send_bounded(bar, SB_GETTEXTW, part, remote) is None:
+            return None
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        got = ctypes.c_size_t(0)
+        if not kernel32.ReadProcessMemory(process, remote, address_of(buffer), size,
+                                          ctypes.byref(got)):
+            return None
+        return buffer.value
+    finally:
+        if remote:
+            kernel32.VirtualFreeEx(process, remote, 0, MEM_RELEASE)
+        kernel32.CloseHandle(process)
+
+
+def wait_status_bar(window, want, timeout=4.0):
+    """等状态栏第一段变成想要的文本（状态栏刷新是异步的，直接读会读到上一条）。"""
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        last = read_status_bar(window)
+        if last == want:
+            return last
+        time.sleep(0.2)
+    return last
+
+
+def work_area():
+    """当前显示器的工作区（全屏铺的就是它，不是整个显示器）。"""
+    rect = wintypes.RECT()
+    user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(rect), 0)
+    return (rect.left, rect.top, rect.right, rect.bottom)
+
+
+def window_rect(hwnd):
+    rect = wintypes.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(rect))
+    return (rect.left, rect.top, rect.right, rect.bottom)
 
 
 def set_text(hwnd, control_id, text):
@@ -4047,6 +4182,8 @@ def run():
         failed = True
     if not test_json_tree(root):
         failed = True
+    if not test_brace_summary_fullscreen(root):
+        failed = True
     if not test_auto_complete(root):
         failed = True
     if not test_associated_commands(root):
@@ -4062,7 +4199,7 @@ def run():
           "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + UDL + 暗色模式 + "
           "宏 + 文件夹工作区 + 函数列表 + 导出与打印 + 插件宿主 + JSON/XML 格式化 + "
           "运行命令 + 界面语言 + 十六进制查看 + 复制为富文本 + Markdown 预览 + 对话框文案 + "
-          "比较 + JSON 树视图 + 自动完成 + 文件关联 + 绿色打包）")
+          "比较 + JSON 树视图 + 括号匹配与摘要与全屏 + 自动完成 + 文件关联 + 绿色打包）")
     return 0
 
 
@@ -4440,6 +4577,218 @@ def test_json_tree(root):
 
     print("  JSON 树视图：按层级列出结构（缩进/折叠记号/键名/值逐行核对）、"
           "点容器折叠与展开、点标量跳到源码那一行、内容不合法时说明原因（含行列）")
+    return True
+
+
+def test_brace_summary_fullscreen(root):
+    """括号匹配（Ctrl+B）、摘要（字数统计）、全屏（F11 / Esc）：三件天天看得见的基本功。
+
+    三件事都是"界面上看得见的行为"，所以全都按"读回屏幕上真实的样子"来核对：
+    光标位置读 SCI_GETCURRENTPOS；配不上时状态栏那句提示读 SB_GETTEXTW（状态栏是系统控件，
+    读它要借目标进程的内存，见 read_status_bar）；摘要对话框四行统计逐字读回来与 Python
+    这边独立算的结果比对；全屏核对菜单栏收起来了、窗口矩形等于工作区、样式里的标题栏位
+    被摘掉，Esc 退出时三样逐项还原。
+    """
+    work = os.path.join(root, "build", "brace_test")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    cfg = os.path.join(root, "build", "bin", "config")
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+
+    # 中文注释是故意的：它让"字符数"与"字节数"不相等，摘要那一条才分辨得出对错
+    # （按字节数报字符数、或压根没按代码页解释，都会在这里露出来）
+    text = ("// 括号匹配与摘要：中文注释让字符数与字节数不相等\n"
+            "int main()\n"
+            "{\n"
+            "    return f(1);\n"
+            "}\n"
+            "// 孤立的右括号，没有左括号配它\n"
+            ")\n")
+    data = text.encode("utf-8")
+    path = os.path.join(work, "code.txt")
+    with open(path, "wb") as handle:
+        handle.write(data)
+
+    open_paren = data.index(b"(")        # "main()" 里那个左括号
+    close_paren = data.index(b")")       # 紧跟着的右括号
+    stray_paren = data.rindex(b")")      # 最后一行的孤立右括号
+    plain_byte = data.index(b"main")     # 'm'：左右两个字节都不是括号
+
+    stale = ("config.xml", "session.xml")
+    for name in stale:
+        target = os.path.join(cfg, name)
+        if os.path.exists(target):
+            os.remove(target)
+    log_path = remove_log_with_retry(root)
+    hint = "没有可配对的括号"
+
+    def caret():
+        return user32.SendMessageW(visible_scintilla(window), SCI_GETCURRENTPOS, 0, 0)
+
+    def put_caret(position):
+        user32.SendMessageW(visible_scintilla(window), SCI_GOTOPOS, position, 0)
+        time.sleep(0.4)
+
+    def wait_hint_gone(timeout=4.0):
+        """等状态栏回到常规内容（挪光标会让它变回"行/列"）。
+
+        不确认这一步，下面"配不上时应当出现提示"就成了读上一条的残留——永远为真的判据。
+        """
+        deadline = time.time() + timeout
+        current = None
+        while time.time() < deadline:
+            current = read_status_bar(window)
+            if current != hint:
+                return current
+            time.sleep(0.2)
+        return current
+
+    proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", path], cwd=root)
+    window = wait_for_main_window("notepadcc - code.txt")
+    try:
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+        time.sleep(1.0)
+
+        # ---- 0) 先自检"读状态栏"这条路是通的，否则后面那两条判据都是空的 ----
+        status = read_status_bar(window)
+        if not status or "行 " not in status or "插入" not in status:
+            print(f"  FAIL: 读不回状态栏内容（读到 {status!r}）")
+            return False
+
+        # ---- 1) 括号匹配：光标落在配对括号的那个字节上 ----
+        put_caret(open_paren)
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_GOTO_MATCH_BRACE, 0)
+        time.sleep(0.6)
+        if caret() != close_paren:
+            print(f"  FAIL: 光标踩在 '(' 上应当跳到 ')'（字节 {close_paren}），实际 {caret()}")
+            return False
+        # 反方向：光标停在 ')' 后面（右边不是括号）要往左找到 '('
+        put_caret(close_paren + 1)
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_GOTO_MATCH_BRACE, 0)
+        time.sleep(0.6)
+        if caret() != open_paren:
+            print(f"  FAIL: 光标在 ')' 后面应当跳到 '('（字节 {open_paren}），实际 {caret()}")
+            return False
+
+        # ---- 2) 配不上时：光标不动，而且状态栏要给个说法（两种"配不上"各走一遍）----
+        put_caret(plain_byte)
+        if wait_hint_gone() == hint:
+            print("  FAIL: 挪光标之后状态栏还是上一条提示，后面这条判据就测不出新提示")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_GOTO_MATCH_BRACE, 0)
+        time.sleep(0.6)
+        if caret() != plain_byte:
+            print(f"  FAIL: 旁边没有括号时光标不该动，实际 {caret()}")
+            return False
+        if wait_status_bar(window, hint) != hint:
+            print(f"  FAIL: 旁边没括号时状态栏应当说明，实际 {read_status_bar(window)!r}")
+            return False
+
+        put_caret(stray_paren)          # 有括号、但配不上：另一条分支
+        if wait_hint_gone() == hint:
+            print("  FAIL: 状态栏没有回到常规内容，第二条提示判据测不出东西")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_GOTO_MATCH_BRACE, 0)
+        time.sleep(0.6)
+        if caret() != stray_paren:
+            print(f"  FAIL: 孤立括号时光标不该动，实际 {caret()}")
+            return False
+        if wait_status_bar(window, hint) != hint:
+            print(f"  FAIL: 孤立括号也应当给出同一条提示，实际 {read_status_bar(window)!r}")
+            return False
+
+        # 顺手钉住"命令留的提示真的看得见"这件事对**别的**命令也成立：命令执行完之后
+        # 外壳会刷一次状态栏，刷得太狠就会把提示当场盖掉（这一条曾经整类失效）。
+        # 书签命令在一份没有书签的文档上给的说法就是最好的样本
+        put_caret(0)
+        if wait_hint_gone() == hint:
+            print("  FAIL: 状态栏没有回到常规内容，书签那条判据测不出东西")
+            return False
+        user32.PostMessageW(window, WM_COMMAND, CMD_NEXT_BOOKMARK, 0)
+        time.sleep(0.6)
+        if wait_status_bar(window, "没有书签") != "没有书签":
+            print(f"  FAIL: 没有书签时状态栏应当说明，实际 {read_status_bar(window)!r}")
+            return False
+
+        # ---- 3) 摘要：四行统计逐字读回来，与 Python 独立算的结果比对 ----
+        user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_SUMMARY, 0)
+        time.sleep(1.0)
+        box = user32.FindWindowW("#32770", "摘要")
+        if not box:
+            print("  FAIL: 摘要对话框没有出现")
+            return False
+        chars = len(text)                          # Python 的字符数（码点，含换行）
+        line_count = data.count(b"\n") + 1
+        expected = (f"行数：{line_count}\r\n"
+                    f"字符数：{chars}\r\n"
+                    f"词数：{len(text.split())}\r\n"
+                    f"字节数：{len(data)}")
+        shown = [item for item in dialog_texts(box) if "行数：" in item]
+        if not shown or shown[0] != expected:
+            print(f"  FAIL: 摘要对话框的内容不对\n           实际 {shown[:1]}\n"
+                  f"           期望 {expected!r}")
+            dismiss_dialog("摘要", IDOK)
+            return False
+        if chars == len(data):
+            print("  FAIL: 测试文件里字符数与字节数相等，这一条分辨不出对错")
+            dismiss_dialog("摘要", IDOK)
+            return False
+        if not dismiss_dialog("摘要", IDOK):
+            return False
+
+        # ---- 4) 全屏（F11）：菜单栏收起来、铺满工作区、标题栏位摘掉；Esc 逐项还原 ----
+        menu_before = user32.GetMenu(window)
+        rect_before = window_rect(window)
+        style_before = user32.GetWindowLongPtrW(window, GWL_STYLE)
+        user32.PostMessageW(window, WM_KEYDOWN, VK_F11, 0)
+        time.sleep(1.2)
+        if user32.GetMenu(window):
+            print("  FAIL: 全屏里菜单栏应当收起来")
+            return False
+        if window_rect(window) != work_area():
+            print(f"  FAIL: 全屏的矩形应当等于工作区 {work_area()}，实际 {window_rect(window)}")
+            return False
+        if user32.GetWindowLongPtrW(window, GWL_STYLE) & WS_CAPTION:
+            print("  FAIL: 全屏里标题栏位应当摘掉")
+            return False
+
+        user32.PostMessageW(window, WM_KEYDOWN, VK_ESCAPE, 0)
+        time.sleep(1.2)
+        if user32.GetMenu(window) != menu_before:
+            print("  FAIL: 退出全屏后菜单栏没有挂回来")
+            return False
+        if window_rect(window) != rect_before:
+            print(f"  FAIL: 退出全屏后窗口矩形应当是 {rect_before}，实际 {window_rect(window)}")
+            return False
+        if user32.GetWindowLongPtrW(window, GWL_STYLE) != style_before:
+            print("  FAIL: 退出全屏后窗口样式没有还原")
+            return False
+
+        # 日志里的两句是"真的进出过全屏"的旁证：菜单栏与矩形都能被别的路径改，日志不会
+        log_text = ""
+        if os.path.exists(log_path):
+            with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
+                log_text = handle.read()
+        if "进入全屏" not in log_text or "退出全屏" not in log_text:
+            print(f"  FAIL: 日志里没有进出全屏的记录\n{log_text[-300:]}")
+            return False
+    finally:
+        if window:
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            dismiss_dialog("notepadcc", IDNO, timeout=2.0, quiet=True)
+            time.sleep(1.5)
+        if proc.poll() is None:
+            proc.kill()
+        for name in stale:
+            target = os.path.join(cfg, name)
+            if os.path.exists(target):
+                os.remove(target)
+
+    print("  括号匹配 + 摘要 + 全屏：Ctrl+B 两个方向都跳到配对括号那个字节、配不上时"
+          "光标不动且状态栏给出提示、摘要四行统计逐字核对、F11 收菜单栏并铺满工作区、"
+          "Esc 把菜单栏/矩形/窗口样式逐项还原（日志里有进出全屏两句）")
     return True
 
 

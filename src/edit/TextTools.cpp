@@ -758,4 +758,115 @@ std::string UnescapeHtml(std::string_view text) {
     return out;
 }
 
+namespace {
+
+// 认出括号并给出它那一对（开、闭）。不是括号返回 false。
+bool BracePairOf(char ch, char& open, char& close) {
+    switch (ch) {
+        case '(': open = '('; close = ')'; return true;
+        case '[': open = '['; close = ']'; return true;
+        case '{': open = '{'; close = '}'; return true;
+        case ')': open = '('; close = ')'; return true;
+        case ']': open = '['; close = ']'; return true;
+        case '}': open = '{'; close = '}'; return true;
+        default:  return false;
+    }
+}
+
+}  // namespace
+
+BraceMatch FindBraceMatch(std::string_view text, int32_t caretPos, int32_t window) {
+    BraceMatch result;
+    const int32_t length = static_cast<int32_t>(text.size());
+    if (length == 0 || caretPos < 0 || caretPos > length) {
+        return result;
+    }
+
+    // 光标右边优先，再看左边——与对标产品一致（见头文件里的说明）
+    int32_t pos = -1;
+    char open = 0;
+    char close = 0;
+    if (caretPos < length &&
+        BracePairOf(text[static_cast<std::size_t>(caretPos)], open, close)) {
+        pos = caretPos;
+    } else if (caretPos > 0 &&
+               BracePairOf(text[static_cast<std::size_t>(caretPos) - 1], open, close)) {
+        pos = caretPos - 1;
+    }
+    if (pos < 0) {
+        return result;
+    }
+
+    result.hasBrace = true;
+    result.bracePos = pos;
+    const int32_t span = window > 0 ? window : 0;
+    int depth = 1;
+    if (text[static_cast<std::size_t>(pos)] == open) {
+        const int32_t stop = std::min(length, pos + 1 + span);
+        for (int32_t i = pos + 1; i < stop; ++i) {
+            const char ch = text[static_cast<std::size_t>(i)];
+            if (ch == open) {
+                ++depth;
+            } else if (ch == close && --depth == 0) {
+                result.matched = true;
+                result.matchPos = i;
+                return result;
+            }
+        }
+    } else {
+        const int32_t stop = std::max(0, pos - span);
+        for (int32_t i = pos - 1; i >= stop; --i) {
+            const char ch = text[static_cast<std::size_t>(i)];
+            if (ch == close) {
+                ++depth;
+            } else if (ch == open && --depth == 0) {
+                result.matched = true;
+                result.matchPos = i;
+                return result;
+            }
+        }
+    }
+    return result;
+}
+
+DocumentStats StatsOf(std::string_view text, bool ansiBytes) {
+    DocumentStats stats;
+    stats.bytes = static_cast<int64_t>(text.size());
+
+    int64_t breaks = 0;
+    int64_t chars = 0;
+    int64_t words = 0;
+    bool inWord = false;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char raw = text[i];
+        const unsigned char byte = static_cast<unsigned char>(raw);
+        // 字符数是"缓冲区里有多少个码点"：换行也是字符（CRLF 是两个：\r 与 \n），
+        // 这样纯 ASCII 文档里"字符数 == 字节数"，用户一眼能对上
+        if (ansiBytes || byte < 0x80 || (byte & 0xC0) != 0x80) {
+            ++chars;
+        }
+        // 行数口径与 Scintilla 一致：CRLF / CR / LF 各算一次换行
+        if (raw == '\r' || raw == '\n') {
+            ++breaks;
+            if (raw == '\r' && i + 1 < text.size() && text[i + 1] == '\n') {
+                ++i;   // CRLF 是一次换行，不是两次
+                ++chars;   // 被跳过的那个 '\n' 也是一个字符（两种口径下都是 1）
+            }
+            inWord = false;
+            continue;
+        }
+        const bool blank = byte == ' ' || byte == '\t' || byte == '\v' || byte == '\f';
+        if (blank) {
+            inWord = false;
+        } else if (!inWord) {
+            inWord = true;
+            ++words;
+        }
+    }
+    stats.lines = breaks + 1;
+    stats.chars = chars;
+    stats.words = words;
+    return stats;
+}
+
 }  // namespace npcc::edit

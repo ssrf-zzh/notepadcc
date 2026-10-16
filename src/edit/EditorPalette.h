@@ -26,6 +26,9 @@ struct EditorPalette {
     std::uint32_t foldFore = 0x606060;         // 折叠记号（+/−）
     std::uint32_t foldBack = 0xFFFFFF;
     std::uint32_t whitespace = 0;              // 空白符号/行尾符；0 = 用文字色（浅色下如此）
+    std::uint32_t braceFore = 0x000000;        // 配对括号高亮（前景/背景）
+    std::uint32_t braceBack = 0xC8E8C8;
+    std::uint32_t braceBadBack = 0xF6C6C6;     // 没有配对的孤立括号
 
     static EditorPalette Light() {
         EditorPalette palette;
@@ -46,6 +49,9 @@ struct EditorPalette {
         palette.foldFore = 0xC0C0C0;
         palette.foldBack = 0x2D2D2D;
         palette.whitespace = 0x3F3F3F;     // 白点压在深底上太扎眼，压暗
+        palette.braceFore = 0xF0F0F0;
+        palette.braceBack = 0x2F5230;
+        palette.braceBadBack = 0x5A2A2A;
         return palette;
     }
 };

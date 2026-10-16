@@ -82,4 +82,45 @@ std::vector<std::string> ParseWordList(std::string_view text);
 std::vector<std::string> FilterByPrefix(const std::vector<std::string>& words,
                                         std::string_view prefix, std::size_t limit);
 
+// ---- 括号匹配（设计文档 2.1 第 5 条）----
+// 一次"光标旁的括号"匹配结果。
+struct BraceMatch {
+    bool    hasBrace = false;   // 光标右边或左边紧挨着的是一个括号
+    bool    matched  = false;   // 找到了与之配对的那一个
+    int32_t bracePos = -1;      // 光标侧那个括号的字节位置
+    int32_t matchPos = -1;      // 配对括号的字节位置（matched 为真时才有意义）
+};
+
+// 从 caretPos（字节偏移）找"光标旁的那个括号"以及它的配对。
+//
+// 两条约定都是照着对标产品来的：
+//   1. **先看光标右边一个字节，再看左边一个**——刚敲完 `(` 时插入点就在它后面，
+//      用户期望高亮的是刚敲进去的那一个；
+//   2. 只数**同一种**括号（`(` 配 `)`、`[` 配 `]`、`{` 配 `}`），字符串与注释里的
+//      括号不做语法感知的排除。少一层"看起来更聪明"的判断，换来的是"程序说配上了、
+//      用户也看得见配上"的一致性。
+//
+// 只在 [caretPos - window, caretPos + window] 这一段里找：整篇扫描在大文件上会卡界面，
+// 而现实里的配对括号不会隔几十万字节；超出这个窗口就按"没找到配对"处理。
+BraceMatch FindBraceMatch(std::string_view text, int32_t caretPos,
+                          int32_t window = 64 * 1024);
+
+// ---- 文档统计（基线第 1 节的"字符统计"、6.5 节的"字数统计"）----
+struct DocumentStats {
+    int64_t lines = 0;   // 行数，口径与 Scintilla 的 SCI_GETLINECOUNT 一致：换行数 + 1
+    // 字符数：ANSI 文档一个字节算一个字符，其余按 UTF-8 码点算。**换行也算字符**
+    // （CRLF 是两个：\r 与 \n）——这样纯 ASCII 文档里字符数与字节数相等，对得上账。
+    int64_t chars = 0;
+    int64_t words = 0;   // 词数：连续的非空白算一个词
+    int64_t bytes = 0;   // 字节数：缓冲区里实打实有多少字节（基线要的"本地化友好"口径）
+    // 字符数与词数只统计了前面一段（超大文件按上限截断，见调用方）。
+    // 行数与字节数永远是全量——它们由 Scintilla 直接给出，不需要读数。
+    // 界面必须把这件事说出来，否则"统计结果偏小"就成了静默的假数据。
+    bool truncated = false;
+};
+
+// 按编辑器缓冲区的存法统计：UTF-8 / UTF-16 文档的缓冲区是 UTF-8，ANSI 文档是代码页字节，
+// 所以字符数要由 ansiBytes 决定按字节还是按码点算。
+DocumentStats StatsOf(std::string_view text, bool ansiBytes);
+
 }  // namespace npcc::edit

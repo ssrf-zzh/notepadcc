@@ -57,6 +57,10 @@ public:
 
     // 自检开关（--crash-test）：等窗口就绪后故意崩一次，用来验证崩溃处理这条路径
     void SetCrashTest(bool enabled) noexcept { crashTest_ = enabled; }
+    // 全屏里按 Esc 退出（设计文档 2.4 第 6 条）。**只能由消息循环调用**：
+    // 编辑控件拿着焦点，WM_KEYDOWN 根本送不到主窗口来，而把 Esc 绑成全局快捷键
+    // 又会在非全屏时反过来触发全屏。返回 true 表示这个键已经被消化掉了。
+    bool ExitFullScreenOnEscape();
 
 private:
     static LRESULT CALLBACK WndProcThunk(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -68,6 +72,10 @@ private:
     void LayoutChildren() const;
     void UpdateTitle() const;
     void UpdateStatus() const;
+    // 只刷"文档信息"两段（编码 / 行尾 / 语言 / 修改标记），不碰第一段。
+    // WM_COMMAND 那一段用它：命令自己可能刚在第一段留了一句提示（"没有可配对的括号"
+    // 这类），整条 UpdateStatus 会把提示当场盖掉，界面上看起来就是"点了没反应"。
+    void UpdateDocumentInfo() const;
     void SyncTabBar();
     void SyncFileWatcher();
     void ApplyViewToggles(edit::Document& document) const;
@@ -132,6 +140,10 @@ private:
     void CommandStyleConfigurator();
     void CommandExportUdlSample();
     void CommandToggleDarkMode();
+    // 基线 P0 的三件"编辑器基本功"：全屏（F11）、跳到匹配括号（Ctrl+B）、摘要
+    void CommandToggleFullScreen();
+    void CommandGotoMatchingBrace();
+    void CommandShowSummary();
     // ---- 宏（设计文档 2.9 / 5.7）----
     void CommandToggleMacroRecord();
     void CommandPlayLastMacro();
@@ -325,6 +337,12 @@ private:
     bool showLineNumbers_ = true;
     bool wrapEnabled_ = false;
     bool darkMode_ = false;
+    // 全屏（F11）：进出时把菜单、样式、窗口位置原样存下来，退出时逐项还原——
+    // 只记一个"是不是全屏"的布尔量是不够的，还原时要用的东西必须一起留着
+    bool            fullScreen_ = false;
+    WINDOWPLACEMENT fullScreenPlacement_ = {};
+    LONG_PTR        fullScreenStyle_ = 0;
+    LONG_PTR        fullScreenExStyle_ = 0;
     // 宏：录到的步骤、上次录制/执行的宏（"播放"与"重复执行"都作用在它上面）、
     // 保存在 shortcuts.xml 里的宏表由 shortcutStore_ 持有（一份文件只留一个写者）
     core::MacroRecorder   macroRecorder_;

@@ -123,6 +123,10 @@ enum : npcc::core::CmdId {
     kCmdViewPreviewBrowser   = npcc::core::MakeCmdId(4, 23),
     kCmdViewMarkdownPreview  = npcc::core::MakeCmdId(4, 24),
     kCmdViewJsonTree         = npcc::core::MakeCmdId(4, 25),
+    // 基线 P0 的三件基本功（6.5 节挑的这一轮）：全屏、跳到匹配括号、摘要
+    kCmdViewFullScreen       = npcc::core::MakeCmdId(4, 26),
+    kCmdViewGotoMatchBrace   = npcc::core::MakeCmdId(4, 27),
+    kCmdViewSummary          = npcc::core::MakeCmdId(4, 28),
     // 宏（8 类）
     kCmdMacroRecord       = npcc::core::MakeCmdId(8, 1),
     kCmdMacroPlayLast     = npcc::core::MakeCmdId(8, 3),
@@ -568,7 +572,11 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
                 }
                 return ::DefWindowProcW(hwnd_, message, wParam, lParam);
             }
-            UpdateStatus();
+            // 命令执行完之后只刷"文档信息"两段：**第一段不能刷**——命令自己可能刚在那儿
+            // 留了一句提示（"没有可配对的括号""已复制为富文本…"这类），整条 UpdateStatus
+            // 会把提示当场盖掉，界面上看起来就是"点了没反应"。光标位置归编辑控件的通知刷，
+            // 那时提示才让位。
+            UpdateDocumentInfo();
             return 0;
         }
         case WM_NOTIFY: {
@@ -1025,6 +1033,14 @@ void MainWindow::RegisterCommands() {
     add(kCmdViewFunctionJump, CmdCategory::View, L"cmd.view.functionJump",
         L"跳到选中的符号(&J)", core::kCmdNone,
         [this](const CmdContext&) { functionListPanel_.ActivateSelection(); });
+    add(kCmdViewFullScreen, CmdCategory::View, L"cmd.view.fullScreen", L"全屏(&U)",
+        core::kCmdCheckable, [this](const CmdContext&) { CommandToggleFullScreen(); });
+    // 进宏：它只依赖文档内容与光标，回放时能复现（与"跳到选中的符号"同一类）
+    add(kCmdViewGotoMatchBrace, CmdCategory::View, L"cmd.view.gotoMatchBrace",
+        L"跳到匹配括号(&B)", needsBuffer | core::kCmdRecordable,
+        [this](const CmdContext&) { CommandGotoMatchingBrace(); });
+    add(kCmdViewSummary, CmdCategory::View, L"cmd.view.summary", L"摘要(&S)...",
+        needsBuffer, [this](const CmdContext&) { CommandShowSummary(); });
 
     // ---- 格式（行尾转换）----
     add(kCmdFormatEolCrlf, CmdCategory::Format, L"cmd.format.eolCrlf", L"转为 Windows 行尾（CRLF）",
@@ -1258,6 +1274,7 @@ void MainWindow::RegisterCommands() {
     bindChecked(kCmdViewHexToggle, [this] { return hexMode_; });
     bindChecked(kCmdViewMarkdownPreview, [this] { return markdownPreviewVisible_; });
     bindChecked(kCmdViewJsonTree, [this] { return jsonTreeVisible_; });
+    bindChecked(kCmdViewFullScreen, [this] { return fullScreen_; });
     // "跳到偏移"只在十六进制视图里才有意义：不在的时候灰掉，而不是点了没反应
     if (core::Command* hexGoTo =
             const_cast<core::Command*>(registry_.Find(kCmdViewHexGoTo));
@@ -1309,6 +1326,9 @@ void MainWindow::RegisterCommands() {
     registry_.BindShortcut(kCmdViewSplitToggle, ctrlAlt, 'V', true);
     // 设计附录 A 把 Ctrl+Alt+M 给了"移到另一视图"（还没实现），这里先用 F6 切换焦点
     registry_.BindShortcut(kCmdViewCyclePane, core::kModNone, VK_F6, true);
+    // 基线附录 A 的两个默认键（与对标产品一致）：F11 全屏、Ctrl+B 跳到匹配括号
+    registry_.BindShortcut(kCmdViewFullScreen, core::kModNone, VK_F11, true);
+    registry_.BindShortcut(kCmdViewGotoMatchBrace, ctrl, 'B', true);
     registry_.BindShortcut(kCmdWindowNext, ctrl, VK_TAB, true);
     registry_.BindShortcut(kCmdWindowPrev, ctrlShift, VK_TAB, true);
     registry_.BindShortcut(kCmdWindowNext, ctrl, VK_NEXT, false);
@@ -1341,7 +1361,10 @@ void MainWindow::RebuildMenu() {
     }
     HMENU previous = menu_;
     menu_ = rebuilt;
-    ::SetMenu(hwnd_, menu_);
+    // 全屏时菜单栏是收起来的（见 CommandToggleFullScreen）：这里不能顺手把它挂回去
+    if (!fullScreen_) {
+        ::SetMenu(hwnd_, menu_);
+    }
     ::DrawMenuBar(hwnd_);
     if (previous != nullptr) {
         ::DestroyMenu(previous);
@@ -1910,24 +1933,27 @@ void MainWindow::UpdateStatus() const {
         // 十六进制模式下第一段显示字节偏移（"行/列"在这里没有意义），
         // 后面两段照旧描述这份文档
         UpdateHexStatus();
-        if (edit::Document* document = documents_->Active();
-            document != nullptr && document->view != nullptr) {
-            statusBar_.SetDocumentInfo(edit::EncodingName(document->buffer.encoding),
-                                       edit::EolName(document->buffer.eol),
-                                       document->view->CurrentLanguageName(),
-                                       document->buffer.isModified);
-        }
+        UpdateDocumentInfo();
         return;
     }
     edit::Document* document = documents_->Active();
     if (document == nullptr || !document->view) {
         statusBar_.SetPosition(0, 0, 0);
-        statusBar_.SetDocumentInfo(L"", L"", L"", false);
+        UpdateDocumentInfo();
         return;
     }
     statusBar_.SetPosition(document->view->CurrentLine(), document->view->CurrentColumn(),
                            document->view->SelectionByteCount(),
                            document->view->OverwriteMode());
+    UpdateDocumentInfo();
+}
+
+void MainWindow::UpdateDocumentInfo() const {
+    edit::Document* document = documents_ != nullptr ? documents_->Active() : nullptr;
+    if (document == nullptr || !document->view) {
+        statusBar_.SetDocumentInfo(L"", L"", L"", false);
+        return;
+    }
     std::wstring language = document->view->CurrentLanguageName();
     if (document->buffer.tier != edit::FileTier::Normal) {
         language += L"  |  ";
@@ -2288,6 +2314,15 @@ void MainWindow::HandleEditorNotify(const NMHDR& header) {
             if (document == documents_->Active()) {
                 UpdateStatus();
             }
+            // 括号匹配高亮（设计文档 2.1 第 5 条）：光标移动或内容变化都可能换了要配对的括号。
+            // SC_UPDATE_SELECTION(0x2) / SC_UPDATE_CONTENT(0x1) 之外（纯滚动）不用重算。
+            // 计算本身很便宜：不挨着括号时连文本都不读（见 EditView::FindBraceNearCaret）
+            if ((note.updated & (0x1 | 0x2)) != 0) {
+                edit::EditView* owner = fromClone ? clone : document->view.get();
+                if (owner != nullptr && owner->Valid()) {
+                    owner->HighlightBracesNearCaret();
+                }
+            }
             // 分屏同步滚动：按"首可见行"对齐另一侧。
             // 先比一次再设：两边行号已经一样就别动，否则会来回互相触发。
             if (splitEnabled_ && splitScrollSync_ &&
@@ -2305,6 +2340,12 @@ void MainWindow::HandleEditorNotify(const NMHDR& header) {
         case edit::EditorEvent::FocusIn:
             // 鼠标点进哪一侧，就把"当前侧"记成哪一侧，快捷键才知道该往哪儿用
             splitFocusSecondary_ = fromClone;
+            // 焦点换了一侧（或换了标签），括号高亮也要跟着换到这一侧的光标上：
+            // 两边的光标位置可以不同，高亮留在旧的一侧就是错的
+            if (edit::EditView* owner = fromClone ? clone : document->view.get();
+                owner != nullptr && owner->Valid()) {
+                owner->HighlightBracesNearCaret();
+            }
             break;
         case edit::EditorEvent::MarginClick:
             // 点击书签边距直接切换该行的书签，比"先把光标移过去再按键"顺手
@@ -4937,6 +4978,107 @@ void MainWindow::CommandToggleDarkMode() {
     hexView_.SetDark(darkMode_);   // 十六进制视图的自绘配色也跟着走
     markdownPreview_.SetDark(darkMode_);
     jsonTreePanel_.SetDark(darkMode_);
+}
+
+// ---- 全屏（F11，设计文档 2.4 第 6 条）----
+//
+// 窗口级全屏：收起菜单栏、去掉标题栏与边框，铺满当前显示器的**工作区**。
+// 之所以铺工作区而不是整块屏幕：压住任务栏的全屏更容易让人一时找不到怎么退出，
+// 而对标产品也是这么做的。进去之前把菜单、窗口样式、摆放位置原样存下来，退出时逐项还原——
+// 只记一个布尔量是不够的，还原要用的东西必须一起留着。
+void MainWindow::CommandToggleFullScreen() {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+    if (!fullScreen_) {
+        fullScreenPlacement_.length = sizeof(fullScreenPlacement_);
+        if (::GetWindowPlacement(hwnd_, &fullScreenPlacement_) == 0) {
+            // 拿不到当前摆放就别进去：出来时还原不回去，比不进去更糟
+            infra::LogWarn(L"view", L"全屏未生效：读不到当前窗口摆放");
+            return;
+        }
+        fullScreenStyle_ = ::GetWindowLongPtrW(hwnd_, GWL_STYLE);
+        fullScreenExStyle_ = ::GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
+        ::SetMenu(hwnd_, nullptr);
+
+        MONITORINFO monitor{};
+        monitor.cbSize = sizeof(monitor);
+        if (::GetMonitorInfoW(::MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &monitor) == 0) {
+            monitor.rcWork = fullScreenPlacement_.rcNormalPosition;
+        }
+        ::SetWindowLongPtrW(hwnd_, GWL_STYLE,
+                            fullScreenStyle_ &
+                                ~static_cast<LONG_PTR>(WS_CAPTION | WS_THICKFRAME));
+        ::SetWindowLongPtrW(hwnd_, GWL_EXSTYLE,
+                            fullScreenExStyle_ &
+                                ~static_cast<LONG_PTR>(WS_EX_CLIENTEDGE | WS_EX_WINDOWEDGE |
+                                                       WS_EX_STATICEDGE));
+        ::SetWindowPos(hwnd_, nullptr, monitor.rcWork.left, monitor.rcWork.top,
+                       monitor.rcWork.right - monitor.rcWork.left,
+                       monitor.rcWork.bottom - monitor.rcWork.top,
+                       SWP_NOZORDER | SWP_FRAMECHANGED);
+        fullScreen_ = true;
+        infra::LogInfo(L"view", L"进入全屏（再按 F11 或按 Esc 退出）");
+    } else {
+        ::SetWindowLongPtrW(hwnd_, GWL_STYLE, fullScreenStyle_);
+        ::SetWindowLongPtrW(hwnd_, GWL_EXSTYLE, fullScreenExStyle_);
+        ::SetMenu(hwnd_, menu_);
+        ::SetWindowPlacement(hwnd_, &fullScreenPlacement_);
+        ::SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
+                       SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        fullScreen_ = false;
+        infra::LogInfo(L"view", L"退出全屏");
+    }
+    LayoutChildren();
+    UpdateStatus();
+    ::InvalidateRect(hwnd_, nullptr, TRUE);
+}
+
+bool MainWindow::ExitFullScreenOnEscape() {
+    if (!fullScreen_) {
+        return false;
+    }
+    CommandToggleFullScreen();
+    return true;
+}
+
+// ---- 跳到匹配括号（Ctrl+B，设计文档 2.1 第 5 条）----
+// 设计里写的是"失败时给出状态栏提示而非静默无响应"：点了没反应是最难排查的那类问题。
+void MainWindow::CommandGotoMatchingBrace() {
+    edit::Document* document = documents_ != nullptr ? documents_->Active() : nullptr;
+    if (document == nullptr || !document->view) {
+        return;
+    }
+    if (!document->view->GotoMatchingBrace()) {
+        statusBar_.SetMessage(core::Tr(L"status.noMatchBrace", L"没有可配对的括号"));
+    }
+}
+
+// ---- 摘要（字数统计，基线第 1 节的"字符统计"）----
+void MainWindow::CommandShowSummary() {
+    edit::Document* document = documents_ != nullptr ? documents_->Active() : nullptr;
+    if (document == nullptr || !document->view) {
+        return;
+    }
+    const edit::DocumentStats stats = document->view->Statistics();
+    const auto number = [](int64_t value) { return std::to_wstring(value); };
+
+    std::wstring text;
+    text += core::Tr(L"dialog.summary.lines", L"行数：{0}", {number(stats.lines)});
+    text += L"\r\n";
+    text += core::Tr(L"dialog.summary.chars", L"字符数：{0}", {number(stats.chars)});
+    text += L"\r\n";
+    text += core::Tr(L"dialog.summary.words", L"词数：{0}", {number(stats.words)});
+    text += L"\r\n";
+    text += core::Tr(L"dialog.summary.bytes", L"字节数：{0}", {number(stats.bytes)});
+    if (stats.truncated) {
+        // 截断了就必须说出来，否则"数偏小"会变成静默的假数据
+        text += L"\r\n";
+        text += core::Tr(L"dialog.summary.truncated",
+                         L"（超大文件：字符数与词数按前 8 MB 统计）");
+    }
+    const std::wstring title = core::Tr(L"dialog.summary.title", L"摘要");
+    ::MessageBoxW(hwnd_, text.c_str(), title.c_str(), MB_OK | MB_ICONINFORMATION);
 }
 
 void MainWindow::CommandStyleConfigurator() {

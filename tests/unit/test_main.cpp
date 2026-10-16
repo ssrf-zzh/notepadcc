@@ -264,6 +264,16 @@ std::string ToUtf16Bytes(const std::wstring& text, bool bigEndian) {
 int main() {
     std::printf("notepadcc 单元测试\n");
 
+    // 用例一律按便携模式跑，配置写在 <测试程序目录>/config 下。
+    // 这里必须自己把这个目录建出来：各段虽然都会调 InitializePaths(true)，但那是幂等的 no-op，
+    // 而 config 目录本身没人负责创建——真外壳靠 InitLogging() 顺手建出来，单元测试不初始化日志，
+    // 于是"在全新构建目录里第一次跑"会有一批保存类用例失败（实测 54 项，第二次跑才正常）。
+    npcc::infra::InitializePaths(true);
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(npcc::infra::ConfigRoot(), ec);
+    }
+
     Section("IsValidUtf8");
     Check(npcc::edit::IsValidUtf8("plain ascii"), "纯 ASCII 合法");
     Check(npcc::edit::IsValidUtf8("中文内容"), "UTF-8 中文合法");
@@ -3898,6 +3908,82 @@ int main() {
             Check(ToggleBlockComment("a\nb", "<!--", "-->") == "<!--a\nb-->", "多行整段包住");
             Check(ToggleBlockComment("x", "", "") == "x", "没有块注释符时原样返回");
         }
+
+        // 括号匹配（FindBraceMatch）：断言里出现的是确切的字节位置，不是"有没有找到"。
+        // 结果压成三种形状：`5->7`（配上了）/ `5+`（有括号但没配上）/ `-`（光标旁没有括号）
+        {
+            const auto shape = [](const BraceMatch& match) {
+                if (!match.hasBrace) {
+                    return std::string("-");
+                }
+                return std::to_string(match.bracePos) +
+                       (match.matched ? "->" + std::to_string(match.matchPos) : std::string("+"));
+            };
+
+            // 0:i 1:n 2:t 3:' ' 4:a 5:[ 6:3 7:] 8:' ' 9:= 10:' ' 11:{ 12:' ' 13:f 14:( …
+            const std::string code = "int a[3] = { f(1), g(2) };\n";
+            Check(shape(FindBraceMatch(code, 0)) == "-", "光标在 'i' 后面：左右都不是括号");
+            Check(shape(FindBraceMatch(code, 5)) == "5->7", "光标正踩在 '[' 上");
+            Check(shape(FindBraceMatch(code, 8)) == "7->5",
+                  "光标在 ']' 后面：右边不是括号，才看左边");
+            Check(shape(FindBraceMatch(code, 14)) == "14->16", "括号里套括号：最近的这一对");
+            Check(shape(FindBraceMatch(code, 11)) == "11->24",
+                  "跨过里面的圆括号找花括号（只数同一种括号）");
+            Check(shape(FindBraceMatch(code, 23)) == "22->20", "光标在 ')' 后面：往左看");
+
+            // 光标右边是括号、左边也是括号时**右边优先**：刚敲完 ')' 时插入点就在它后面，
+            // 用户期望高亮的是刚敲进去的那一个（与对标产品一致）
+            const std::string adjacent = "([)]";
+            Check(shape(FindBraceMatch(adjacent, 1)) == "1->3", "光标踩在 '[' 上：配 ']'");
+            Check(shape(FindBraceMatch(adjacent, 2)) == "2->0",
+                  "右边优先：光标后面是 ')'，就不去管左边那个 '['");
+            Check(shape(FindBraceMatch(adjacent, 3)) == "3->1", "光标踩在 ']' 上：配 '['");
+            // 不做语法感知的嵌套判断——"([)]" 里 '(' 就配到第 2 个字节的 ')'（横跨了 '['）
+            Check(shape(FindBraceMatch(adjacent, 0)) == "0->2", "只数同一种括号：'(' 找 ')'");
+
+            // 配不上与边界
+            Check(shape(FindBraceMatch("f(", 2)) == "1+", "右括号没来：有括号、没配上");
+            Check(shape(FindBraceMatch(")f", 0)) == "0+", "左括号没来：有括号、没配上");
+            Check(shape(FindBraceMatch("((x))", 0)) == "0->4", "同种括号嵌套按深度配对");
+            Check(shape(FindBraceMatch("", 0)) == "-", "空文本");
+            Check(shape(FindBraceMatch("ab", 5)) == "-", "光标位置越界");
+            Check(shape(FindBraceMatch("(a)", 1)) == "0->2", "光标夹在括号中间：看左边那个 '('");
+            Check(shape(FindBraceMatch("(a)", 3)) == "2->0",
+                  "光标停在文末（位置 == 长度）：右边没字符，往左配上 ')'");
+
+            // 窗口：配对括号在窗口之外就按"没配上"处理（整篇扫描会把大文件的界面拖死）
+            std::string spread = "(";
+            spread.append(100, 'a');
+            spread += ")";
+            Check(shape(FindBraceMatch(spread, 1, 10)) == "0+",
+                  "窗口 10 字节：100 字节外的 ')' 不算");
+            Check(shape(FindBraceMatch(spread, 1, 200)) == "0->101", "窗口放开就配得上");
+        }
+
+        // 文档统计（StatsOf）：四个数逐个钉死，按 "行/字符/词/字节" 压成一行比对
+        {
+            const auto shape = [](const DocumentStats& stats) {
+                return std::to_string(stats.lines) + "/" + std::to_string(stats.chars) + "/" +
+                       std::to_string(stats.words) + "/" + std::to_string(stats.bytes);
+            };
+
+            Check(shape(StatsOf("", false)) == "1/0/0/0", "空文档也是 1 行（与编辑器口径一致）");
+            Check(shape(StatsOf("a\nb", false)) == "2/3/2/3",
+                  "没有结尾换行：两行；换行也算一个字符（所以字符数与字节数相等）");
+            Check(shape(StatsOf("a\r\nb\r\n", false)) == "3/6/2/6",
+                  "CRLF 是一次换行（行数 3），但两个字节都是字符（字符数 6）");
+            Check(shape(StatsOf("a\rb\nc", false)) == "3/5/3/5", "CR / LF 各算一次换行");
+            Check(shape(StatsOf("a\tb\vc\fd", false)) == "1/7/4/7",
+                  "制表符/垂直制表/换页都算空白，不作词");
+            Check(shape(StatsOf("中文 A\n", false)) == "2/5/2/9",
+                  "UTF-8：一个汉字算一个字符（3 个字节），末尾换行也算一个字符");
+            Check(shape(StatsOf("中文 A\n", true)) == "2/9/2/9",
+                  "ANSI（代码页）文档：一个字节就是一个字符");
+            Check(shape(StatsOf("中文，汉字", false)) == "1/5/1/15",
+                  "中文标点不算空白：整句是一个词（口径写在头文件里）");
+            Check(!StatsOf("a", false).truncated,
+                  "纯函数不知道截断这件事，truncated 由调用方置位");
+        }
     }
 
     // ---------------------------------------------------------------- 语言定义
@@ -4251,6 +4337,54 @@ int main() {
                 view.ApplyLanguageForPath(L"D:\\t\\a.py", &languages, &scheme);
                 Check(view.StyleBackColor(STYLE_LINENUMBER) == cref(0x2D2D2D),
                       "换语言之后深色边距没有被冲回浅色");
+                ::DestroyWindow(host);
+            }
+        }
+
+        // 配对括号的高亮色跟着皮肤走：它不是语法样式（词法器碰不到 34/35 号），
+        // 只能由皮肤自己铺——深色底上不铺就是浅色高亮，压在深色背景上几乎看不见
+        {
+            const HWND host = CreateHiddenHost();
+            npcc::edit::EditView view;
+            if (host == nullptr || !view.Create(host, 953)) {
+                Check(false, "创建隐藏宿主窗口或编辑控件失败");
+            } else {
+                const auto cref = [](std::uint32_t rgb) {
+                    return static_cast<int32_t>(npcc::edit::StyleScheme::ToScintillaColour(rgb));
+                };
+                const npcc::edit::EditorPalette light = npcc::edit::EditorPalette::Light();
+                const npcc::edit::EditorPalette dark = npcc::edit::EditorPalette::Dark();
+                // 两套配色必须是两组不同的颜色，否则"跟着皮肤走"就没有可观察的结果
+                Check(light.braceBack != dark.braceBack && light.braceBadBack != dark.braceBadBack,
+                      "浅色与深色的括号高亮不是同一组颜色");
+                Check(light.braceBadBack != light.braceBack,
+                      "配上与没配上用的是两种底色（否则用户看不出区别）");
+
+                view.SetCodePage(npcc::edit::kCodePageUtf8);
+                view.ApplyPalette(light);
+                Check(view.StyleBackColor(STYLE_BRACELIGHT) == cref(light.braceBack) &&
+                          view.StyleForeColor(STYLE_BRACELIGHT) == cref(light.braceFore),
+                      "浅色下配对成功的高亮色落在 STYLE_BRACELIGHT 上");
+                Check(view.StyleBackColor(STYLE_BRACEBAD) == cref(light.braceBadBack),
+                      "浅色下没配对的高亮色落在 STYLE_BRACEBAD 上");
+
+                view.ApplyPalette(dark);
+                Check(view.StyleBackColor(STYLE_BRACELIGHT) == cref(dark.braceBack),
+                      "深色下配对成功的高亮色换成了深色那套");
+                Check(view.StyleBackColor(STYLE_BRACEBAD) == cref(dark.braceBadBack),
+                      "深色下没配对的高亮色也换了");
+
+                // 画高亮这件事本身没有可读回的接口（Scintilla 不留"当前高亮在哪"），
+                // 所以位置与配色分别由上面两段钉住，这里只钉"调用不炸、且不动文档与光标"
+                view.SetText("f(a");
+                view.SetCaretPosition(1);
+                view.HighlightBracesNearCaret();   // 没配上：走 SCI_BRACEBADLIGHT 那条
+                Check(view.CaretPosition() == 1 && view.GetAllText() == "f(a",
+                      "画高亮不动文档也不动光标");
+                view.SetCaretPosition(2);          // 'a'：旁边没有括号
+                view.HighlightBracesNearCaret();   // 走"清掉高亮"那条
+                view.ClearBraceHighlight();
+                Check(view.GetAllText() == "f(a", "清高亮同样不动文档");
                 ::DestroyWindow(host);
             }
         }
@@ -4908,6 +5042,101 @@ int main() {
             ::DestroyWindow(colourHost);
         } else {
             Check(false, "创建编辑控件失败");
+        }
+    }
+
+    // ---------------------------------------------------------------- 括号匹配与摘要
+    // 这一段钉的是"纯函数的结果真的接对了线"：FindBraceMatch / StatsOf 本身在上面
+    // 行操作那一段里逐值核对过，这里核对的是**切片偏移 → 文档坐标**的换算，以及
+    // "行数/字节数问 Scintilla、字符数/词数走纯函数"这条分工。
+    Section("括号匹配与摘要统计（EditView 层）");
+    {
+        const HWND host = CreateHiddenHost();
+        npcc::edit::EditView view;
+        if (host == nullptr || !view.Create(host, 952)) {
+            Check(false, "创建隐藏宿主窗口或编辑控件失败");
+        } else {
+            view.SetCodePage(npcc::edit::kCodePageUtf8);
+
+            // 位置是文档坐标：括号前面垫一段中文（每个汉字 3 个字节）。
+            // 切片偏移没换算回去的话，这里会差 15 个字节
+            {
+                const std::string text = "记住：中文(f)结尾";
+                const int32_t open = static_cast<int32_t>(text.find('('));
+                const int32_t close = static_cast<int32_t>(text.find(')'));
+                Check(open == 15 && close == 17, "这段测试文本里括号就在第 15/17 个字节");
+                view.SetText(text);
+                view.SetCaretPosition(open);
+                const npcc::edit::BraceMatch match = view.FindBraceNearCaret();
+                Check(match.hasBrace && match.matched && match.bracePos == open &&
+                          match.matchPos == close,
+                      "多字节字符后面的括号：位置换算回文档坐标，没差 15 个字节");
+            }
+
+            // 窗口：默认 64 KB，100 KB 之外的括号按"没配上"处理（整篇扫描会把大文件拖死）
+            {
+                std::string spread = "(";
+                spread.append(100 * 1024, 'a');
+                spread += ")";
+                view.SetText(spread);
+                view.SetCaretPosition(1);
+                Check(!view.FindBraceNearCaret().matched, "默认 64 KB 窗口外的括号不算配上");
+                Check(view.FindBraceNearCaret(200 * 1024).matched, "窗口放到 200 KB 就配得上");
+            }
+
+            // Ctrl+B 走的那条路：跳到配对的括号；没配上要老实返回 false（外壳据此提示）
+            {
+                view.SetText("a(b)c");
+                view.SetCaretPosition(1);
+                Check(view.GotoMatchingBrace(), "跳到匹配括号：成功");
+                Check(view.CaretPosition() == 3, "光标落在 ')' 那个字节上");
+                view.SetText("a(b");
+                view.SetCaretPosition(1);
+                Check(!view.GotoMatchingBrace(), "没配上：返回 false");
+                Check(view.CaretPosition() == 1, "没配上时光标原地不动");
+            }
+
+            // 摘要：行数与字节数由 Scintilla 给（全量），字符数与词数走纯函数
+            {
+                const auto shape = [](const npcc::edit::DocumentStats& stats) {
+                    return std::to_string(stats.lines) + "/" + std::to_string(stats.chars) + "/" +
+                           std::to_string(stats.words) + "/" + std::to_string(stats.bytes);
+                };
+                view.SetText("中a\nb");   // 3 + 1 + 1 + 1 = 6 字节
+                Check(shape(view.Statistics()) == "2/4/2/6",
+                      "摘要的四个数：2 行 / 4 字符（换行也算）/ 2 词 / 6 字节");
+                Check(!view.Statistics().truncated, "小文档不算截断");
+
+                // ANSI 文档按代码页解释缓冲区：0x93 / 0x94 是 CP1252 的弯引号，在 UTF-8 里
+                // 它们是续接字节（算 0 个字符）——所以这条能抓住"忘了看代码页"。
+                // 注意 Windows 版的 Scintilla 只认 0 / UTF-8 / DBCS 代码页
+                // （ScintillaWin::ValidCodePage），别的值会被静默忽略，所以这里用的是
+                // ANSI 的 0 与 DBCS 的 936
+                view.SetCodePage(0);
+                Check(view.CodePage() == 0, "代码页 0（ANSI）真的落到控件上了");
+                view.SetText("\x93Hi\x94");
+                Check(view.Statistics().chars == 4, "ANSI 文档：一个字节一个字符");
+
+                // 应用给 ANSI 文档设的就是 936（简体中文 Windows 的默认代码页），
+                // 所以这条路也要走一遍：GBK 的"你好"是 4 个字节
+                view.SetCodePage(936);
+                Check(view.CodePage() == 936, "DBCS 代码页 936 也落得下去");
+                view.SetText("\xC4\xE3\xBA\xC3");
+                const npcc::edit::DocumentStats gbk = view.Statistics();
+                Check(gbk.bytes == 4 && gbk.chars == 4,
+                      "ANSI(GBK) 文档：缓冲区里是 4 个代码页字节，就按 4 个字符算");
+                view.SetCodePage(npcc::edit::kCodePageUtf8);
+
+                // 超过 8 MB 只数前 8 MB：字节数是全量的、字符数不是——这件事必须看得出来
+                const std::int64_t huge = 8 * 1024 * 1024 + 10;
+                view.SetText(std::string(static_cast<std::size_t>(huge), 'a'));
+                const npcc::edit::DocumentStats big = view.Statistics();
+                Check(big.bytes == huge && big.chars == 8 * 1024 * 1024 && big.truncated,
+                      "超大文档：字节数全量 8 MB+10，字符数只数前 8 MB 并置 truncated");
+                Check(big.lines == 1 && big.words == 1, "8 MB 个 'a' 是一行一个词");
+            }
+
+            ::DestroyWindow(host);
         }
     }
 
