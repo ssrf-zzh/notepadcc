@@ -4,7 +4,7 @@ notepadcc 1.0.0 发布说明
 
 notepadcc 是原生 Windows x64 文本 / 源码编辑器，内核嵌入 Scintilla + Lexilla，
 外壳使用 Win32 与 C++20，不依赖 .NET、Qt 或 Electron。项目按 GNU GPL v3.0 only
-发布，官方发行免费。1.0.0 以绿色便携版形式发布，解压即可使用。
+发布，官方发行免费。1.0.0 以源代码形式发布，GitHub Release 不提供预编译二进制。
 
 亮点
 
@@ -17,30 +17,28 @@ FTP / SFTP 远程编辑、宏、运行命令、插件宿主与工具栏 / 右键
 更新包同时校验清单签名、SHA-256 与 Authenticode，任一失败即拒收。
 主窗口状态栏显示作者标识，悬停或单击可查看完整作者与联系信息。
 
-使用
+构建
 
-绿色版：解压后直接运行 notepadcc.exe，保留 portable 文件即可把配置写在程序目录。
+本版本不提供预编译二进制。请克隆仓库，按 README 安装 CMake 与 MSVC 或 MinGW，
+运行 scripts\fetch_deps.ps1 获取第三方源码，再使用 CMake 构建 Windows x64 程序。
 
-系统要求：Windows 10 1809 或更高，x64。运行库已静态链接，不需要另装 VC++ 运行库。
+系统要求：Windows 10 1809 或更高，x64。建议使用静态运行库构建，以便生成无需另装
+VC++ 可再发行组件的绿色便携版。
 
 许可证与对应源代码
 
 notepadcc 是自由软件，依据 GNU General Public License 第 3 版（不采用更高版本）
 授权，版权人为 notepadcc contributors。许可证全文见发布目录的 LICENSE。
 
-本版本同时提供 notepadcc-1.0.0-source.zip，其中包含项目源码、构建脚本、许可证、
-第三方库源码与第三方许可材料。转发绿色版时必须同时提供该源码包，不能只
-转发二进制。第三方组件及其许可证详见 NOTICE 和发布目录的 licenses 目录。
+本版本以 notepadcc-1.0.0-source.zip 形式提供项目源码、构建脚本、许可证、
+第三方库源码与第三方许可材料。第三方组件及其许可证详见 NOTICE 和发布目录的
+licenses 目录。
 
-校验与签名
+校验
 
-下载后请先核对同目录的 SHA256SUMS 与 release-manifest.json，发布页同时列出每个文件的
-SHA-256。正式版本使用受信任的 Authenticode 代码签名证书，采用 SHA-256 摘要与 RFC 3161
-时间戳；发布脚本会验证 EXE 的签名链后才写入校验值。
-
-本候选包使用自签名证书完成了 Authenticode 签名与时间戳，签名本身有效，但证书链不受
-Windows 信任，SmartScreen 可能仍提示“未知发布者”。该候选包仅用于测试与预览，不得
-作为正式可信版本发布。正式发布须改用受信任的 CA 代码签名证书重新构建。
+本 Release 仅提供源代码与发布元数据，因此不包含 EXE、MSI 或绿色包的 Authenticode
+签名。下载后请核对源码包与 SHA256SUMS 中的 SHA-256。自行构建并对外分发二进制时，
+签名与 SmartScreen 提示由分发者自行负责。
 
 已知边界
 

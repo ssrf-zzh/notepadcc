@@ -17,22 +17,20 @@
 
 notepadcc 是一款面向 Windows 的原生文本 / 源码编辑器。编辑内核基于
 **Scintilla + Lexilla**，界面使用 **Win32 API + C++20** 直接构建，不依赖 .NET、Qt
-或 Electron。程序体积小、启动快，发布版静态链接运行库，解压即可使用。项目完全开源
+或 Electron。程序体积小、启动快，可构建为静态链接运行库的绿色便携版。项目完全开源
 免费，按 GPL-3.0-only 发布。
 
-> [!TIP]
-> 普通用户推荐下载 **绿色便携版**，解压后直接运行 `notepadcc.exe`。
+> [!NOTE]
+> 当前 GitHub 仓库和 Releases 仅提供源代码，不发布预编译二进制。请按下文从源码构建。
 
-## 下载
+## 获取源代码
 
-| 版本 | 适用场景 | 直接下载 |
-|---|---|---|
-| 绿色便携版 x64 | 解压即用，配置保存在程序目录 | [下载 ZIP](https://github.com/ssrf-zzh/notepadcc/releases/download/v1.0.0/notepadcc-1.0.0-portable-x64.zip) |
-| 对应源码包 | GPL-3.0 对应源代码 | [下载源码](https://github.com/ssrf-zzh/notepadcc/releases/download/v1.0.0/notepadcc-1.0.0-source.zip) |
+```powershell
+git clone https://github.com/ssrf-zzh/notepadcc.git
+cd notepadcc
+```
 
-完整发布页：[github.com/ssrf-zzh/notepadcc/releases](https://github.com/ssrf-zzh/notepadcc/releases)
-
-下载后建议使用同目录的 `SHA256SUMS` 校验文件完整性。
+也可以从 [Releases](https://github.com/ssrf-zzh/notepadcc/releases) 下载对应版本的源码包。
 
 ## 主要特性
 
@@ -46,16 +44,7 @@ notepadcc 是一款面向 Windows 的原生文本 / 源码编辑器。编辑内�
 - **远程与扩展**：FTP / SFTP 远程编辑、脚本插件宿主、插件 SDK、运行命令与界面定制。
 - **可靠恢复**：外部文件变更检测、崩溃快照、未保存内容恢复、单实例与文件关联。
 
-## 快速开始
-
-### 绿色便携版
-
-1. 下载并解压 `notepadcc-1.0.0-portable-x64.zip`。
-2. 运行 `notepadcc.exe`。
-3. 保持 `portable` 文件与程序在同一目录，配置、会话、日志和备份会写入程序目录下的
-   `config\`，不会写入 `%APPDATA%` 或注册表。
-
-### 命令行
+## 命令行
 
 ```text
 notepadcc.exe <文件>...        打开一个或多个文件
@@ -68,12 +57,6 @@ notepadcc.exe --multi-instance 允许多个程序实例
 - Windows 10 1809 或更高版本
 - x64 处理器
 - 无需另行安装 VC++ 可再发行组件
-
-> [!IMPORTANT]
-> 当前 1.0.0 发布包使用自签名证书完成 Authenticode 签名与 RFC 3161 时间戳。
-> 该证书链默认不受 Windows 信任，SmartScreen 仍可能提示“未知发布者”；GitHub 上的
-> 自签名构建仅用于测试与预览，正式发布须改用受信任的 CA 代码签名证书重新构建。
-> 请优先核对 `SHA256SUMS`，并只从本仓库的 Releases 页面下载。
 
 ## 从源码构建
 
@@ -139,6 +122,8 @@ powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -Version 1.0.0 -Bui
 信任链校验；自签名证书须显式传入 `-AllowUntrustedSignature`，产物在清单和下载页中
 标记为 `signed-untrusted`，不得作为正式可信版本发布。
 
+以上脚本用于本地构建与验证。GitHub Releases 当前只发布源代码，不上传预编译二进制。
+
 ## 项目结构
 
 ```text
@@ -164,7 +149,7 @@ notepadcc 按 **GNU General Public License v3.0 only**（`GPL-3.0-only`）发布
 版权归 notepadcc contributors 所有。许可证全文见 [LICENSE](LICENSE)。
 
 项目静态链接 Scintilla、Lexilla、PCRE2 与 SLJIT。第三方版权和许可信息见
-[NOTICE](NOTICE) 与 `licenses/` 目录。转发绿色版时，必须同时提供同一版本的
+[NOTICE](NOTICE) 与 `licenses/` 目录。如再分发自行构建的绿色版，必须同时提供同一版本的
 `notepadcc-<版本>-source.zip`，不能只转发二进制文件。
 
 notepadcc 是自由软件，官方发行永久免费。你可以按 GPL-3.0 的条款使用、研究、修改和
