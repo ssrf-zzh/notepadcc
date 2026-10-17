@@ -11,6 +11,7 @@ import http.server
 import json
 import os
 import quopri
+import re
 import shutil
 import socket
 import subprocess
@@ -235,6 +236,15 @@ CMD_TOOL_COMPARE_DISK = (14 << 12) | 37
 CMD_WINDOW_NEXT = (11 << 12) | 1
 CMD_WINDOW_PREV = (11 << 12) | 2
 CMD_VIEW_JSON_TREE = (4 << 12) | 25
+# ---- 许可证对话框（B9）----
+CMD_HELP_LICENSE = (12 << 12) | 0x020     # 帮助 → 许可证…
+LICENSE_DIALOG_CLASS = "notepadccLicenseDialog"
+LICENSE_STATUS = 1501                    # 状态文本（试用 / 已激活 / 宽限）
+LICENSE_IMPORT_PATH = 1531               # 导入文件路径
+LICENSE_IMPORT = 1533                    # 导入按钮
+LICENSE_IMPORT_HINT = 1534               # 导入结果 / 失败原因
+LICENSE_CLOSE = 1540                     # 关闭
+BM_CLICK = 0x00F5
 # JSON 树与 XML 树共用同一块面板（M3 第七块把面板并成了"结构树"）
 STRUCTURE_TREE_CLASS = "notepadccStructureTree"
 # 视图类 26/27/28：全屏（F11）、跳到匹配括号（Ctrl+B）、摘要
@@ -4654,6 +4664,8 @@ def run():
         failed = True
     if not test_dialog_localization(root):
         failed = True
+    if not test_license_dialog(root):
+        failed = True
     if not test_compare(root):
         failed = True
     if not test_json_tree(root):
@@ -4693,7 +4705,7 @@ def run():
           "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + UDL + 暗色模式 + "
           "宏 + 文件夹工作区 + 函数列表 + 导出与打印 + 插件宿主 + JSON/XML 格式化 + "
           "运行命令 + 界面语言 + 十六进制查看 + 复制为富文本 + Markdown 预览 + 对话框文案 + "
-          "比较 + JSON 树视图 + 括号匹配与摘要与全屏 + 工具栏 + 右键菜单定制 + 自动完成 + "
+          "许可证对话框 + 比较 + JSON 树视图 + 括号匹配与摘要与全屏 + 工具栏 + 右键菜单定制 + 自动完成 + "
           "文件关联 + "
           "文件类型识别与 MIME 工具 + 护眼模式 + XML 树视图与校验 + XPath 查询 + "
           "自动更新检查 + 远程编辑（FTP/SFTP 站点）+ 脚本插件 + T3 自绘视口 + 绿色打包 + "
@@ -6986,6 +6998,249 @@ def test_dialog_localization(root):
 
     print("  对话框文案：英文界面下首选项里没有一条中文、日志里没有缺键、"
           "首选项里的界面语言下拉能当场把界面换回中文并写进配置")
+    return True
+
+
+def test_license_dialog(root):
+    """许可证对话框（B9）：试用状态读回、导入即时生效、篡改拒绝覆盖。
+
+    这一段把对话框的控制台 ID 当作稳定接口：1501 读状态，1531 填文件，1533 点导入，
+    1534 读结果。有效许可从 tests/unit/LicenseFixtures.h 现场抽取——不复制一份会漂移的
+    固定件。导入之后直接逐字节核对 license.dat；再拿一个只改了签名内容的文件导入，
+    要求对话框明确报失败，并确认磁盘上的旧许可一个字节都没变。
+
+    菜单里 Pro 能力的门禁属于 A5（尚未接线），所以这里不伪造菜单可用性断言。
+    """
+    work = os.path.join(root, "build", "license_dialog_test")
+    os.makedirs(work, exist_ok=True)
+    cfg = os.path.join(root, "build", "bin", "config")
+    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
+    target = os.path.join(work, "license_dialog.txt")
+    with open(target, "w", encoding="utf-8", newline="") as handle:
+        handle.write("license dialog smoke\n")
+
+    config_names = ("config.xml", "session.xml", "license.dat", "state.xml")
+    backup_dir = os.path.join(work, "backup")
+    shutil.rmtree(backup_dir, ignore_errors=True)
+    os.makedirs(backup_dir)
+    backups = {}
+    for name in config_names:
+        source = os.path.join(cfg, name)
+        backup = os.path.join(backup_dir, name)
+        backups[name] = os.path.exists(source)
+        if backups[name]:
+            shutil.copy2(source, backup)
+
+    registry_key = r"Software\notepadcc"
+    registry_existed = True
+    registry_value = None
+    registry_type = None
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, registry_key, 0, winreg.KEY_READ) as key:
+            try:
+                registry_value, registry_type = winreg.QueryValueEx(key, "FirstRun")
+            except FileNotFoundError:
+                pass
+    except FileNotFoundError:
+        registry_existed = False
+
+    window = None
+    dialog = None
+    proc = None
+    try:
+        fixture_path = os.path.join(root, "tests", "unit", "LicenseFixtures.h")
+        with open(fixture_path, "r", encoding="utf-8") as handle:
+            fixture_text = handle.read()
+        match = re.search(r'inline constexpr const char\* kLicensePro = R"lic\((.*?)\)lic";',
+                          fixture_text, re.S)
+        if not match:
+            print("  FAIL: LicenseFixtures.h 里找不到 kLicensePro 固定件")
+            return False
+        valid = match.group(1).encode("utf-8")
+        signature = re.search(rb"<Signature\b[^>]*>", valid)
+        if not signature or signature.end() >= len(valid):
+            print("  FAIL: 有效固定件里没有可篡改的签名内容")
+            return False
+        tampered = bytearray(valid)
+        offset = signature.end()
+        tampered[offset] = ord("A") if tampered[offset] != ord("A") else ord("B")
+
+        valid_lic = os.path.join(work, "valid.lic")
+        tampered_lic = os.path.join(work, "tampered.lic")
+        with open(valid_lic, "wb") as handle:
+            handle.write(valid)
+        with open(tampered_lic, "wb") as handle:
+            handle.write(tampered)
+
+        for name in config_names:
+            path = os.path.join(cfg, name)
+            if os.path.exists(path):
+                os.remove(path)
+        now = int(time.time())
+        state_path = os.path.join(cfg, "state.xml")
+        with open(state_path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                '<?xml version="1.0" encoding="utf-8"?>\n'
+                "<notepadcc-state>\n"
+                f'  <trial firstRunUtc="{now}" lastSeenUtc="{now}" '
+                'trialNoticeDismissed="no" graceNoticeDismissed="no"/>\n'
+                "</notepadcc-state>\n")
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, registry_key, 0,
+                                winreg.KEY_SET_VALUE) as key:
+                try:
+                    winreg.DeleteValue(key, "FirstRun")
+                except FileNotFoundError:
+                    pass
+        except FileNotFoundError:
+            pass
+
+        proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", target], cwd=root)
+        window = wait_for_main_window("notepadcc - license_dialog.txt")
+        if not window:
+            print("  FAIL: 找不到主窗口")
+            return False
+
+        user32.PostMessageW(window, WM_COMMAND, CMD_HELP_LICENSE, 0)
+        deadline = time.time() + 12.0
+        while time.time() < deadline:
+            dialog = user32.FindWindowW(LICENSE_DIALOG_CLASS, None)
+            if dialog:
+                break
+            time.sleep(0.1)
+        if not dialog:
+            print("  FAIL: 帮助 → 许可证没有弹出 notepadccLicenseDialog")
+            return False
+        wait_disabled(window)
+
+        def control_text(control_id):
+            control = user32.GetDlgItem(dialog, control_id)
+            return window_text(control) if control else ""
+
+        def wait_control(control_id, predicate, timeout=10.0):
+            last = ""
+            limit = time.time() + timeout
+            while time.time() < limit:
+                last = control_text(control_id)
+                if predicate(last):
+                    return last
+                time.sleep(0.1)
+            return last
+
+        status = wait_control(LICENSE_STATUS,
+                              lambda text: "试用中" in text and "还剩" in text)
+        if "试用中" not in status or "还剩" not in status:
+            print(f"  FAIL: 新开的试用状态没有读回来：{status!r}")
+            return False
+
+        if not set_text(dialog, LICENSE_IMPORT_PATH, valid_lic):
+            print("  FAIL: 填不进导入路径")
+            return False
+        import_button = user32.GetDlgItem(dialog, LICENSE_IMPORT)
+        if not import_button:
+            print("  FAIL: 找不到导入按钮")
+            return False
+        user32.PostMessageW(import_button, BM_CLICK, 0, 0)
+        activated = wait_control(
+            LICENSE_STATUS,
+            lambda text: "Pro" in text and "测试用户" in text and
+            "2030-01-01" in text and "已激活" in text,
+            timeout=12.0)
+        if not ("Pro" in activated and "测试用户" in activated and
+                "2030-01-01" in activated and "已激活" in activated):
+            print(f"  FAIL: 导入有效许可后状态没有即时变成已激活：{activated!r}")
+            return False
+
+        installed = os.path.join(cfg, "license.dat")
+        if not os.path.exists(installed):
+            print("  FAIL: 导入成功后配置目录里没有 license.dat")
+            return False
+        with open(installed, "rb") as handle:
+            installed_bytes = handle.read()
+        if installed_bytes != valid:
+            print(f"  FAIL: 落盘的许可与固定件不逐字节相同（{len(installed_bytes)} → "
+                  f"{len(valid)} 字节）")
+            return False
+
+        if not set_text(dialog, LICENSE_IMPORT_PATH, tampered_lic):
+            print("  FAIL: 填不进篡改件路径")
+            return False
+        user32.PostMessageW(import_button, BM_CLICK, 0, 0)
+        hint = wait_control(LICENSE_IMPORT_HINT,
+                            lambda text: "导入失败" in text, timeout=12.0)
+        if "导入失败" not in hint:
+            print(f"  FAIL: 篡改签名没有被拒绝，提示是：{hint!r}")
+            return False
+
+        still_active = control_text(LICENSE_STATUS)
+        if not ("已激活" in still_active and "测试用户" in still_active):
+            print(f"  FAIL: 拒绝篡改件后状态被改变了：{still_active!r}")
+            return False
+        with open(installed, "rb") as handle:
+            after_reject = handle.read()
+        if after_reject != valid:
+            print("  FAIL: 拒绝篡改件之后，磁盘上的旧许可被覆盖了")
+            return False
+
+        close_button = user32.GetDlgItem(dialog, LICENSE_CLOSE)
+        if close_button:
+            user32.PostMessageW(close_button, BM_CLICK, 0, 0)
+        else:
+            user32.PostMessageW(dialog, WM_CLOSE, 0, 0)
+        deadline = time.time() + 5.0
+        while time.time() < deadline and user32.FindWindowW(LICENSE_DIALOG_CLASS, None):
+            time.sleep(0.1)
+        if user32.FindWindowW(LICENSE_DIALOG_CLASS, None):
+            print("  FAIL: 许可证对话框关不掉")
+            return False
+    finally:
+        if dialog and user32.IsWindow(dialog):
+            user32.PostMessageW(dialog, WM_CLOSE, 0, 0)
+            time.sleep(0.5)
+        if window and user32.IsWindow(window):
+            user32.PostMessageW(window, WM_CLOSE, 0, 0)
+            time.sleep(1.5)
+        if proc is not None:
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+        for name in config_names:
+            path = os.path.join(cfg, name)
+            if os.path.exists(path):
+                os.remove(path)
+            backup = os.path.join(backup_dir, name)
+            if backups[name] and os.path.exists(backup):
+                shutil.copy2(backup, path)
+
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, registry_key, 0,
+                                winreg.KEY_SET_VALUE) as key:
+                if registry_value is None:
+                    try:
+                        winreg.DeleteValue(key, "FirstRun")
+                    except FileNotFoundError:
+                        pass
+                else:
+                    winreg.SetValueEx(key, "FirstRun", 0, registry_type, registry_value)
+        except FileNotFoundError:
+            if registry_value is not None:
+                with winreg.CreateKey(winreg.HKEY_CURRENT_USER, registry_key) as key:
+                    winreg.SetValueEx(key, "FirstRun", 0, registry_type, registry_value)
+
+        if not registry_existed:
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, registry_key, 0,
+                                    winreg.KEY_READ | winreg.KEY_SET_VALUE) as key:
+                    subkeys, values, _ = winreg.QueryInfoKey(key)
+                if subkeys == 0 and values == 0:
+                    winreg.DeleteKey(winreg.HKEY_CURRENT_USER, registry_key)
+            except FileNotFoundError:
+                pass
+
+    print("  许可证对话框：试用状态读回、有效导入即时激活并逐字节落盘、"
+          "篡改签名被拒且旧许可未变")
     return True
 
 
