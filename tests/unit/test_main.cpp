@@ -43,6 +43,10 @@
 #include "shell/FunctionListPanel.h"
 #include "core/SnapshotStore.h"
 #include "infra/Crypto.h"
+#include "license/LicenseStore.h"
+#include "license/LicenseTypes.h"
+#include "license/LicenseVerifier.h"
+#include "LicenseFixtures.h"
 #include "infra/SingleInstance.h"
 #include "infra/FileAssociation.h"
 #include "edit/DocBuffer.h"
@@ -7422,6 +7426,250 @@ int main() {
               "空串往返不炸");
     }
 
+    Section("许可：类型 / ISO8601 / 错误文案（B3）");
+    {
+        using npcc::license::DescribeLicenseError;
+        using npcc::license::Edition;
+        using npcc::license::EditionFromName;
+        using npcc::license::EditionName;
+        using npcc::license::Feature;
+        using npcc::license::FeatureBit;
+        using npcc::license::FeatureFromName;
+        using npcc::license::FeatureListToString;
+        using npcc::license::FeatureName;
+        using npcc::license::FingerprintMode;
+        using npcc::license::FingerprintModeFromName;
+        using npcc::license::FingerprintModeName;
+        using npcc::license::FormatIso8601Utc;
+        using npcc::license::LicenseError;
+        using npcc::license::LicenseErrorLevel;
+        using npcc::license::LicenseLogLevel;
+        using npcc::license::ParseIso8601Utc;
+
+        const Feature kAll[] = {Feature::MultiCaret,    Feature::Compare,     Feature::DataTools,
+                                Feature::HugeFile,      Feature::ScriptPlugin, Feature::RemoteEdit,
+                                Feature::BatchCli,      Feature::CloudSync,   Feature::TeamConfig,
+                                Feature::ManagedDeploy};
+        for (const Feature feature : kAll) {
+            const std::string_view name = FeatureName(feature);
+            Check(!name.empty() && FeatureFromName(name) == feature, "能力名往返");
+        }
+        Check(!FeatureFromName("quantumworth").has_value(), "未知名不映射");
+        CheckEqual(FeatureListToString(FeatureBit(Feature::MultiCaret) | FeatureBit(Feature::Compare)),
+                   "compare,multicaret", "位集合按名字字典序输出");
+        CheckEqual(FeatureListToString(0), "", "空集合输出空串");
+        Check(EditionName(Edition::Enterprise) == "enterprise" && EditionName(Edition::Pro) == "pro",
+              "版本名");
+        Check(!EditionFromName("ultimate").has_value(), "未知版本名被拒");
+        Check(FingerprintModeName(FingerprintMode::Exact) == "exact" &&
+                  FingerprintModeFromName("none") == FingerprintMode::None,
+              "指纹策略名往返");
+
+        // ISO8601：严格形态、往返一致、闰年与月末按真实历法
+        for (const char* text : {"1970-01-01T00:00:00Z", "2024-02-29T12:34:56Z",
+                                 "2026-10-17T00:00:00Z", "2099-12-31T23:59:59Z"}) {
+            const std::optional<std::int64_t> epoch = ParseIso8601Utc(text);
+            Check(epoch.has_value() && FormatIso8601Utc(*epoch) == text, "ISO8601 往返一致");
+        }
+        Check(ParseIso8601Utc("1970-01-01T00:00:00Z") == 0, "epoch 起点是 0");
+        Check(*ParseIso8601Utc("2030-01-01T00:00:00Z") -
+                      *ParseIso8601Utc("2029-12-31T00:00:00Z") ==
+                  86400,
+              "跨年正好差一天");
+        Check(!ParseIso8601Utc("2023-02-29T00:00:00Z").has_value(), "非闰年 2 月 29 拒绝");
+        Check(!ParseIso8601Utc("2026-02-30T00:00:00Z").has_value(), "2 月 30 拒绝");
+        Check(!ParseIso8601Utc("2026-13-01T00:00:00Z").has_value(), "13 月拒绝");
+        Check(!ParseIso8601Utc("2026-10-17T24:00:00Z").has_value(), "24 点拒绝");
+        Check(!ParseIso8601Utc("2026-10-17T00:00:00").has_value(), "缺 Z 拒绝");
+        Check(!ParseIso8601Utc("2026-10-17T00:00:00+08:00").has_value(),
+              "带时区偏移拒绝（时间一律 UTC）");
+        Check(!ParseIso8601Utc("2026-10-17 00:00:00Z").has_value(), "空格分隔拒绝");
+        Check(!ParseIso8601Utc("").has_value() && !ParseIso8601Utc("2026-1-1T00:00:00Z").has_value(),
+              "空串与不补零拒绝");
+
+        Check(DescribeLicenseError(LicenseError::SignatureInvalid).find(L"签名") !=
+                  std::wstring::npos,
+              "验签失败的文案提到签名");
+        Check(DescribeLicenseError(LicenseError::SchemaTooNew).find(L"升级") != std::wstring::npos,
+              "schema 太新的文案让人升级");
+        Check(LicenseErrorLevel(LicenseError::FileMissing) == LicenseLogLevel::Info &&
+                  LicenseErrorLevel(LicenseError::Expired) == LicenseLogLevel::Info &&
+                  LicenseErrorLevel(LicenseError::SignatureInvalid) == LicenseLogLevel::Warn,
+              "日志级别：正常路径 Info、异常 Warn");
+    }
+
+    Section("许可：容器解析与验签（固定件 / 篡改 / 字段校验）（B3）");
+    {
+        using npcc::license::Feature;
+        using npcc::license::FingerprintMode;
+        using npcc::license::HasFeature;
+        using npcc::license::LicenseError;
+        using npcc::license::LicenseVerifyResult;
+        using npcc::license::ParseIso8601Utc;
+        using npcc::license::SerializeLicensePayload;
+        using npcc::license::VerifyLicenseBytes;
+
+        // 固定件在 tests/unit/LicenseFixtures.h（tools/make_license_fixtures.ps1 生成，
+        // 用的是一次性开发钥匙）。now 钉死，过期 / 未生效的判定才可比对。
+        const std::int64_t now = *ParseIso8601Utc("2026-10-17T12:00:00Z");
+        const std::int64_t expires2030 = *ParseIso8601Utc("2030-01-01T00:00:00Z");
+
+        const LicenseVerifyResult pro = VerifyLicenseBytes(npcc::test::kLicensePro, now);
+        Check(pro.ok(), "正例验签通过");
+        Check(pro.detail.empty(), "通过时 detail 不被写脏");
+        Check(pro.info.edition == npcc::license::Edition::Pro && pro.info.seats == 5u,
+              "版本与席位数");
+        CheckEqual(pro.info.holder, "测试用户", "holder 读回 UTF-8 原文");
+        CheckEqual(pro.info.licenseId, "8f7c1a2e-4b6d-4c0a-9e21-5f3a7c9b1d44", "licenseId");
+        CheckEqual(pro.info.keyId, "lic-2026a", "容器里的 keyId 带进结果");
+        Check(pro.info.expiresAt == expires2030, "expiresAt 解析成 epoch");
+        Check(HasFeature(pro.info.features, Feature::MultiCaret) &&
+                  HasFeature(pro.info.features, Feature::Compare) &&
+                  HasFeature(pro.info.features, Feature::DataTools) &&
+                  !HasFeature(pro.info.features, Feature::CloudSync),
+              "features 位掩码");
+        Check(pro.info.fingerprintMode == FingerprintMode::None && pro.info.fingerprint.empty(),
+              "站点式许可（mode=none、无指纹）");
+        // 解析 → 序列化必须逐字节回到固定件的 payload：键序、LF、值格式全对上
+        CheckEqual(SerializeLicensePayload(pro.info), npcc::test::kLicenseProPayload,
+                   "序列化往返与签发端逐字节一致");
+
+        const LicenseVerifyResult expired = VerifyLicenseBytes(npcc::test::kLicenseExpired, now);
+        Check(expired.error == LicenseError::Expired, "过期许可报 Expired");
+        Check(!expired.info.holder.empty(), "过期时信息仍完整（界面要说清是谁的、何时到期）");
+
+        const LicenseVerifyResult early = VerifyLicenseBytes(npcc::test::kLicenseNotYetValid, now);
+        Check(early.error == LicenseError::NotYetValid, "未来生效报 NotYetValid");
+
+        // 固定件由第二把钥匙（lic-2027a）签：先证明内置公钥表命中，再报 schema 太新
+        const LicenseVerifyResult newer =
+            VerifyLicenseBytes(npcc::test::kLicenseSchemaTooNew, now);
+        Check(newer.error == LicenseError::SchemaTooNew, "schema 太新报 SchemaTooNew");
+        CheckEqual(newer.info.keyId, "lic-2027a", "第二把内置钥匙被命中（轮换表生效）");
+
+        const LicenseVerifyResult site =
+            VerifyLicenseBytes(npcc::test::kLicenseEnterpriseSite, now);
+        Check(site.ok() && site.info.edition == npcc::license::Edition::Enterprise &&
+                  site.info.seats == 0u,
+              "企业站点许可：seats=0 表示不限量");
+        CheckEqual(site.info.holderId, "91310000MA1FL0000X", "holderId 读回");
+        CheckEqual(site.info.restrictions, "noncommercial", "restrictions 读回");
+
+        const LicenseVerifyResult wrong = VerifyLicenseBytes(npcc::test::kLicenseWrongProduct, now);
+        Check(wrong.error == LicenseError::ProductMismatch, "别的产品的许可被挡下");
+        Check(wrong.detail.find(L"notepadcc") != std::wstring::npos, "提示里点名 product");
+
+        // features 里有本版本不认识的名字：不授权、但不作废整张许可
+        const LicenseVerifyResult mixed =
+            VerifyLicenseBytes(npcc::test::kLicenseUnknownFeature, now);
+        Check(mixed.ok() && HasFeature(mixed.info.features, Feature::MultiCaret) &&
+                  !HasFeature(mixed.info.features, Feature::DataTools),
+              "认识的能力照授");
+        Check(mixed.info.unknownFeatures.size() == 1 &&
+                  mixed.info.unknownFeatures[0] == "quantumworth",
+              "不认识的能力名列出但不作废");
+
+        const LicenseVerifyResult missing =
+            VerifyLicenseBytes(npcc::test::kLicenseMissingFeatures, now);
+        Check(missing.error == LicenseError::MalformedContainer &&
+                  missing.detail.find(L"features") != std::wstring::npos,
+              "缺必填键被点名");
+
+        const LicenseVerifyResult bound =
+            VerifyLicenseBytes(npcc::test::kLicenseFingerprintBound, now);
+        Check(bound.ok() && bound.info.fingerprintMode == FingerprintMode::Tolerant &&
+                  bound.info.fingerprint == "K7M2P-9XQ4T-3BNWD-8HJ6R",
+              "指纹字段先读通（匹配判定在 B4）");
+
+        // 篡改：把 payload / 签名里的第一个 base64 字符换掉（长度与形态都保持合法）
+        const auto flipFirstCharAfterTag = [](std::string text, std::string_view tag) {
+            const std::size_t at = text.find(tag);
+            if (at == std::string::npos) {
+                return text;
+            }
+            for (std::size_t i = at + tag.size(); i < text.size(); ++i) {
+                char& ch = text[i];
+                if (ch >= 'A' && ch <= 'Z') {
+                    ch = ch == 'A' ? 'B' : 'A';
+                    break;
+                }
+                if (ch >= 'a' && ch <= 'z') {
+                    ch = 'A';
+                    break;
+                }
+                if (ch >= '0' && ch <= '9') {
+                    ch = 'A';
+                    break;
+                }
+            }
+            return text;
+        };
+        const std::string payloadTampered =
+            flipFirstCharAfterTag(npcc::test::kLicensePro, "<Payload encoding=\"base64\">");
+        Check(payloadTampered != npcc::test::kLicensePro, "篡改工具确实改了字符（自检）");
+        Check(VerifyLicenseBytes(payloadTampered, now).error == LicenseError::SignatureInvalid,
+              "改 payload 一个字符就验不过");
+        const std::string signatureTampered =
+            flipFirstCharAfterTag(npcc::test::kLicensePro, "keyId=\"lic-2026a\">");
+        Check(VerifyLicenseBytes(signatureTampered, now).error == LicenseError::SignatureInvalid,
+              "改签名一个字符也验不过");
+
+        // 未知 keyId：验签之前就被公钥表挡下
+        std::string unknownKey = npcc::test::kLicensePro;
+        const std::size_t keyAt = unknownKey.find("lic-2026a");
+        Check(keyAt != std::string::npos, "固定件里有 keyId（自检）");
+        unknownKey.replace(keyAt, 8, "lic-2099z");
+        const LicenseVerifyResult unknown = VerifyLicenseBytes(unknownKey, now);
+        Check(unknown.error == LicenseError::KeyUnknown, "未知 keyId 报 KeyUnknown");
+        Check(unknown.detail.find(L"lic-2099z") != std::wstring::npos, "提示里带上那个 keyId");
+
+        // 结构错误
+        Check(VerifyLicenseBytes("not xml at all", now).error == LicenseError::MalformedContainer,
+              "不是 XML");
+        Check(VerifyLicenseBytes("<NotepadccLicense><Payload encoding=\"base64\">AAAA</Payload>"
+                                 "</NotepadccLicense>",
+                                 now)
+                      .error == LicenseError::MalformedContainer,
+              "缺 <Signature>");
+        const std::string emptyPayload =
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+            "<NotepadccLicense>\n"
+            "  <Payload encoding=\"base64\"></Payload>\n"
+            "  <Signature alg=\"RSA-2048-PKCS1-SHA256\" keyId=\"lic-2026a\">AAAA</Signature>\n"
+            "</NotepadccLicense>\n";
+        Check(VerifyLicenseBytes(emptyPayload, now).error == LicenseError::MalformedContainer,
+              "空 payload");
+        std::string truncated = npcc::test::kLicensePro;
+        const std::size_t payloadEnd = truncated.find("</Payload>");
+        Check(payloadEnd != std::string::npos && payloadEnd >= 4, "payload 结尾能找到（自检）");
+        truncated.erase(payloadEnd - 4, 3);
+        Check(VerifyLicenseBytes(truncated, now).error == LicenseError::MalformedContainer,
+              "截断 base64 被拒");
+        std::string wrongAlg = npcc::test::kLicensePro;
+        wrongAlg.replace(wrongAlg.find("RSA-2048-PKCS1-SHA256"), 21, "RSA-2048-PKCS1-SHA1");
+        Check(VerifyLicenseBytes(wrongAlg, now).error == LicenseError::MalformedContainer,
+              "不认识的签名算法被拒");
+
+        // LicenseStore：临时目录往返（保存自动建目录）+ 缺文件
+        const std::filesystem::path storeDir =
+            std::filesystem::temp_directory_path() / "npcc_license_store_test";
+        std::filesystem::remove_all(storeDir);
+        const std::filesystem::path storePath = storeDir / "sub" / "license.dat";
+        std::string loaded;
+        npcc::license::LicenseError storeError = npcc::license::LicenseError::None;
+        std::wstring storeDetail;
+        Check(!npcc::license::LoadLicenseFile(storePath, loaded, &storeError, &storeDetail) &&
+                  storeError == npcc::license::LicenseError::FileMissing,
+              "没有许可文件时报 FileMissing（Free 是正常状态）");
+        Check(npcc::license::SaveLicenseFile(storePath, npcc::test::kLicensePro, &storeError,
+                                             &storeDetail),
+              "保存许可（目录不存在会自动建）");
+        Check(npcc::license::LoadLicenseFile(storePath, loaded, &storeError, &storeDetail) &&
+                  loaded == npcc::test::kLicensePro,
+              "读回与写入逐字节一致");
+        Check(VerifyLicenseBytes(loaded, now).ok(), "落盘再读回的许可仍然验得通");
+        std::filesystem::remove_all(storeDir);
+    }
     Section("远程编辑：站点校验与远程路径（M3 第十一块）");
     {
         using npcc::core::ParseRemoteProtocol;

@@ -167,6 +167,7 @@ set(NPCC_CORE_SOURCES
     src/edit/UdlLexer.cpp
     src/edit/UdlStyles.cpp
     src/infra/Crypto.cpp
+    src/infra/TextCodec.cpp
     src/infra/Log.cpp
     src/infra/Paths.cpp
     src/infra/SingleInstance.cpp
@@ -179,6 +180,9 @@ set(NPCC_CORE_SOURCES
     src/infra/SftpRunner.cpp
     src/infra/RemoteService.cpp
     src/infra/ScriptRunner.cpp
+    src/license/LicenseTypes.cpp
+    src/license/LicenseVerifier.cpp
+    src/license/LicenseStore.cpp
     src/io/AtomicFile.cpp
     src/io/FileReader.cpp
     src/io/FileWatcher.cpp

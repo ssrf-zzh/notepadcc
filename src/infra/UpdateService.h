@@ -3,6 +3,8 @@
 #include <string>
 #include <string_view>
 
+#include "infra/TextCodec.h"
+
 namespace npcc::infra {
 
 // 更新检查（设计文档 6.7 第 1 条）：下载清单 → 验签 → 比版本 → 下载包 → SHA-256 →
@@ -34,9 +36,5 @@ struct UpdateCheckReport {
 
 // 阻塞执行一次完整检查（网络等待最多几十秒）。**只允许在工作线程调用**。
 UpdateCheckReport RunUpdateCheck(const UpdateCheckOptions& options);
-
-// UTF-8 ↔ UTF-16 转换（配置里存宽字符，URL 与报文按字节走）。
-std::string  Utf8FromWide(std::wstring_view text);
-std::wstring WideFromUtf8(std::string_view text);
 
 }  // namespace npcc::infra
