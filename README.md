@@ -28,8 +28,6 @@ notepadcc 是一款面向 Windows 的原生文本 / 源码编辑器。编辑内�
 | 版本 | 适用场景 | 直接下载 |
 |---|---|---|
 | 绿色便携版 x64 | 解压即用，配置保存在程序目录 | [下载 ZIP](https://github.com/ssrf-zzh/notepadcc/releases/download/v1.0.0/notepadcc-1.0.0-portable-x64.zip) |
-| 按用户安装 MSI | 当前用户安装，无需管理员权限 | [下载 MSI](https://github.com/ssrf-zzh/notepadcc/releases/download/v1.0.0/notepadcc-1.0.0-x64-peruser.msi) |
-| 整机安装 MSI | 为所有用户安装，需要管理员权限 | [下载 MSI](https://github.com/ssrf-zzh/notepadcc/releases/download/v1.0.0/notepadcc-1.0.0-x64-permachine.msi) |
 | 对应源码包 | GPL-3.0 对应源代码 | [下载源码](https://github.com/ssrf-zzh/notepadcc/releases/download/v1.0.0/notepadcc-1.0.0-source.zip) |
 
 完整发布页：[github.com/ssrf-zzh/notepadcc/releases](https://github.com/ssrf-zzh/notepadcc/releases)
@@ -56,11 +54,6 @@ notepadcc 是一款面向 Windows 的原生文本 / 源码编辑器。编辑内�
 2. 运行 `notepadcc.exe`。
 3. 保持 `portable` 文件与程序在同一目录，配置、会话、日志和备份会写入程序目录下的
    `config\`，不会写入 `%APPDATA%` 或注册表。
-
-### MSI 安装版
-
-- 按用户安装：运行 `notepadcc-1.0.0-x64-peruser.msi`，无需管理员权限。
-- 整机安装：运行 `notepadcc-1.0.0-x64-permachine.msi`，需要管理员权限。
 
 ### 命令行
 
@@ -127,7 +120,7 @@ MSVC 请使用 Visual Studio 生成器；Ninja 构建路径主要用于 MinGW。
 # 绿色便携包
 powershell -ExecutionPolicy Bypass -File scripts\package.ps1 -Toolchain msvc -BuildDir build-msvc
 
-# 完整候选发布包（EXE、便携 ZIP、两份 MSI、源码包、校验文件、SBOM 等）
+# 完整发布包（EXE、便携 ZIP、源码包、校验文件、SBOM 等）
 # 使用证书存储中的 CA 代码签名证书（正式发布）
 powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -Version 1.0.0 -BuildDir build-msvc -SigningThumbprint <sha1-thumbprint>
 
@@ -141,11 +134,10 @@ powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -Version 1.0.0 -Bui
 powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -Version 1.0.0 -BuildDir build-msvc -AllowUnsigned
 ```
 
-发布脚本会先为 EXE 签名，再生成便携 ZIP 与两份 MSI，随后为 MSI 签名；签名算法为
-SHA-256，并使用 RFC 3161 时间戳。写入 `SHA256SUMS` 前会执行 `signtool verify /pa /all`，
-并要求 EXE 与两份 MSI 使用同一张证书。正式证书必须通过信任链校验；自签名证书须显式
-传入 `-AllowUntrustedSignature`，产物在清单和下载页中标记为 `signed-untrusted`，
-不得作为正式可信版本发布。
+发布脚本会先为 EXE 签名，再生成便携 ZIP；签名算法为 SHA-256，并使用 RFC 3161
+时间戳。写入 `SHA256SUMS` 前会执行 `signtool verify /pa /all`。正式证书必须通过
+信任链校验；自签名证书须显式传入 `-AllowUntrustedSignature`，产物在清单和下载页中
+标记为 `signed-untrusted`，不得作为正式可信版本发布。
 
 ## 项目结构
 
@@ -159,7 +151,7 @@ src/infra/      Win32、HTTP、FTP、加密与系统集成
 src/io/         文件读写、原子保存与内存映射
 src/plugin/     插件宿主
 plugins-sdk/    插件开发头文件
-packaging/      MSI 与下载页模板
+packaging/      打包与下载页模板
 scripts/        依赖获取、构建、打包和发布脚本
 res/            图标、资源与应用程序清单
 samples/        示例插件
@@ -172,7 +164,7 @@ notepadcc 按 **GNU General Public License v3.0 only**（`GPL-3.0-only`）发布
 版权归 notepadcc contributors 所有。许可证全文见 [LICENSE](LICENSE)。
 
 项目静态链接 Scintilla、Lexilla、PCRE2 与 SLJIT。第三方版权和许可信息见
-[NOTICE](NOTICE) 与 `licenses/` 目录。转发绿色版或 MSI 时，必须同时提供同一版本的
+[NOTICE](NOTICE) 与 `licenses/` 目录。转发绿色版时，必须同时提供同一版本的
 `notepadcc-<版本>-source.zip`，不能只转发二进制文件。
 
 notepadcc 是自由软件，官方发行永久免费。你可以按 GPL-3.0 的条款使用、研究、修改和

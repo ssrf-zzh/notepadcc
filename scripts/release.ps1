@@ -2,7 +2,7 @@
     Build the complete notepadcc release bundle (B13).
 
     Artifacts produced in dist\release-<version>:
-      notepadcc.exe, portable zip, per-user / per-machine MSI,
+      notepadcc.exe, portable zip,
       notepadcc-<version>-source.zip (GPL-3.0 corresponding source),
       SHA256SUMS, release-manifest.json, RELEASE_NOTES.txt,
       LICENSE, NOTICE, sbom.cdx.json, licenses\,
@@ -232,8 +232,8 @@ if ($signingRequested) {
 }
 
 if (-not $SkipPackage) {
-    $packageScript = Join-Path $PSScriptRoot "package_msi.ps1"
-    & $packageScript -Version $Version -BuildDir $BuildDir -NoBuild
+    $packageScript = Join-Path $PSScriptRoot "package.ps1"
+    & $packageScript -Version $Version -Toolchain msvc -BuildDir $BuildDir -NoBuild
     if ($LASTEXITCODE -ne 0) { throw "Package generation failed." }
 }
 
@@ -243,20 +243,6 @@ Remove-SafeDirectory $releaseDir $dist
 New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
 
 $portableZip = Join-Path $dist "notepadcc-$Version-portable-x64.zip"
-$perUserMsi = Join-Path $dist "notepadcc-$Version-x64-peruser.msi"
-$perMachineMsi = Join-Path $dist "notepadcc-$Version-x64-permachine.msi"
-
-if ($signTool) {
-    Invoke-SignTool $signTool $perUserMsi
-    Invoke-SignTool $signTool $perMachineMsi
-    $perUserSignature = Test-SignTool $signTool $perUserMsi -AllowUntrusted:$AllowUntrustedSignature
-    $perMachineSignature = Test-SignTool $signTool $perMachineMsi -AllowUntrusted:$AllowUntrustedSignature
-    if ($perUserSignature.SignerThumbprint -ne $signerThumbprint -or
-        $perMachineSignature.SignerThumbprint -ne $signerThumbprint) {
-        throw "The MSI signatures do not use the same certificate as the executable."
-    }
-    $signingTrusted = $signingTrusted -and $perUserSignature.Trusted -and $perMachineSignature.Trusted
-}
 
 if ($AllowUntrustedSignature) {
     $signingTrusted = $false
@@ -264,8 +250,6 @@ if ($AllowUntrustedSignature) {
 
 Copy-Checked $exePath (Join-Path $releaseDir "notepadcc.exe")
 Copy-Checked $portableZip (Join-Path $releaseDir (Split-Path -Leaf $portableZip))
-Copy-Checked $perUserMsi (Join-Path $releaseDir (Split-Path -Leaf $perUserMsi))
-Copy-Checked $perMachineMsi (Join-Path $releaseDir (Split-Path -Leaf $perMachineMsi))
 Copy-Checked (Join-Path $root "LICENSE") (Join-Path $releaseDir "LICENSE")
 Copy-Checked (Join-Path $root "NOTICE") (Join-Path $releaseDir "NOTICE")
 
@@ -313,8 +297,6 @@ if ($compilerFile) {
 $artifacts = @(
     (Join-Path $releaseDir "notepadcc.exe"),
     (Join-Path $releaseDir (Split-Path -Leaf $portableZip)),
-    (Join-Path $releaseDir (Split-Path -Leaf $perUserMsi)),
-    (Join-Path $releaseDir (Split-Path -Leaf $perMachineMsi)),
     (Join-Path $releaseDir (Split-Path -Leaf $sourceZip))
 )
 $sbomArguments = @(

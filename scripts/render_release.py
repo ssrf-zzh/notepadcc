@@ -26,8 +26,6 @@ SUPPLEMENTARY_FILES = [
 ARTIFACT_ORDER = [
     "notepadcc-{version}-source.zip",
     "notepadcc-{version}-portable-x64.zip",
-    "notepadcc-{version}-x64-peruser.msi",
-    "notepadcc-{version}-x64-permachine.msi",
     "notepadcc.exe",
 ]
 
@@ -54,10 +52,6 @@ def artifact_metadata(name: str) -> tuple[str, str, str]:
         return "SRC", "对应源代码", "GPL-3.0 要求的完整源码、构建脚本与第三方库源码"
     if lower.endswith("-portable-x64.zip"):
         return "ZIP", "绿色版", "解压即用；保留 portable 标记即可把配置写在程序目录"
-    if lower.endswith("-x64-peruser.msi"):
-        return "MSI", "按用户安装", "安装到当前用户目录，不需要管理员权限"
-    if lower.endswith("-x64-permachine.msi"):
-        return "MSI", "按整机安装", "安装到 Program Files，需要管理员权限"
     return "EXE", "主程序", "与绿色包内程序相同；供独立校验或二次分发"
 
 

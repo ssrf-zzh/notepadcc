@@ -4,7 +4,7 @@ notepadcc 1.0.0 发布说明
 
 notepadcc 是原生 Windows x64 文本 / 源码编辑器，内核嵌入 Scintilla + Lexilla，
 外壳使用 Win32 与 C++20，不依赖 .NET、Qt 或 Electron。项目按 GNU GPL v3.0 only
-发布，官方发行免费。1.0.0 提供绿色版与按用户 / 按整机两种 MSI 安装方式。
+发布，官方发行免费。1.0.0 以绿色便携版形式发布，解压即可使用。
 
 亮点
 
@@ -17,11 +17,9 @@ FTP / SFTP 远程编辑、宏、运行命令、插件宿主与工具栏 / 右键
 更新包同时校验清单签名、SHA-256 与 Authenticode，任一失败即拒收。
 主窗口状态栏显示作者标识，悬停或单击可查看完整作者与联系信息。
 
-安装
+使用
 
 绿色版：解压后直接运行 notepadcc.exe，保留 portable 文件即可把配置写在程序目录。
-按用户安装：notepadcc-1.0.0-x64-peruser.msi，无需管理员权限。
-整机安装：notepadcc-1.0.0-x64-permachine.msi，需要管理员权限。
 
 系统要求：Windows 10 1809 或更高，x64。运行库已静态链接，不需要另装 VC++ 运行库。
 
@@ -31,14 +29,14 @@ notepadcc 是自由软件，依据 GNU General Public License 第 3 版（不采
 授权，版权人为 notepadcc contributors。许可证全文见发布目录的 LICENSE。
 
 本版本同时提供 notepadcc-1.0.0-source.zip，其中包含项目源码、构建脚本、许可证、
-第三方库源码与第三方许可材料。转发绿色版或 MSI 时必须同时提供该源码包，不能只
+第三方库源码与第三方许可材料。转发绿色版时必须同时提供该源码包，不能只
 转发二进制。第三方组件及其许可证详见 NOTICE 和发布目录的 licenses 目录。
 
 校验与签名
 
 下载后请先核对同目录的 SHA256SUMS 与 release-manifest.json，发布页同时列出每个文件的
 SHA-256。正式版本使用受信任的 Authenticode 代码签名证书，采用 SHA-256 摘要与 RFC 3161
-时间戳；发布脚本会验证 EXE 与两份 MSI 的签名链后才写入校验值。
+时间戳；发布脚本会验证 EXE 的签名链后才写入校验值。
 
 本候选包使用自签名证书完成了 Authenticode 签名与时间戳，签名本身有效，但证书链不受
 Windows 信任，SmartScreen 可能仍提示“未知发布者”。该候选包仅用于测试与预览，不得
@@ -48,5 +46,4 @@ Windows 信任，SmartScreen 可能仍提示“未知发布者”。该候选包
 
 自绘控件尚未接入屏幕阅读器 / UIA、高对比模式与输入法候选窗。
 系统 MessageBox 与系统文件 / 颜色选择器仍由 Windows 绘制。
-MSI 的真实整机安装需要管理员或干净虚拟机补跑。
 本轮性能与兼容实测在 Windows 11 build 26200、系统 DPI 192 上完成。
