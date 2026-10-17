@@ -9306,6 +9306,392 @@ int main() {
         std::filesystem::remove_all(b7Dir);
     }
 
+    Section("许可单元测试覆盖审计（B8）");
+    {
+        using npcc::license::DescribeLicenseError;
+        using npcc::license::Edition;
+        using npcc::license::EditionName;
+        using npcc::license::EvaluateSession;
+        using npcc::license::Feature;
+        using npcc::license::FeatureBit;
+        using npcc::license::FeatureFromName;
+        using npcc::license::FeatureListToString;
+        using npcc::license::FeatureMask;
+        using npcc::license::FeatureName;
+        using npcc::license::Fingerprint;
+        using npcc::license::FingerprintMode;
+        using npcc::license::HasFeature;
+        using npcc::license::JsonEscape;
+        using npcc::license::LicenseError;
+        using npcc::license::LicenseErrorLevel;
+        using npcc::license::LicenseErrorName;
+        using npcc::license::LicenseLogLevel;
+        using npcc::license::LicenseNotice;
+        using npcc::license::LicenseService;
+        using npcc::license::LicenseState;
+        using npcc::license::LicenseStateName;
+        using npcc::license::LicenseVerifyResult;
+        using npcc::license::LoadLicenseFile;
+        using npcc::license::LoadTrialState;
+        using npcc::license::ProFeatureMask;
+        using npcc::license::SaveLicenseFile;
+        using npcc::license::SaveTrialState;
+        using npcc::license::TrialEnvironment;
+        using npcc::license::TrialRecord;
+
+        constexpr std::int64_t kDay = 86400;
+        const std::int64_t t0 = 1800000000;
+
+        // ---- 能力表：十个名字双向往返、顺序稳定、未知项不猜 ----
+        struct FeatureCase {
+            const char* name;
+            Feature feature;
+        };
+        const FeatureCase featureCases[] = {
+            {"batchcli", Feature::BatchCli},
+            {"cloudsync", Feature::CloudSync},
+            {"compare", Feature::Compare},
+            {"datatools", Feature::DataTools},
+            {"hugefile", Feature::HugeFile},
+            {"manageddeploy", Feature::ManagedDeploy},
+            {"multicaret", Feature::MultiCaret},
+            {"remoteedit", Feature::RemoteEdit},
+            {"scriptplugin", Feature::ScriptPlugin},
+            {"teamconfig", Feature::TeamConfig},
+        };
+        bool featureNamesRoundTrip = true;
+        FeatureMask allFeatures = 0;
+        for (const FeatureCase& item : featureCases) {
+            allFeatures |= FeatureBit(item.feature);
+            if (FeatureName(item.feature) != item.name) {
+                featureNamesRoundTrip = false;
+            }
+            const std::optional<Feature> parsed = FeatureFromName(item.name);
+            if (!parsed.has_value() || *parsed != item.feature) {
+                featureNamesRoundTrip = false;
+            }
+        }
+        Check(featureNamesRoundTrip, "十项能力名与位双向往返");
+        Check(allFeatures == 0x3FFu, "十项能力恰好占满低 10 位");
+        Check(FeatureListToString(allFeatures) ==
+                  "batchcli,cloudsync,compare,datatools,hugefile,manageddeploy,multicaret,"
+                  "remoteedit,scriptplugin,teamconfig",
+              "能力列表按表内字典序输出");
+        Check(!FeatureFromName("teamConfig").has_value() &&
+                  !FeatureFromName("").has_value(),
+              "能力名区分大小写，空名不当任何一项");
+        Check(FeatureName(static_cast<Feature>(1u << 20)).empty(),
+              "未知能力位没有名字（不编一个）");
+
+        const FeatureMask proMask = ProFeatureMask();
+        const FeatureMask enterpriseOnly =
+            FeatureBit(Feature::TeamConfig) | FeatureBit(Feature::ManagedDeploy);
+        Check(proMask == (allFeatures & ~enterpriseOnly),
+              "Pro 全集等于十项去掉两项 Enterprise 专属");
+        bool proMaskBitsOk = true;
+        bool proMaskEnterpriseOk = true;
+        for (const FeatureCase& item : featureCases) {
+            const bool enterprise = item.feature == Feature::TeamConfig ||
+                                    item.feature == Feature::ManagedDeploy;
+            if (HasFeature(proMask, item.feature) == enterprise) {
+                if (enterprise) {
+                    proMaskEnterpriseOk = false;
+                } else {
+                    proMaskBitsOk = false;
+                }
+            }
+        }
+        Check(proMaskBitsOk && proMaskEnterpriseOk, "Pro 八项逐位在内、Enterprise 两位逐位在外");
+        Check(FeatureListToString(proMask) ==
+                  "batchcli,cloudsync,compare,datatools,hugefile,multicaret,remoteedit,"
+                  "scriptplugin",
+              "Pro 能力名的规范顺序");
+
+        // ---- 门禁：状态决定能力集，Free 一律不授权 ----
+        Fingerprint machine;
+        machine.values = {"guid-a", "1234ABCD", "Fake CPU @ 1.00GHz", "board-1"};
+        LicenseVerifyResult proLicense;
+        proLicense.info.schema = 1;
+        proLicense.info.product = "notepadcc";
+        proLicense.info.edition = Edition::Pro;
+        proLicense.info.fingerprintMode = FingerprintMode::None;
+        proLicense.info.features = proMask;
+        const auto proSession = EvaluateSession(proLicense, machine, TrialRecord{}, t0);
+        Check(proSession.state == LicenseState::Licensed && proSession.features == proMask,
+              "有效 Pro 许可：状态 Licensed，能力集原样");
+        bool allProGranted = true;
+        bool noEnterpriseGranted = true;
+        for (const FeatureCase& item : featureCases) {
+            const bool granted = HasFeature(proSession.features, item.feature);
+            if ((item.feature == Feature::TeamConfig ||
+                 item.feature == Feature::ManagedDeploy) == granted) {
+                if (granted) {
+                    noEnterpriseGranted = false;
+                } else {
+                    allProGranted = false;
+                }
+            }
+        }
+        Check(allProGranted, "Pro 许可放行八项 Pro 能力");
+        Check(noEnterpriseGranted, "Pro 许可不放行 Enterprise 两项");
+
+        LicenseVerifyResult enterpriseLicense = proLicense;
+        enterpriseLicense.info.edition = Edition::Enterprise;
+        enterpriseLicense.info.features = allFeatures;
+        const auto enterpriseSession =
+            EvaluateSession(enterpriseLicense, machine, TrialRecord{}, t0);
+        Check(enterpriseSession.state == LicenseState::Licensed &&
+                  enterpriseSession.features == allFeatures,
+              "企业许可：十项能力全开");
+        Check(HasFeature(enterpriseSession.features, Feature::TeamConfig) &&
+                  HasFeature(enterpriseSession.features, Feature::ManagedDeploy),
+              "企业许可放行团队配置与托管部署");
+
+        LicenseVerifyResult noLicense;
+        noLicense.error = LicenseError::FileMissing;
+        const auto freeSession = EvaluateSession(noLicense, machine, TrialRecord{}, t0);
+        bool freeGrantsNothing = freeSession.features == 0;
+        for (const FeatureCase& item : featureCases) {
+            if (HasFeature(freeSession.features, item.feature)) {
+                freeGrantsNothing = false;
+            }
+        }
+        Check(freeSession.state == LicenseState::Free && freeGrantsNothing,
+              "Free：十项能力全部不放行");
+
+        TrialRecord trialRecord;
+        trialRecord.firstRunUtc = t0;
+        const auto trialSession =
+            EvaluateSession(noLicense, machine, trialRecord, t0 + kDay);
+        Check(trialSession.state == LicenseState::Trial &&
+                  trialSession.features == proMask,
+              "试用：能力集按 Pro 全集，不夹带 Enterprise");
+        const auto licensedWins =
+            EvaluateSession(proLicense, machine, trialRecord, t0 + kDay);
+        Check(licensedWins.state == LicenseState::Licensed,
+              "试用与有效许可同时成立：Licensed 优先");
+
+        LicenseVerifyResult expiringLicense = proLicense;
+        expiringLicense.info.expiresAt = t0;
+        const auto graceSession =
+            EvaluateSession(expiringLicense, machine, TrialRecord{}, t0 + 6 * kDay + 1);
+        Check(graceSession.state == LicenseState::Grace &&
+                  graceSession.features == proMask && graceSession.graceDaysLeft == 1,
+              "宽限最后一天：Grace，能力集保持不变");
+        const auto graceEnded =
+            EvaluateSession(expiringLicense, machine, TrialRecord{}, t0 + 7 * kDay);
+        Check(graceEnded.state == LicenseState::Free && graceEnded.features == 0,
+              "宽限结束：Free，能力集清空");
+
+        // ---- 错误表：每个值都有机器名与中文说明，机器名不重样 ----
+        const LicenseError errors[] = {
+            LicenseError::None,          LicenseError::FileMissing,
+            LicenseError::IoError,       LicenseError::MalformedContainer,
+            LicenseError::ProductMismatch, LicenseError::SignatureInvalid,
+            LicenseError::KeyUnknown,    LicenseError::SchemaTooNew,
+            LicenseError::Expired,       LicenseError::NotYetValid,
+            LicenseError::FingerprintMismatch, LicenseError::ClockAnomaly,
+            LicenseError::ActivationNetworkFailed,
+        };
+        bool errorNamesOk = true;
+        bool errorTextsOk = true;
+        bool errorNamesUnique = true;
+        for (std::size_t i = 0; i < std::size(errors); ++i) {
+            const std::string_view name = LicenseErrorName(errors[i]);
+            if (name.empty() || name == "unknown") {
+                errorNamesOk = false;
+            }
+            if (DescribeLicenseError(errors[i]).empty()) {
+                errorTextsOk = false;
+            }
+            for (std::size_t j = i + 1; j < std::size(errors); ++j) {
+                if (name == LicenseErrorName(errors[j])) {
+                    errorNamesUnique = false;
+                }
+            }
+        }
+        Check(errorNamesOk, "十三个错误值都有机器可读名");
+        Check(errorTextsOk, "十三个错误值都有中文说明");
+        Check(errorNamesUnique, "错误机器名互不重复");
+        Check(LicenseErrorLevel(LicenseError::ClockAnomaly) == LicenseLogLevel::Warn &&
+                  LicenseErrorLevel(LicenseError::Expired) == LicenseLogLevel::Info,
+              "时钟异常记 Warn、过期记 Info");
+        Check(LicenseStateName(LicenseState::Free) == "free" &&
+                  LicenseStateName(LicenseState::Trial) == "trial" &&
+                  LicenseStateName(LicenseState::Grace) == "grace" &&
+                  LicenseStateName(LicenseState::Licensed) == "licensed",
+              "四个状态名齐全且机器可读");
+        Check(EditionName(Edition::Free) == "free" &&
+                  EditionName(Edition::Pro) == "pro" &&
+                  EditionName(Edition::Enterprise) == "enterprise",
+              "三个版次名齐全且机器可读");
+
+        // ---- 导入 → 落盘 → 重启读取：真实文件路径往返 ----
+        const std::filesystem::path b8Dir =
+            std::filesystem::temp_directory_path() / "npcc_license_b8_test";
+        std::filesystem::remove_all(b8Dir);
+        std::filesystem::create_directories(b8Dir);
+        const std::filesystem::path installed = b8Dir / "install" / "license.dat";
+        const std::filesystem::path proSource = b8Dir / "pro.lic";
+        const std::filesystem::path wrongSource = b8Dir / "wrong.lic";
+        const std::filesystem::path notYetSource = b8Dir / "not-yet.lic";
+
+        LicenseError fileError = LicenseError::None;
+        std::wstring fileDetail;
+        Check(SaveLicenseFile(proSource, npcc::test::kLicensePro, &fileError, &fileDetail),
+              "准备：写出 Pro 固定件");
+        Check(SaveLicenseFile(wrongSource, npcc::test::kLicenseWrongProduct, &fileError,
+                              &fileDetail),
+              "准备：写出别的产品的许可");
+        Check(SaveLicenseFile(notYetSource, npcc::test::kLicenseNotYetValid, &fileError,
+                              &fileDetail),
+              "准备：写出尚未生效的许可");
+
+        LicenseService& service = LicenseService::Instance();
+        service.Initialize(&installed);
+        TrialEnvironment neutral;
+        neutral.stateFile = b8Dir / "neutral-state.xml";
+        neutral.registrySubKey.clear();
+        TrialRecord agedTrial;
+        agedTrial.firstRunUtc = npcc::license::NowUnixUtc() - 31 * kDay;
+        Check(SaveTrialState(neutral.stateFile, agedTrial, &fileDetail),
+              "准备：把试用记录放到 31 天前（避免试用兜底掩盖 Free）");
+        service.BeginSession(&neutral);
+        Check(service.State() == LicenseState::Free &&
+                  service.LastError() == LicenseError::FileMissing,
+              "B8 起点：试用已过期且没有许可 → Free + FileMissing");
+
+        fileError = LicenseError::None;
+        fileDetail.clear();
+        Check(service.Import(proSource, &fileError, &fileDetail) &&
+                  service.State() == LicenseState::Licensed &&
+                  service.EditionValue() == Edition::Pro,
+              "导入 Pro：落盘并立即生效");
+        Check(service.Path() == installed, "服务记住的是许可安装位置");
+        Check(FeatureListToString(service.Features()) == "compare,datatools,multicaret",
+              "导入后的能力集与文件逐项一致");
+        Check(service.Has(Feature::MultiCaret) && service.Has(Feature::Compare) &&
+                  service.Has(Feature::DataTools) && !service.Has(Feature::HugeFile) &&
+                  !service.Has(Feature::ScriptPlugin) && !service.Has(Feature::RemoteEdit) &&
+                  !service.Has(Feature::BatchCli) && !service.Has(Feature::CloudSync) &&
+                  !service.Has(Feature::TeamConfig) && !service.Has(Feature::ManagedDeploy),
+              "十项能力门禁逐项核对（三项开、七项关）");
+
+        service.Initialize(&installed);
+        Check(service.State() == LicenseState::Licensed &&
+                  service.Info().holder == "测试用户" &&
+                  FeatureListToString(service.Features()) == "compare,datatools,multicaret",
+              "重启读取（重新 Initialize）：状态、持有人与能力集一致");
+        const std::string licensedJson = service.StatusJson();
+        Check(licensedJson.find("\"licenseEdition\":\"pro\"") != std::string::npos &&
+                  licensedJson.find("\"edition\":\"pro\"") != std::string::npos,
+              "状态 JSON 同时给出文件版次与生效版次");
+        Check(licensedJson.find("\"licenseFile\":\"" + JsonEscape(installed.string()) + "\"") !=
+                  std::string::npos,
+              "状态 JSON 的路径按 JSON 规则转义");
+
+        std::string bytesBefore;
+        Check(LoadLicenseFile(installed, bytesBefore, &fileError, &fileDetail),
+              "准备：读回当前安装的许可");
+        fileError = LicenseError::None;
+        Check(!service.Import(wrongSource, &fileError, &fileDetail) &&
+                  fileError == LicenseError::ProductMismatch,
+              "别的产品的许可拒绝导入");
+        std::string bytesAfter;
+        Check(LoadLicenseFile(installed, bytesAfter, &fileError, &fileDetail) &&
+                  bytesAfter == bytesBefore && service.State() == LicenseState::Licensed,
+              "拒绝导入之后安装位置一个字节都没变");
+
+        fileError = LicenseError::None;
+        Check(!service.Import(b8Dir / "missing.lic", &fileError, &fileDetail) &&
+                  fileError == LicenseError::FileMissing,
+              "源文件不存在：FileMissing");
+        Check(service.State() == LicenseState::Licensed,
+              "源文件不存在不影响已激活状态");
+
+        fileError = LicenseError::None;
+        Check(service.Import(notYetSource, &fileError, &fileDetail) &&
+                  service.State() == LicenseState::Free &&
+                  service.LastError() == LicenseError::NotYetValid,
+              "尚未生效的许可导入得进（结构有效），运行状态按 NotYetValid 回落");
+        std::string notYetBytes;
+        Check(LoadLicenseFile(installed, notYetBytes, &fileError, &fileDetail) &&
+                  notYetBytes == npcc::test::kLicenseNotYetValid,
+              "尚未生效的许可确实替换了安装位置");
+        Check(service.Import(proSource, &fileError, &fileDetail),
+              "恢复：重新导入 Pro 固定件");
+
+        fileError = LicenseError::None;
+        Check(!service.ImportBytes("", &fileError, &fileDetail) &&
+                  fileError == LicenseError::MalformedContainer,
+              "空字节导入：MalformedContainer");
+        std::string bytesAfterEmpty;
+        Check(LoadLicenseFile(installed, bytesAfterEmpty, &fileError, &fileDetail) &&
+                  bytesAfterEmpty == npcc::test::kLicensePro &&
+                  service.State() == LicenseState::Licensed,
+              "空导入不覆盖已生效许可");
+
+        // ---- 不可写位置：所有写入路径都降级返回错误，不崩、不写半截 ----
+        const std::filesystem::path blocker = b8Dir / "blocker";
+        Check(npcc::io::WriteFileAtomic(blocker.wstring(), "not a directory").ok,
+              "准备：用一个普通文件占住目录位置");
+        const std::filesystem::path blockedLicense = blocker / "license.dat";
+        const std::filesystem::path blockedState = blocker / "state.xml";
+        fileError = LicenseError::None;
+        Check(!SaveLicenseFile(blockedLicense, npcc::test::kLicensePro, &fileError,
+                               &fileDetail) &&
+                  fileError == LicenseError::IoError,
+              "许可目录不可写：SaveLicenseFile 返回 IoError");
+        Check(!SaveTrialState(blockedState, TrialRecord{}, &fileDetail),
+              "试用目录不可写：SaveTrialState 返回失败");
+
+        service.Initialize(&blockedLicense);
+        TrialEnvironment brokenEnv;
+        brokenEnv.stateFile = blockedState;
+        brokenEnv.registrySubKey.clear();
+        service.BeginSession(&brokenEnv);
+        Check(service.State() == LicenseState::Trial && service.TrialDaysLeft() == 30,
+              "state.xml 写不进去：本会话仍按 30 天试运行（不拦启动）");
+        std::error_code existsError;
+        Check(!std::filesystem::exists(blockedState, existsError),
+              "写失败不会凭空造出 state.xml");
+        Check(!service.DismissNoticeForever(LicenseNotice::TrialExpired),
+              "「不再提示」写不进去时如实返回 false");
+        fileError = LicenseError::None;
+        Check(!service.ImportBytes(npcc::test::kLicensePro, &fileError, &fileDetail) &&
+                  fileError == LicenseError::IoError,
+              "许可目录不可写：ImportBytes 返回 IoError，不误报激活成功");
+
+        // ---- state.xml 的宽容解析与布尔落盘写法 ----
+        const std::filesystem::path malformedState = b8Dir / "malformed-state.xml";
+        Check(npcc::io::WriteFileAtomic(
+                  malformedState.wstring(),
+                  "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+                  "<notepadcc-state><trial firstRunUtc=\"abc\" lastSeenUtc=\"-7\" "
+                  "trialNoticeDismissed=\"yes\" graceNoticeDismissed=\"true\"/></notepadcc-state>\n")
+                  .ok,
+              "准备：写一份数值坏掉、布尔可读的 state.xml");
+        TrialRecord parsedState;
+        Check(LoadTrialState(malformedState, parsedState, &fileDetail) &&
+                  !parsedState.firstRunUtc.has_value() &&
+                  !parsedState.lastSeenUtc.has_value() &&
+                  parsedState.trialNoticeDismissed && parsedState.graceNoticeDismissed,
+              "坏时间戳当没记录，yes/true 两种布尔写法都认");
+        const std::filesystem::path savedState = b8Dir / "saved-state.xml";
+        TrialRecord stateToSave;
+        stateToSave.firstRunUtc = t0;
+        stateToSave.trialNoticeDismissed = true;
+        Check(SaveTrialState(savedState, stateToSave, &fileDetail),
+              "准备：落一份带提示标记的 state.xml");
+        const npcc::io::ReadResult stateBytes = npcc::io::ReadWholeFile(savedState.wstring(), 4096);
+        Check(stateBytes.ok &&
+                  stateBytes.bytes.find("trialNoticeDismissed=\"yes\"") != std::string::npos &&
+                  stateBytes.bytes.find("graceNoticeDismissed=\"no\"") != std::string::npos,
+              "state.xml 的布尔统一写成 yes/no");
+
+        std::filesystem::remove_all(b8Dir);
+    }
+
     FinishSections();
     std::printf("\n结果: %d 项检查, %d 项失败\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
