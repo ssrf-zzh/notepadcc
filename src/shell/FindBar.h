@@ -3,8 +3,10 @@
 #include <windows.h>
 
 #include <string>
+#include <vector>
 
 #include "search/InDocSearch.h"
+#include "shell/ChromeStyle.h"
 
 namespace npcc::shell {
 
@@ -36,6 +38,10 @@ public:
     bool Create(HWND parent);
     void Destroy();
 
+    // 跟随主窗口的四套主题（浅 / 深 / 护眼浅 / 护眼深）。输入框和下拉列表走
+    // uxtheme 的深色主题，按钮 / 复选框自绘——系统按钮在深色底上会留一块浅灰。
+    void SetTheme(bool dark, bool eyeCare);
+
     HWND Handle() const noexcept { return hwnd_; }
     int  Height() const;
 
@@ -64,7 +70,25 @@ private:
 
     int    Scale(int value) const;
     void   Layout();
+    struct Placement {
+        HWND handle = nullptr;
+        RECT rect{};
+    };
+    std::vector<Placement> BuildPlacements(int width) const;
     void   ApplyFont();
+    void   UpdateThemeResources();
+    void   ApplyThemeToControls();
+    void   InstallButtonSubclasses();
+    void   PaintBackground(HDC dc) const;
+    void   PaintControl(HWND control, HDC dc) const;
+    void   PaintCombo(HDC dc) const;
+    ChromeColours Theme() const;
+    static LRESULT CALLBACK ButtonSubclass(HWND hwnd, UINT message, WPARAM wParam,
+                                           LPARAM lParam, UINT_PTR id, DWORD_PTR ref);
+    LRESULT ButtonSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+    static LRESULT CALLBACK ComboSubclass(HWND hwnd, UINT message, WPARAM wParam,
+                                          LPARAM lParam, UINT_PTR id, DWORD_PTR ref);
+    LRESULT ComboSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     HWND   MakeControl(const wchar_t* className, const wchar_t* text, DWORD style, int id);
     std::wstring TextOf(int controlId) const;
     int    ModeIndex() const;
@@ -76,6 +100,10 @@ private:
     HWND         replaceEdit_ = nullptr;
     HWND         modeCombo_ = nullptr;
     HWND         statusText_ = nullptr;
+    bool         dark_ = false;
+    bool         eyeCare_ = false;
+    HBRUSH       background_ = nullptr;
+    HBRUSH       field_ = nullptr;
 };
 
 }  // namespace npcc::shell

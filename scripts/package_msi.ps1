@@ -97,8 +97,17 @@ if (Test-Path -LiteralPath $stage) {
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
 $stageExe = Join-Path $stage "notepadcc.exe"
+$stageIcon = Join-Path $stage "notepadcc.ico"
 $stageReadme = Join-Path $stage "安装说明.txt"
+$stageLicense = Join-Path $stage "LICENSE.txt"
+$stageNotice = Join-Path $stage "NOTICE.txt"
+$stageThirdParty = Join-Path $stage "THIRD_PARTY_COMPONENTS.md"
+$stageSourceNotice = Join-Path $stage "源代码说明.txt"
 Copy-Item -LiteralPath $exePath -Destination $stageExe
+Copy-Item -LiteralPath (Join-Path $root "res\notepadcc.ico") -Destination $stageIcon
+Copy-Item -LiteralPath (Join-Path $root "LICENSE") -Destination $stageLicense
+Copy-Item -LiteralPath (Join-Path $root "NOTICE") -Destination $stageNotice
+Copy-Item -LiteralPath (Join-Path $root "THIRD_PARTY_COMPONENTS.md") -Destination $stageThirdParty
 $readme = @"
 notepadcc $Version（Windows x64 安装版）
 
@@ -123,6 +132,14 @@ notepadcc $Version（Windows x64 安装版）
   也可以从 Windows 的“应用和功能”里卸载。
 "@
 [IO.File]::WriteAllText($stageReadme, $readme, (New-Object System.Text.UTF8Encoding($true)))
+$sourceNotice = @"
+notepadcc $Version 按 GNU General Public License v3.0 only（GPL-3.0-only）发布。
+许可证全文见同目录的 LICENSE.txt，第三方组件条款见 NOTICE.txt。
+
+本程序对应的完整源代码在同一个发行目录的 notepadcc-$Version-source.zip 中提供。
+转发安装包时必须同时提供该源码包；如果只拿到了安装包，请向分发者索取对应源码。
+"@
+[IO.File]::WriteAllText($stageSourceNotice, $sourceNotice, (New-Object System.Text.UTF8Encoding($true)))
 
 $wxs = Join-Path $root "packaging\notepadcc.wxs"
 $commonArguments = @(
@@ -130,7 +147,12 @@ $commonArguments = @(
     "-arch", "x64",
     "-d", "ProductVersion=$Version",
     "-d", "SourceExe=$stageExe",
-    "-d", "SourceReadme=$stageReadme"
+    "-d", "SourceIcon=$stageIcon",
+    "-d", "SourceReadme=$stageReadme",
+    "-d", "SourceLicense=$stageLicense",
+    "-d", "SourceNotice=$stageNotice",
+    "-d", "SourceThirdParty=$stageThirdParty",
+    "-d", "SourceSourceNotice=$stageSourceNotice"
 )
 
 function Build-Msi([string]$Scope, [string]$PerUser, [string]$UpgradeCode,
@@ -167,11 +189,13 @@ $perUserGuids = @{
     MainExecutableGuid = "{9F9A07D7-C082-4BDB-8AE4-5396921A7D21}"
     UserGuideGuid = "{93521E01-1FBC-4BA6-9E67-3B36A8C97EC9}"
     ShortcutGuid = "{BB57E140-4071-4E22-94D2-A13DF3F1FD3A}"
+    LicenseFilesGuid = "{116BEABA-61A9-4929-9E2A-2E4E9488C9F4}"
 }
 $perMachineGuids = @{
     MainExecutableGuid = "{3652CF72-B1F1-4288-BC03-B5C968E176F1}"
     UserGuideGuid = "{0E6F9AB5-D8D6-4EA3-BE9F-E42C21EC7B6E}"
     ShortcutGuid = "{B987A9BF-D762-4FB3-8457-3D6088E3388E}"
+    LicenseFilesGuid = "{694C285C-706D-4561-AFAC-A8349939E628}"
 }
 Build-Msi "perUserOrMachine" "1" "BE196C54-6DC1-4EC8-BF1A-7A7CB1EAD38C" "per-user" $perUserGuids $perUserMsi
 Build-Msi "perMachine" "0" "C7D59922-9CE9-4857-A44A-70E047F80B50" "per-machine" $perMachineGuids $perMachineMsi

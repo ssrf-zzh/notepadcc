@@ -1,0 +1,70 @@
+notepadcc
+=========
+
+Copyright (C) 2026 notepadcc contributors.
+
+notepadcc is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, version 3 only. A copy of that license is provided in the
+repository root and in every release bundle as `LICENSE`.
+
+notepadcc is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+Every official binary release is accompanied by the corresponding source
+archive `notepadcc-<version>-source.zip`. This NOTICE is provided so that every
+distributed build also carries the copyright notices and license terms of the
+third-party components compiled into it.
+
+notepadcc statically links the following third-party components:
+
+1. Scintilla 5.6.7
+   Copyright 1998-2021 by Neil Hodgson <neilh@scintilla.org>
+   License: Historical Permission Notice and Disclaimer (HPND)
+   Project: https://www.scintilla.org/
+   Use: source editor control
+
+2. Lexilla 5.5.4
+   Copyright 1998-2021 by Neil Hodgson <neilh@scintilla.org>
+   License: Historical Permission Notice and Disclaimer (HPND)
+   Project: https://www.scintilla.org/LexillaDoc.html
+   Use: language lexers
+
+3. PCRE2 10.49
+   Copyright (c) 1997-2007 University of Cambridge
+   Copyright (c) 2007-2024 Philip Hazel
+   License: BSD-3-Clause WITH PCRE2-exception
+   Project: https://www.pcre.org/
+   Use: regular-expression engine (8-bit static library, JIT enabled)
+
+4. SLJIT (the revision bundled with PCRE2 10.49)
+   Copyright Zoltan Herczeg <hzmester@freemail.hu>
+   License: BSD-2-Clause
+   Project: https://github.com/zherczeg/sljit
+   Use: PCRE2 JIT backend
+
+5. Microsoft Visual C++ Runtime (MSVC builds, statically linked)
+   Copyright (c) Microsoft Corporation
+   License: Microsoft Software License Terms for the MSVC redistributable files
+   Use: C/C++ runtime required by the MSVC release build
+
+The open-source license texts are reproduced in full in the release bundle's
+`licenses` directory. For the Microsoft Visual C++ Runtime, the notice at
+`licenses/MSVC-RUNTIME-NOTICE.txt` identifies the notice and the Microsoft
+license terms that govern the build toolchain; those Microsoft terms are not
+reproduced verbatim. Where a referenced license copy is missing, obtain the
+corresponding license from the upstream project before redistributing the
+build.
+
+The Windows system libraries used by notepadcc (comctl32, comdlg32, shell32,
+user32, gdi32, dwmapi, uxtheme, bcrypt, winhttp and others) are part of the
+supported Windows operating system and are not redistributed with notepadcc.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

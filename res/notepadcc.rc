@@ -1,7 +1,11 @@
 #include <windows.h>
+#include "resource.h"
 
 /* 清单：DPI 感知、通用控件 v6、长路径支持 */
 1 RT_MANIFEST "app.manifest"
+
+/* 程序、窗口、任务栏与安装快捷方式共用的品牌图标（9 档尺寸） */
+IDI_APP_ICON ICON "notepadcc.ico"
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION     1,0,0,0
@@ -23,7 +27,7 @@ BEGIN
             VALUE "OriginalFilename", "notepadcc.exe"
             VALUE "ProductName",      "notepadcc"
             VALUE "ProductVersion",   "1.0.0.0"
-            VALUE "LegalCopyright",   "Copyright (C) 2026"
+            VALUE "LegalCopyright",   "Copyright (C) 2026 notepadcc contributors"
         END
     END
     BLOCK "VarFileInfo"

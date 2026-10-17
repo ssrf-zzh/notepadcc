@@ -8,6 +8,7 @@
 
 #include "core/CommandText.h"
 #include "core/Localization.h"
+#include "shell/ChromeStyle.h"
 
 namespace npcc::shell {
 namespace {
@@ -454,6 +455,7 @@ bool ToolbarDialog::Show(HWND owner, const core::CommandRegistry& registry,
             },
             reinterpret_cast<LPARAM>(font_));
     }
+    ApplyDialogChrome(hwnd_);
     FillLists();
     Layout();
 

@@ -10,6 +10,7 @@
 #include "edit/LanguageRegistry.h"
 #include "edit/StyleCatalogue.h"
 #include "edit/StyleScheme.h"
+#include "shell/ChromeStyle.h"
 
 namespace npcc::shell {
 namespace {
@@ -467,6 +468,7 @@ bool StyleConfigurator::Show(HWND owner, const npcc::edit::LanguageRegistry& lan
             },
             reinterpret_cast<LPARAM>(font_));
     }
+    ApplyDialogChrome(hwnd_);
     LoadForLanguage(0);
     Layout();
 

@@ -83,6 +83,16 @@ user32.GetWindowDC.argtypes = [wintypes.HWND]
 user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
 user32.PrintWindow.restype = wintypes.BOOL
 user32.PrintWindow.argtypes = [wintypes.HWND, wintypes.HDC, ctypes.c_uint]
+# 布局回归要真的把主窗口缩到 960 / 620 宽；不声明签名时 HWND 会按 32 位传。
+user32.SetWindowPos.restype = wintypes.BOOL
+user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+user32.GetParent.restype = wintypes.HWND
+user32.GetParent.argtypes = [wintypes.HWND]
+
+SWP_NOMOVE = 0x0002
+SWP_NOZORDER = 0x0004
+SWP_NOACTIVATE = 0x0010
 
 
 # 本脚本要跨进程核对窗口坐标（分隔条位置、面板大小），必须和 notepadcc.exe 待在同一个
@@ -163,6 +173,8 @@ SCI_SETRECTANGULARSELECTIONANCHOR = 2590
 SCI_SETRECTANGULARSELECTIONCARET = 2588
 SC_SEL_RECTANGLE = 1
 LVM_GETITEMCOUNT = 0x1004
+LVM_GETBKCOLOR = 0x1000
+LVM_GETHEADER = 0x101F
 
 CMD_FIND = (3 << 12) | 1            # CmdCategory::Search, index 1
 CMD_FIND_IN_FILES = (3 << 12) | 5   # index 5
@@ -181,6 +193,13 @@ PANEL_LIST = 710
 PANEL_REPLACE_EDIT = 712
 PANEL_REPLACE_PREVIEW = 713
 PANEL_APPLY = 714
+PANEL_CASE = 704
+PANEL_WORD = 705
+PANEL_REGEX = 706
+PANEL_STOP = 708
+PANEL_CLOSE = 709
+PANEL_STATUS = 711
+PANEL_SCROLL_CORNER = 715
 
 CMD_REPLACE_IN_FILES = (3 << 12) | 10
 CMD_COLUMN_EDIT = (2 << 12) | 7
@@ -236,14 +255,6 @@ CMD_TOOL_COMPARE_DISK = (14 << 12) | 37
 CMD_WINDOW_NEXT = (11 << 12) | 1
 CMD_WINDOW_PREV = (11 << 12) | 2
 CMD_VIEW_JSON_TREE = (4 << 12) | 25
-# ---- 许可证对话框（B9）----
-CMD_HELP_LICENSE = (12 << 12) | 0x020     # 帮助 → 许可证…
-LICENSE_DIALOG_CLASS = "notepadccLicenseDialog"
-LICENSE_STATUS = 1501                    # 状态文本（试用 / 已激活 / 宽限）
-LICENSE_IMPORT_PATH = 1531               # 导入文件路径
-LICENSE_IMPORT = 1533                    # 导入按钮
-LICENSE_IMPORT_HINT = 1534               # 导入结果 / 失败原因
-LICENSE_CLOSE = 1540                     # 关闭
 BM_CLICK = 0x00F5
 # JSON 树与 XML 树共用同一块面板（M3 第七块把面板并成了"结构树"）
 STRUCTURE_TREE_CLASS = "notepadccStructureTree"
@@ -304,6 +315,7 @@ SCRIPT_COMMAND_BASE = (14 << 12) | 128      # 脚本条目：<配置根>\scripts
 # 远程站点浏览框 / 站点编辑器（自绘窗口类，不是 #32770；控件号与 src/shell 里一致）
 REMOTE_BROWSE_CLASS = "notepadccRemoteBrowse"
 REMOTE_SITES_CLASS = "notepadccRemoteSites"
+MESSAGE_DIALOG_CLASS = "notepadccMessageDialog"
 REMOTE_SITE = 1801
 REMOTE_PATH_TEXT = 1802
 REMOTE_STATUS = 1803
@@ -347,9 +359,11 @@ COLUMN_INSERT_BUTTON = 758
 
 PREF_TAB = 1000
 PREF_RESTORE_SESSION = 1001
+PREF_RECENT_COUNT = 1002
 PREF_TAB_WIDTH = 1010
 PREF_SHOW_LINE_NUMBERS = 1016
 PREF_OK = 1060
+SHORTCUT_DIALOG_CLASS = "notepadccShortcutDialog"
 
 SH_FILTER_EDIT = 1101
 SH_LIST = 1102
@@ -423,10 +437,13 @@ CMD_SETTINGS_CONTEXT_MENU = (7 << 12) | 7     # 设置 → 自定义右键菜单
 # ---- 现代 chrome（M3 第十四块）----
 TAB_CLASS = "notepadccTabBar"
 TAB_MSG_ACTIVE_TAB_CENTER_X = 0x8000 + 70     # TabBar::kMsgActiveTabCenterX
-CHROME_LIGHT = {"strip": 0xF3F3F3, "line": 0xD8D8D8, "tab": 0xFFFFFF, "accent": 0x0F6CBD,
-                "checked": 0xDAE9F8, "statusText": 0x444444}
-CHROME_DARK = {"strip": 0x272727, "line": 0x3E3E3E, "tab": 0x1E1E1E, "accent": 0x60CDFF,
-               "checked": 0x1E3D57}
+MENUBAR_CLASS = "notepadccMenuBar"
+MSG_MENU_HANDLE = 0x8000 + 20                 # core::kMsgMenuHandle
+CHROME_LIGHT = {"menuBar": 0xFFFFFF, "strip": 0xF5F6F8, "line": 0xE3E6EB,
+                "tab": 0xFFFFFF, "accent": 0x2563EB, "checked": 0xE8EFFD,
+                "statusText": 0x3F4652}
+CHROME_DARK = {"menuBar": 0x1B1D21, "strip": 0x202226, "line": 0x35383F,
+               "tab": 0x17191C, "accent": 0x60A5FA, "checked": 0x233A5C}
 CONTEXTMENU_DIALOG_CLASS = "notepadccContextMenuCustomize"
 POPUP_MENU_CLASS = "#32768"                   # TrackPopupMenu 弹出的菜单窗口类
 MN_GETHMENU = 0x01E1                          # 向菜单窗口要 HMENU（菜单是内核对象，跨进程可用）
@@ -667,6 +684,28 @@ class WindowPixels:
         return found
 
 
+def sample_child_pixel(window, child, x, y):
+    """取主窗口快照里某个子窗口客户区的一像素；快照失败时返回 None。"""
+    pixels = WindowPixels(window)
+    if not pixels.printed:
+        pixels.close()
+        return None
+    try:
+        return pixels.child_pixel(child, x, y)
+    finally:
+        pixels.close()
+
+
+def wait_for_child_pixel(window, child, x, y, want, timeout=6.0):
+    """等主题重画落到某个像素上。主题切换是异步投递的，立刻取色会偶发拿到旧值。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if sample_child_pixel(window, child, x, y) == want:
+            return True
+        time.sleep(0.2)
+    return False
+
+
 def set_text(hwnd, control_id, text):
     control = user32.GetDlgItem(hwnd, control_id)
     if not control:
@@ -902,6 +941,12 @@ def find_message_button(box, command_id):
     return None
 
 
+def find_message_dialog(title):
+    """找系统 MessageBox 或程序自绘消息框；两套外壳都还在用。"""
+    return (user32.FindWindowW("#32770", title) or
+            user32.FindWindowW(MESSAGE_DIALOG_CLASS, title))
+
+
 def dismiss_dialog(title, command_id, timeout=6.0, quiet=False):
     """确认框是模态的，脚本必须替用户点掉，否则后面的断言都无从谈起。
 
@@ -915,16 +960,16 @@ def dismiss_dialog(title, command_id, timeout=6.0, quiet=False):
     def gone(after):
         limit = time.time() + after
         while time.time() < limit:
-            if not user32.FindWindowW("#32770", title):
+            if not find_message_dialog(title):
                 time.sleep(0.2)
                 return True
             time.sleep(0.1)
-        return not user32.FindWindowW("#32770", title)
+        return not find_message_dialog(title)
 
     key = 0x0D if command_id in (IDOK, IDYES) else 0x1B   # VK_RETURN / VK_ESCAPE
     deadline = time.time() + timeout
     while time.time() < deadline:
-        dialog = user32.FindWindowW("#32770", title)
+        dialog = find_message_dialog(title)
         if not dialog:
             time.sleep(0.2)
             continue
@@ -1143,6 +1188,19 @@ def remove_log_with_retry(root, timeout=8.0):
         except PermissionError:
             time.sleep(0.3)
     return log_path
+
+
+def read_text_with_retry(path, timeout=5.0):
+    """读取刚生成、可能正被外部浏览器短暂持有的文本文件。"""
+    deadline = time.time() + timeout
+    while True:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                return handle.read()
+        except PermissionError:
+            if time.time() >= deadline:
+                raise
+            time.sleep(0.2)
 
 
 def test_large_file(root):
@@ -3329,7 +3387,7 @@ def test_portable_package(root):
     """
     script = os.path.join(root, "scripts", "package.ps1")
     result = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", script,
-                             "-NoBuild"],
+                             "-NoBuild", "-Toolchain", "mingw", "-BuildDir", "build"],
                             capture_output=True, text=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
         print(f"  FAIL: 打包脚本失败\n{result.stdout[-400:]}\n{result.stderr[-400:]}")
@@ -3349,10 +3407,14 @@ def test_portable_package(root):
     with zipfile.ZipFile(zip_path) as archive:
         names = archive.namelist()
         archive.extractall(target)
-    for required in ("notepadcc.exe", "portable", "说明.txt"):
+        license_text = archive.read("LICENSE.txt").decode("utf-8")
+    for required in ("notepadcc.exe", "portable", "说明.txt", "LICENSE.txt", "源代码说明.txt"):
         if required not in names:
             print(f"  FAIL: 便携包里缺少 {required}，实际内容 {names}")
             return False
+    if "GNU GENERAL PUBLIC LICENSE" not in license_text:
+        print("  FAIL: 便携包里的 LICENSE.txt 不是 GNU GPL 正文")
+        return False
 
     exe = os.path.join(target, "notepadcc.exe")
     sample = os.path.join(target, "示例.txt")
@@ -4518,7 +4580,81 @@ def test_find_bar(main_window, root):
     if not status or "匹配" not in status:
         print(f"  FAIL: 查找栏状态异常 {status!r}")
         return False
-    print(f"  查找栏：命中 {selected!r} @ 字节 {start}，{status}")
+
+    combo = user32.GetDlgItem(find_bar, 903)
+    if not combo or window_text(combo) != "普通":
+        print(f"  FAIL: 查找模式组合框读回 {window_text(combo) if combo else '（缺失）'!r}"
+              "（owner-draw 必须带 CBS_HASSTRINGS）")
+        return False
+
+    original = window_rect(main_window)
+    original_height = max(original[3] - original[1], 800)
+    toggled_dark = False
+    try:
+        bar_rect = window_rect(find_bar)
+        bar_width = bar_rect[2] - bar_rect[0]
+        current_bg = sample_child_pixel(main_window, find_bar, bar_width - 4, 2)
+        if current_bg == CHROME_LIGHT["strip"]:
+            user32.PostMessageW(main_window, WM_COMMAND, CMD_VIEW_DARK_MODE, 0)
+            toggled_dark = True
+        elif current_bg != CHROME_DARK["strip"]:
+            print(f"  FAIL: 查找栏初始底色既不是浅色也不是深色："
+                  f"{'采不到像素' if current_bg is None else '#%06X' % current_bg}")
+            return False
+        if not wait_for_child_pixel(main_window, find_bar, bar_width - 4, 2,
+                                    CHROME_DARK["strip"]):
+            print(f"  FAIL: 深色下查找栏底色应为 #{CHROME_DARK['strip']:06X}")
+            return False
+
+        edit = user32.GetDlgItem(find_bar, CTRL_FIND_EDIT)
+        edit_rect = window_rect(edit)
+        edit_width = edit_rect[2] - edit_rect[0]
+        edit_height = edit_rect[3] - edit_rect[1]
+        if not wait_for_child_pixel(main_window, edit, max(4, edit_width - 8),
+                                    edit_height // 2, CHROME_DARK["tab"]):
+            print(f"  FAIL: 深色下查找输入框底色应为 #{CHROME_DARK['tab']:06X}")
+            return False
+
+        for width in (960, 620):
+            user32.SetWindowPos(main_window, None, original[0], original[1], width,
+                                original_height, SWP_NOZORDER | SWP_NOACTIVATE)
+            time.sleep(0.9)
+            bar_rect = window_rect(find_bar)
+            tab_rect = window_rect(find_child(main_window, TAB_CLASS))
+            status_rect = window_rect(find_child(main_window, STATUS_CLASS))
+            if bar_rect[1] < tab_rect[3] or bar_rect[3] > status_rect[1] + 1:
+                print(f"  FAIL: {width} 宽时查找栏压到标签栏或状态栏：{bar_rect}")
+                return False
+            for child in children(find_bar):
+                if user32.GetParent(child) != find_bar or not user32.IsWindowVisible(child):
+                    continue
+                rect = window_rect(child)
+                if (rect[0] < bar_rect[0] or rect[1] < bar_rect[1] or
+                        rect[2] > bar_rect[2] or rect[3] > bar_rect[3]):
+                    print(f"  FAIL: {width} 宽时查找栏控件 {user32.GetDlgCtrlID(child)} "
+                          f"跑到面板外：{rect} / {bar_rect}")
+                    return False
+            for control_id, text, minimum_width in (
+                    (904, "区分大小写", 104), (905, "全字匹配", 104),
+                    (906, ".匹配换行", 104), (907, "上一个", 60),
+                    (908, "下一个", 60), (909, "计数", 60),
+                    (910, "标记", 60), (911, "关闭", 60)):
+                control = user32.GetDlgItem(find_bar, control_id)
+                rect = window_rect(control)
+                if window_text(control) != text or rect[2] - rect[0] < minimum_width:
+                    print(f"  FAIL: {width} 宽时控件 {control_id} 文字 {window_text(control)!r} "
+                          f"宽 {rect[2] - rect[0]}，至少需要 {minimum_width}")
+                    return False
+    finally:
+        user32.SetWindowPos(main_window, None, original[0], original[1],
+                            original[2] - original[0], original[3] - original[1],
+                            SWP_NOZORDER | SWP_NOACTIVATE)
+        if toggled_dark:
+            user32.PostMessageW(main_window, WM_COMMAND, CMD_VIEW_DARK_MODE, 0)
+            time.sleep(0.8)
+
+    print(f"  查找栏：命中 {selected!r} @ 字节 {start}，{status}；"
+          "深色底色/输入框与 960/620 宽布局通过")
     return True
 
 
@@ -4549,15 +4685,15 @@ def test_search_panel(main_window, root):
 
     rows = 0
     status = ""
+    status_control = user32.GetDlgItem(panel, PANEL_STATUS)
+    if not status_control:
+        print("  FAIL: 找不到搜索状态栏")
+        return False
     deadline = time.time() + 30
     while time.time() < deadline:
         time.sleep(0.5)
         rows = user32.SendMessageW(list_view, LVM_GETITEMCOUNT, 0, 0)
-        status = ""
-        for child in children(panel):
-            if class_name(child) == "Static":
-                status = window_text(child)
-                break
+        status = window_text(status_control)
         if status.startswith("完成") or status.startswith("已取消"):
             break
 
@@ -4571,6 +4707,110 @@ def test_search_panel(main_window, root):
     if "命中 0 处" in status:
         print("  FAIL: 状态显示零命中，但列表里有行")
         return False
+
+    original = window_rect(main_window)
+    original_height = max(original[3] - original[1], 1200)
+    toggled_dark = False
+    try:
+        panel_rect = window_rect(panel)
+        panel_width = panel_rect[2] - panel_rect[0]
+        current_bg = sample_child_pixel(main_window, panel, panel_width - 4, 2)
+        if current_bg == CHROME_LIGHT["strip"]:
+            user32.PostMessageW(main_window, WM_COMMAND, CMD_VIEW_DARK_MODE, 0)
+            toggled_dark = True
+        elif current_bg != CHROME_DARK["strip"]:
+            print(f"  FAIL: 搜索面板初始底色既不是浅色也不是深色："
+                  f"{'采不到像素' if current_bg is None else '#%06X' % current_bg}")
+            return False
+        if not wait_for_child_pixel(main_window, panel, panel_width - 4, 2,
+                                    CHROME_DARK["strip"]):
+            print(f"  FAIL: 深色下搜索面板底色应为 #{CHROME_DARK['strip']:06X}")
+            return False
+
+        header = send_bounded(list_view, LVM_GETHEADER, 0, 0)
+        if not header:
+            print("  FAIL: 找不到结果列表表头")
+            return False
+        header_rect = window_rect(header)
+        header_width = header_rect[2] - header_rect[0]
+        header_height = header_rect[3] - header_rect[1]
+        if not wait_for_child_pixel(main_window, header, max(4, header_width - 30),
+                                    header_height // 2, CHROME_DARK["strip"]):
+            print(f"  FAIL: 深色下表头不应留系统白底（应为 "
+                  f"#{CHROME_DARK['strip']:06X}）")
+            return False
+
+        list_background = user32.SendMessageW(list_view, LVM_GETBKCOLOR, 0, 0)
+        if list_background != to_colorref(CHROME_DARK["tab"]):
+            print(f"  FAIL: 列表背景色应为 #{CHROME_DARK['tab']:06X}，"
+                  f"实际 0x{list_background & 0xFFFFFFFF:06X}")
+            return False
+
+        time.sleep(0.6)
+        corner = user32.GetDlgItem(panel, PANEL_SCROLL_CORNER)
+        if not corner or not user32.IsWindowVisible(corner):
+            print("  FAIL: 结果列表有双向滚动条时，滚动角覆盖层不可见")
+            return False
+        corner_rect = window_rect(corner)
+        corner_width = corner_rect[2] - corner_rect[0]
+        corner_height = corner_rect[3] - corner_rect[1]
+        if not wait_for_child_pixel(main_window, corner, corner_width // 2,
+                                    corner_height // 2, CHROME_DARK["tab"]):
+            print(f"  FAIL: 滚动角应盖成列表底色 #{CHROME_DARK['tab']:06X}")
+            return False
+
+        for width in (960, 620):
+            user32.SetWindowPos(main_window, None, original[0], original[1], width,
+                                original_height, SWP_NOZORDER | SWP_NOACTIVATE)
+            time.sleep(0.9)
+            panel_rect = window_rect(panel)
+            tab_rect = window_rect(find_child(main_window, TAB_CLASS))
+            status_rect = window_rect(find_child(main_window, STATUS_CLASS))
+            if panel_rect[1] < tab_rect[3] or panel_rect[3] > status_rect[1] + 1:
+                print(f"  FAIL: {width} 宽时搜索面板越过标签栏或状态栏："
+                      f"面板 {panel_rect}，标签栏底 {tab_rect[3]}，状态栏顶 {status_rect[1]}")
+                return False
+            for child in children(panel):
+                if user32.GetParent(child) != panel or not user32.IsWindowVisible(child):
+                    continue
+                rect = window_rect(child)
+                if (rect[0] < panel_rect[0] or rect[1] < panel_rect[1] or
+                        rect[2] > panel_rect[2] or rect[3] > panel_rect[3]):
+                    print(f"  FAIL: {width} 宽时搜索面板控件 "
+                          f"{user32.GetDlgCtrlID(child)} 跑到面板外：{rect} / {panel_rect}")
+                    return False
+            start = user32.GetDlgItem(panel, PANEL_START)
+            start_rect = window_rect(start)
+            if (window_text(start) != "在文件中查找" or
+                    start_rect[2] - start_rect[0] < 110):
+                print(f"  FAIL: {width} 宽时「在文件中查找」按钮宽 "
+                      f"{start_rect[2] - start_rect[0]}，文字 {window_text(start)!r}")
+                return False
+            for control_id, text in ((PANEL_CASE, "区分大小写"), (PANEL_WORD, "全字匹配"),
+                                     (PANEL_REGEX, "正则")):
+                control = user32.GetDlgItem(panel, control_id)
+                control_rect = window_rect(control)
+                if (window_text(control) != text or
+                        control_rect[2] - control_rect[0] < 104):
+                    print(f"  FAIL: {width} 宽时复选框 {control_id} 文字 "
+                          f"{window_text(control)!r} 宽 {control_rect[2] - control_rect[0]}")
+                    return False
+            list_rect = window_rect(list_view)
+            if list_rect[3] - list_rect[1] < 50:
+                print(f"  FAIL: {width} 宽时列表只剩 {list_rect[3] - list_rect[1]} 像素高")
+                return False
+            if not window_text(status_control).startswith("完成"):
+                print(f"  FAIL: {width} 宽时状态文字丢失：{window_text(status_control)!r}")
+                return False
+    finally:
+        user32.SetWindowPos(main_window, None, original[0], original[1],
+                            original[2] - original[0], original[3] - original[1],
+                            SWP_NOZORDER | SWP_NOACTIVATE)
+        if toggled_dark:
+            user32.PostMessageW(main_window, WM_COMMAND, CMD_VIEW_DARK_MODE, 0)
+            time.sleep(0.8)
+
+    print("  搜索面板：深色表头/列表/滚动角与输入框，960/620 宽布局通过")
     return True
 
 
@@ -4664,8 +4904,6 @@ def run():
         failed = True
     if not test_dialog_localization(root):
         failed = True
-    if not test_license_dialog(root):
-        failed = True
     if not test_compare(root):
         failed = True
     if not test_json_tree(root):
@@ -4705,7 +4943,7 @@ def run():
           "编码转换 + 单实例 + 工具菜单 + 语言定义 + 样式方案 + UDL + 暗色模式 + "
           "宏 + 文件夹工作区 + 函数列表 + 导出与打印 + 插件宿主 + JSON/XML 格式化 + "
           "运行命令 + 界面语言 + 十六进制查看 + 复制为富文本 + Markdown 预览 + 对话框文案 + "
-          "许可证对话框 + 比较 + JSON 树视图 + 括号匹配与摘要与全屏 + 工具栏 + 右键菜单定制 + 自动完成 + "
+          "比较 + JSON 树视图 + 括号匹配与摘要与全屏 + 工具栏 + 右键菜单定制 + 自动完成 + "
           "文件关联 + "
           "文件类型识别与 MIME 工具 + 护眼模式 + XML 树视图与校验 + XPath 查询 + "
           "自动更新检查 + 远程编辑（FTP/SFTP 站点）+ 脚本插件 + T3 自绘视口 + 绿色打包 + "
@@ -4770,6 +5008,62 @@ def test_modern_chrome(root):
             time.sleep(0.2)
         return False
 
+    def open_business_dialog(command, class_name):
+        """从主窗口发命令，等模态对话框出现并且主窗口真的被禁用。"""
+        user32.PostMessageW(window, WM_COMMAND, command, 0)
+        deadline = time.time() + 8.0
+        while time.time() < deadline:
+            dialog = user32.FindWindowW(class_name, None)
+            if dialog and user32.IsWindowVisible(dialog):
+                wait_disabled(dialog)
+                time.sleep(0.7)   # 等首帧和自绘控件都画完
+                return dialog
+            time.sleep(0.2)
+        return None
+
+    def close_business_dialog(dialog, class_name, command_id):
+        user32.PostMessageW(dialog, WM_COMMAND, command_id, 0)
+        deadline = time.time() + 8.0
+        while time.time() < deadline:
+            if not user32.FindWindowW(class_name, None):
+                time.sleep(0.3)
+                return True
+            time.sleep(0.2)
+        return not user32.FindWindowW(class_name, None)
+
+    def check_dialog_pixels(dialog, checks):
+        """对对话框自己的 PrintWindow 快照核对一组像素。
+
+        主题切换后系统控件的重画是异步的：对话框首帧已经出现时，某个 Edit
+        可能还会用父窗口底色多画一帧。这里在短时间内反复取整张快照，只有
+        所有采样点都稳定到期望值才通过；持久错误的配色仍会失败。
+        """
+        deadline = time.time() + 4.0
+        while True:
+            pixels = WindowPixels(dialog)
+            if not pixels.printed:
+                pixels.close()
+                print("  FAIL: 业务对话框 PrintWindow 拿不到像素")
+                return False
+            mismatches = []
+            try:
+                for label, control, x, y, want in checks:
+                    got = pixels.child_pixel(control, x, y)
+                    if got != want:
+                        shown = "采不到像素" if got is None else f"#{got:06X}"
+                        mismatches.append(
+                            f"  FAIL: {label}应当是 #{want:06X}，实际 {shown}"
+                            f"（{class_name(control)} 客户区 ({x},{y})）")
+            finally:
+                pixels.close()
+            if not mismatches:
+                return True
+            if time.time() >= deadline:
+                for mismatch in mismatches:
+                    print(mismatch)
+                return False
+            time.sleep(0.2)
+
     def text_ink(pixels, control, x, y, half_width, half_height, background):
         """数一块矩形里"不是底色与分隔线"的像素：自绘的文字/角标到底画上没有。"""
         found = 0
@@ -4790,18 +5084,27 @@ def test_modern_chrome(root):
             print("  FAIL: 找不到主窗口")
             return False
         tabbar = find_child(window, TAB_CLASS)
+        menubar = find_child(window, MENUBAR_CLASS)
         toolbar = find_child(window, TOOLBAR_CONTROL_CLASS)
         statusbar = find_child(window, STATUS_CLASS)
         scinti = visible_scintilla(window)
-        for label, handle in (("标签栏", tabbar), ("工具栏", toolbar),
+        for label, handle in (("菜单栏", menubar), ("标签栏", tabbar), ("工具栏", toolbar),
                               ("状态栏", statusbar), ("编辑控件", scinti)):
             if not handle:
                 print(f"  FAIL: 主窗口里找不到{label}")
                 return False
 
         tab_width, tab_height = client_size(tabbar)
+        menu_width, menu_height = client_size(menubar)
         bar_width, bar_height = client_size(toolbar)
         stat_width, stat_height = client_size(statusbar)
+        if menu_height < 20:
+            print(f"  FAIL: 自绘菜单栏高度只有 {menu_height} 像素")
+            return False
+        menu_visible_text = window_text(menubar)
+        if "文件" not in menu_visible_text or "编辑" not in menu_visible_text:
+            print(f"  FAIL: 自绘菜单栏没有读出「文件 / 编辑」，实际 {menu_visible_text!r}")
+            return False
 
         # ---- 0) 状态栏真的占着一条位置：编辑区不许盖到它头上 ----
         # 老实现的 Height() 拿 WM_SIZE 的返回值，实测恒为 0：编辑区一路铺到底，
@@ -4845,10 +5148,15 @@ def test_modern_chrome(root):
                     tabbar, center, tab_height - 1 - underline) == CHROME_LIGHT["accent"]:
                 underline += 1
             if underline < 1:
-                print("  FAIL: 当前标签底下没有强调色下划线（浅色应当是 #0F6CBD）")
+                print(f"  FAIL: 当前标签底下没有强调色下划线（浅色应当是 "
+                      f"#{CHROME_LIGHT['accent']:06X}）")
                 return False
             body_y = tab_height - underline - 3
             checks = [
+                ("自绘菜单栏的底色", menubar, menu_width - 8, 3,
+                 CHROME_LIGHT["menuBar"]),
+                ("自绘菜单栏的底边细线", menubar, menu_width - 8, menu_height - 1,
+                 CHROME_LIGHT["line"]),
                 ("当前标签的底色（与编辑区连成一片）", tabbar, 3, body_y,
                  CHROME_LIGHT["tab"]),
                 ("标签栏空白处的底色", tabbar, tab_width - 8, 4, CHROME_LIGHT["strip"]),
@@ -4895,7 +5203,8 @@ def test_modern_chrome(root):
         # ---- 2) 切暗色：三块 chrome 一起换成暗色那一套 ----
         user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_DARK_MODE, 0)
         if not wait_theme(tabbar, center, tab_height - 1, CHROME_DARK["accent"]):
-            print("  FAIL: 切到暗色之后标签栏下划线没有变成暗色强调色 #60CDFF")
+            print(f"  FAIL: 切到暗色之后标签栏下划线没有变成暗色强调色 "
+                  f"#{CHROME_DARK['accent']:06X}")
             return False
         pixels = snapshot()
         if pixels is None:
@@ -4903,6 +5212,10 @@ def test_modern_chrome(root):
             return False
         try:
             checks = [
+                ("自绘菜单栏的底色", menubar, menu_width - 8, 3,
+                 CHROME_DARK["menuBar"]),
+                ("自绘菜单栏的底边细线", menubar, menu_width - 8, menu_height - 1,
+                 CHROME_DARK["line"]),
                 ("当前标签的底色", tabbar, 3, tab_height - underline - 3, CHROME_DARK["tab"]),
                 ("标签栏空白处的底色", tabbar, tab_width - 8, 4, CHROME_DARK["strip"]),
                 ("标签栏右侧那条底边细线", tabbar, tab_width - 8, tab_height - 1,
@@ -4929,7 +5242,8 @@ def test_modern_chrome(root):
             ink = pixels.count_in_rect(toolbar, dark_x, bar_height // 2, 18,
                                        max(4, bar_height // 2 - 6), CHROME_DARK["accent"])
             if ink < 4:
-                print(f"  FAIL: 勾上的工具栏按钮图标应当是强调色 #60CDFF，只数到 {ink} 个像素")
+                print(f"  FAIL: 勾上的工具栏按钮图标应当是强调色 "
+                      f"#{CHROME_DARK['accent']:06X}，只数到 {ink} 个像素")
                 return False
 
             # 标题栏跟着深浅走（DWM 的深色标题栏属性，Win10 2004+/Win11 才有）
@@ -4944,10 +5258,68 @@ def test_modern_chrome(root):
         finally:
             pixels.close()
 
+        # ---- 2b) 业务对话框也走同一套四主题（M3 第十七块） ----
+        # 首选项：窗口底、复选框底、输入框底与默认按钮的强调色。这里用
+        # PrintWindow 直接读对话框自己的像素，而不是只看控件属性有没有设上。
+        prefs = open_business_dialog(CMD_PREFERENCES, PREF_DIALOG_CLASS)
+        if prefs is None:
+            print("  FAIL: 暗色下首选项对话框没有出现")
+            return False
+        try:
+            prefs_width, prefs_height = client_size(prefs)
+            restore = user32.GetDlgItem(prefs, PREF_RESTORE_SESSION)
+            recent = user32.GetDlgItem(prefs, PREF_RECENT_COUNT)
+            ok_button = user32.GetDlgItem(prefs, PREF_OK)
+            check_width, check_height = client_size(restore)
+            recent_width, recent_height = client_size(recent)
+            ok_width, ok_height = client_size(ok_button)
+            dialog_checks = [
+                ("首选项窗口底色", prefs, prefs_width - 5, prefs_height - 5,
+                 CHROME_DARK["strip"]),
+                ("首选项复选框底色", restore, check_width - 5, check_height // 2,
+                 CHROME_DARK["strip"]),
+                ("首选项输入框底色", recent, recent_width - 8, recent_height // 2,
+                 CHROME_DARK["tab"]),
+                ("首选项默认按钮", ok_button, 8, ok_height // 2, CHROME_DARK["accent"]),
+            ]
+            if not check_dialog_pixels(prefs, dialog_checks):
+                return False
+        finally:
+            if not close_business_dialog(prefs, PREF_DIALOG_CLASS, PREF_CANCEL):
+                print("  FAIL: 首选项对话框关不掉")
+                return False
+
+        # 快捷键管理：窗口底、列表底（LVM_SETBKCOLOR 与父窗口 WM_CTLCOLOR 一起生效）
+        # 和默认按钮。列表右侧留出滚动条宽度，避免把系统滚动条误当列表底。
+        shortcuts = open_business_dialog(CMD_SHORTCUTS, SHORTCUT_DIALOG_CLASS)
+        if shortcuts is None:
+            print("  FAIL: 暗色下快捷键管理对话框没有出现")
+            return False
+        try:
+            shortcut_width, shortcut_height = client_size(shortcuts)
+            shortcut_list = user32.GetDlgItem(shortcuts, SH_LIST)
+            shortcut_ok = user32.GetDlgItem(shortcuts, SH_OK)
+            list_width, list_height = client_size(shortcut_list)
+            shortcut_ok_width, shortcut_ok_height = client_size(shortcut_ok)
+            dialog_checks = [
+                ("快捷键窗口底色", shortcuts, shortcut_width - 5, shortcut_height - 5,
+                 CHROME_DARK["strip"]),
+                ("快捷键列表底色", shortcut_list, list_width - 30, list_height // 2,
+                 CHROME_DARK["tab"]),
+                ("快捷键默认按钮", shortcut_ok, 8, shortcut_ok_height // 2,
+                 CHROME_DARK["accent"]),
+            ]
+            if not check_dialog_pixels(shortcuts, dialog_checks):
+                return False
+        finally:
+            if not close_business_dialog(shortcuts, SHORTCUT_DIALOG_CLASS, SH_CANCEL):
+                print("  FAIL: 快捷键管理对话框关不掉")
+                return False
+
         # ---- 3) 切回浅色：像素回到浅色那一套（证明切换会重画，不是只改了配置） ----
         user32.PostMessageW(window, WM_COMMAND, CMD_VIEW_DARK_MODE, 0)
         if not wait_theme(tabbar, center, tab_height - 1, CHROME_LIGHT["accent"]):
-            print("  FAIL: 切回浅色之后下划线没有回到 #0F6CBD")
+            print(f"  FAIL: 切回浅色之后下划线没有回到 #{CHROME_LIGHT['accent']:06X}")
             return False
         pixels = snapshot()
         if pixels is None:
@@ -4962,6 +5334,69 @@ def test_modern_chrome(root):
                 return False
         finally:
             pixels.close()
+
+        # 切回浅色后再看一次首选项：自绘按钮/输入框在浅色下不能退回系统灰。
+        prefs = open_business_dialog(CMD_PREFERENCES, PREF_DIALOG_CLASS)
+        if prefs is None:
+            print("  FAIL: 切回浅色后首选项对话框没有出现")
+            return False
+        try:
+            prefs_width, prefs_height = client_size(prefs)
+            recent = user32.GetDlgItem(prefs, PREF_RECENT_COUNT)
+            ok_button = user32.GetDlgItem(prefs, PREF_OK)
+            recent_width, recent_height = client_size(recent)
+            _, ok_height = client_size(ok_button)
+            dialog_checks = [
+                ("浅色首选项窗口底色", prefs, prefs_width - 5, prefs_height - 5,
+                 CHROME_LIGHT["strip"]),
+                ("浅色首选项输入框底色", recent, recent_width - 8, recent_height // 2,
+                 CHROME_LIGHT["tab"]),
+                ("浅色首选项默认按钮", ok_button, 8, ok_height // 2,
+                 CHROME_LIGHT["accent"]),
+            ]
+            if not check_dialog_pixels(prefs, dialog_checks):
+                return False
+        finally:
+            if not close_business_dialog(prefs, PREF_DIALOG_CLASS, PREF_CANCEL):
+                print("  FAIL: 浅色首选项对话框关不掉")
+                return False
+
+        # ---- 4) 作者标识与关于框：状态栏可见、单击能打开、三项字段逐字核对 ----
+        author = ""
+        deadline = time.time() + 4.0
+        while time.time() < deadline:
+            author = read_status_bar(window, 3) or ""
+            if author == "zzh · 人亨云恒":
+                break
+            time.sleep(0.2)
+        if author != "zzh · 人亨云恒":
+            print(f"  FAIL: 状态栏作者标识不对，实际 {author!r}")
+            return False
+        click_x = stat_width - 40
+        click_y = stat_height // 2
+        click_point = ((click_y << 16) | click_x) & 0xFFFFFFFF
+        user32.PostMessageW(statusbar, WM_LBUTTONDOWN, 1, click_point)
+        user32.PostMessageW(statusbar, WM_LBUTTONUP, 0, click_point)
+        about = None
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            about = find_message_dialog("关于 notepadcc")
+            if about:
+                break
+            time.sleep(0.2)
+        if not about:
+            print("  FAIL: 单击状态栏作者标识没有打开关于框")
+            return False
+        try:
+            about_text = "\n".join(window_text(child) for child in children(about))
+            for expected in ("姓名：zzh", "网络昵称：人亨云恒", "邮箱：16940454@qq.com"):
+                if expected not in about_text:
+                    print(f"  FAIL: 关于框缺少 {expected!r}，实际内容：\n{about_text}")
+                    return False
+        finally:
+            if not dismiss_dialog("关于 notepadcc", IDOK, timeout=6.0):
+                print("  FAIL: 关于框关不掉")
+                return False
     finally:
         if window:
             user32.PostMessageW(window, WM_CLOSE, 0, 0)
@@ -4970,7 +5405,8 @@ def test_modern_chrome(root):
         if proc.poll() is None:
             proc.kill()
 
-    print("  现代 chrome：下划线/三块平底色与分隔线/状态栏占位与文字/暗色两套配色逐像素核对通过")
+    print("  现代 chrome：下划线/三块平底色与分隔线/状态栏占位与文字/业务对话框"
+          "（首选项、快捷键）浅深两套配色逐像素核对通过")
     return True
 
 
@@ -5123,6 +5559,12 @@ def test_structured_format(root):
     return True
 
 
+def menu_handle(window):
+    """主菜单的 HMENU。自绘菜单栏不再把菜单挂到窗口上，走 kMsgMenuHandle 取同一份。"""
+    handle = send_bounded(window, MSG_MENU_HANDLE)
+    return handle if handle else 0
+
+
 def menu_texts(window):
     """把主菜单每个弹出菜单的**第一项**文本读回来（"首个可见项"是各菜单的代表）。
 
@@ -5131,7 +5573,7 @@ def menu_texts(window):
     读的是**真正挂在窗口上的菜单**，所以它反映的是程序此刻的界面语言，
     而不是配置文件里写了什么——这一点是这一段的核心。
     """
-    menu = user32.GetMenu(window)
+    menu = menu_handle(window)
     count = user32.GetMenuItemCount(menu)
     out = []
     for index in range(count):
@@ -5143,7 +5585,7 @@ def menu_texts(window):
 
 
 def menu_bar_titles(window):
-    menu = user32.GetMenu(window)
+    menu = menu_handle(window)
     count = user32.GetMenuItemCount(menu)
     out = []
     for index in range(count):
@@ -5155,7 +5597,7 @@ def menu_bar_titles(window):
 
 def menu_items(window, index):
     """某个弹出菜单里的全部可见项文本（分隔线读出来是空串）。"""
-    menu = user32.GetMenu(window)
+    menu = menu_handle(window)
     popup = user32.GetSubMenu(menu, index)
     count = user32.GetMenuItemCount(popup)
     out = []
@@ -5890,12 +6332,12 @@ def test_brace_summary_fullscreen(root):
             return False
 
         # ---- 4) 全屏（F11）：菜单栏收起来、铺满工作区、标题栏位摘掉；Esc 逐项还原 ----
-        menu_before = user32.GetMenu(window)
+        menu_before = menu_handle(window)
         rect_before = window_rect(window)
         style_before = user32.GetWindowLongPtrW(window, GWL_STYLE)
         user32.PostMessageW(window, WM_KEYDOWN, VK_F11, 0)
         time.sleep(1.2)
-        if user32.GetMenu(window):
+        if menu_handle(window):
             print("  FAIL: 全屏里菜单栏应当收起来")
             return False
         if window_rect(window) != work_area():
@@ -5907,7 +6349,7 @@ def test_brace_summary_fullscreen(root):
 
         user32.PostMessageW(window, WM_KEYDOWN, VK_ESCAPE, 0)
         time.sleep(1.2)
-        if user32.GetMenu(window) != menu_before:
+        if menu_handle(window) != menu_before:
             print("  FAIL: 退出全屏后菜单栏没有挂回来")
             return False
         if window_rect(window) != rect_before:
@@ -6110,7 +6552,7 @@ def test_toolbar(root):
             return False
 
         # ---- 3) 菜单栏里那一项的勾选态：WM_INITMENUPOPUP 之后按注册表刷出来 ----
-        menu_bar = user32.GetMenu(window)
+        menu_bar = menu_handle(window)
         popup = user32.GetSubMenu(menu_bar, MENU_INDEX_VIEW)
         send_bounded(window, WM_INITMENUPOPUP, popup, MENU_INDEX_VIEW)
         position = None
@@ -7001,249 +7443,6 @@ def test_dialog_localization(root):
     return True
 
 
-def test_license_dialog(root):
-    """许可证对话框（B9）：试用状态读回、导入即时生效、篡改拒绝覆盖。
-
-    这一段把对话框的控制台 ID 当作稳定接口：1501 读状态，1531 填文件，1533 点导入，
-    1534 读结果。有效许可从 tests/unit/LicenseFixtures.h 现场抽取——不复制一份会漂移的
-    固定件。导入之后直接逐字节核对 license.dat；再拿一个只改了签名内容的文件导入，
-    要求对话框明确报失败，并确认磁盘上的旧许可一个字节都没变。
-
-    菜单里 Pro 能力的门禁属于 A5（尚未接线），所以这里不伪造菜单可用性断言。
-    """
-    work = os.path.join(root, "build", "license_dialog_test")
-    os.makedirs(work, exist_ok=True)
-    cfg = os.path.join(root, "build", "bin", "config")
-    exe = os.path.join(root, "build", "bin", "notepadcc.exe")
-    target = os.path.join(work, "license_dialog.txt")
-    with open(target, "w", encoding="utf-8", newline="") as handle:
-        handle.write("license dialog smoke\n")
-
-    config_names = ("config.xml", "session.xml", "license.dat", "state.xml")
-    backup_dir = os.path.join(work, "backup")
-    shutil.rmtree(backup_dir, ignore_errors=True)
-    os.makedirs(backup_dir)
-    backups = {}
-    for name in config_names:
-        source = os.path.join(cfg, name)
-        backup = os.path.join(backup_dir, name)
-        backups[name] = os.path.exists(source)
-        if backups[name]:
-            shutil.copy2(source, backup)
-
-    registry_key = r"Software\notepadcc"
-    registry_existed = True
-    registry_value = None
-    registry_type = None
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, registry_key, 0, winreg.KEY_READ) as key:
-            try:
-                registry_value, registry_type = winreg.QueryValueEx(key, "FirstRun")
-            except FileNotFoundError:
-                pass
-    except FileNotFoundError:
-        registry_existed = False
-
-    window = None
-    dialog = None
-    proc = None
-    try:
-        fixture_path = os.path.join(root, "tests", "unit", "LicenseFixtures.h")
-        with open(fixture_path, "r", encoding="utf-8") as handle:
-            fixture_text = handle.read()
-        match = re.search(r'inline constexpr const char\* kLicensePro = R"lic\((.*?)\)lic";',
-                          fixture_text, re.S)
-        if not match:
-            print("  FAIL: LicenseFixtures.h 里找不到 kLicensePro 固定件")
-            return False
-        valid = match.group(1).encode("utf-8")
-        signature = re.search(rb"<Signature\b[^>]*>", valid)
-        if not signature or signature.end() >= len(valid):
-            print("  FAIL: 有效固定件里没有可篡改的签名内容")
-            return False
-        tampered = bytearray(valid)
-        offset = signature.end()
-        tampered[offset] = ord("A") if tampered[offset] != ord("A") else ord("B")
-
-        valid_lic = os.path.join(work, "valid.lic")
-        tampered_lic = os.path.join(work, "tampered.lic")
-        with open(valid_lic, "wb") as handle:
-            handle.write(valid)
-        with open(tampered_lic, "wb") as handle:
-            handle.write(tampered)
-
-        for name in config_names:
-            path = os.path.join(cfg, name)
-            if os.path.exists(path):
-                os.remove(path)
-        now = int(time.time())
-        state_path = os.path.join(cfg, "state.xml")
-        with open(state_path, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(
-                '<?xml version="1.0" encoding="utf-8"?>\n'
-                "<notepadcc-state>\n"
-                f'  <trial firstRunUtc="{now}" lastSeenUtc="{now}" '
-                'trialNoticeDismissed="no" graceNoticeDismissed="no"/>\n'
-                "</notepadcc-state>\n")
-        try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, registry_key, 0,
-                                winreg.KEY_SET_VALUE) as key:
-                try:
-                    winreg.DeleteValue(key, "FirstRun")
-                except FileNotFoundError:
-                    pass
-        except FileNotFoundError:
-            pass
-
-        proc = subprocess.Popen([exe, MULTI_INSTANCE, "-portable", target], cwd=root)
-        window = wait_for_main_window("notepadcc - license_dialog.txt")
-        if not window:
-            print("  FAIL: 找不到主窗口")
-            return False
-
-        user32.PostMessageW(window, WM_COMMAND, CMD_HELP_LICENSE, 0)
-        deadline = time.time() + 12.0
-        while time.time() < deadline:
-            dialog = user32.FindWindowW(LICENSE_DIALOG_CLASS, None)
-            if dialog:
-                break
-            time.sleep(0.1)
-        if not dialog:
-            print("  FAIL: 帮助 → 许可证没有弹出 notepadccLicenseDialog")
-            return False
-        wait_disabled(window)
-
-        def control_text(control_id):
-            control = user32.GetDlgItem(dialog, control_id)
-            return window_text(control) if control else ""
-
-        def wait_control(control_id, predicate, timeout=10.0):
-            last = ""
-            limit = time.time() + timeout
-            while time.time() < limit:
-                last = control_text(control_id)
-                if predicate(last):
-                    return last
-                time.sleep(0.1)
-            return last
-
-        status = wait_control(LICENSE_STATUS,
-                              lambda text: "试用中" in text and "还剩" in text)
-        if "试用中" not in status or "还剩" not in status:
-            print(f"  FAIL: 新开的试用状态没有读回来：{status!r}")
-            return False
-
-        if not set_text(dialog, LICENSE_IMPORT_PATH, valid_lic):
-            print("  FAIL: 填不进导入路径")
-            return False
-        import_button = user32.GetDlgItem(dialog, LICENSE_IMPORT)
-        if not import_button:
-            print("  FAIL: 找不到导入按钮")
-            return False
-        user32.PostMessageW(import_button, BM_CLICK, 0, 0)
-        activated = wait_control(
-            LICENSE_STATUS,
-            lambda text: "Pro" in text and "测试用户" in text and
-            "2030-01-01" in text and "已激活" in text,
-            timeout=12.0)
-        if not ("Pro" in activated and "测试用户" in activated and
-                "2030-01-01" in activated and "已激活" in activated):
-            print(f"  FAIL: 导入有效许可后状态没有即时变成已激活：{activated!r}")
-            return False
-
-        installed = os.path.join(cfg, "license.dat")
-        if not os.path.exists(installed):
-            print("  FAIL: 导入成功后配置目录里没有 license.dat")
-            return False
-        with open(installed, "rb") as handle:
-            installed_bytes = handle.read()
-        if installed_bytes != valid:
-            print(f"  FAIL: 落盘的许可与固定件不逐字节相同（{len(installed_bytes)} → "
-                  f"{len(valid)} 字节）")
-            return False
-
-        if not set_text(dialog, LICENSE_IMPORT_PATH, tampered_lic):
-            print("  FAIL: 填不进篡改件路径")
-            return False
-        user32.PostMessageW(import_button, BM_CLICK, 0, 0)
-        hint = wait_control(LICENSE_IMPORT_HINT,
-                            lambda text: "导入失败" in text, timeout=12.0)
-        if "导入失败" not in hint:
-            print(f"  FAIL: 篡改签名没有被拒绝，提示是：{hint!r}")
-            return False
-
-        still_active = control_text(LICENSE_STATUS)
-        if not ("已激活" in still_active and "测试用户" in still_active):
-            print(f"  FAIL: 拒绝篡改件后状态被改变了：{still_active!r}")
-            return False
-        with open(installed, "rb") as handle:
-            after_reject = handle.read()
-        if after_reject != valid:
-            print("  FAIL: 拒绝篡改件之后，磁盘上的旧许可被覆盖了")
-            return False
-
-        close_button = user32.GetDlgItem(dialog, LICENSE_CLOSE)
-        if close_button:
-            user32.PostMessageW(close_button, BM_CLICK, 0, 0)
-        else:
-            user32.PostMessageW(dialog, WM_CLOSE, 0, 0)
-        deadline = time.time() + 5.0
-        while time.time() < deadline and user32.FindWindowW(LICENSE_DIALOG_CLASS, None):
-            time.sleep(0.1)
-        if user32.FindWindowW(LICENSE_DIALOG_CLASS, None):
-            print("  FAIL: 许可证对话框关不掉")
-            return False
-    finally:
-        if dialog and user32.IsWindow(dialog):
-            user32.PostMessageW(dialog, WM_CLOSE, 0, 0)
-            time.sleep(0.5)
-        if window and user32.IsWindow(window):
-            user32.PostMessageW(window, WM_CLOSE, 0, 0)
-            time.sleep(1.5)
-        if proc is not None:
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
-        for name in config_names:
-            path = os.path.join(cfg, name)
-            if os.path.exists(path):
-                os.remove(path)
-            backup = os.path.join(backup_dir, name)
-            if backups[name] and os.path.exists(backup):
-                shutil.copy2(backup, path)
-
-        try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, registry_key, 0,
-                                winreg.KEY_SET_VALUE) as key:
-                if registry_value is None:
-                    try:
-                        winreg.DeleteValue(key, "FirstRun")
-                    except FileNotFoundError:
-                        pass
-                else:
-                    winreg.SetValueEx(key, "FirstRun", 0, registry_type, registry_value)
-        except FileNotFoundError:
-            if registry_value is not None:
-                with winreg.CreateKey(winreg.HKEY_CURRENT_USER, registry_key) as key:
-                    winreg.SetValueEx(key, "FirstRun", 0, registry_type, registry_value)
-
-        if not registry_existed:
-            try:
-                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, registry_key, 0,
-                                    winreg.KEY_READ | winreg.KEY_SET_VALUE) as key:
-                    subkeys, values, _ = winreg.QueryInfoKey(key)
-                if subkeys == 0 and values == 0:
-                    winreg.DeleteKey(winreg.HKEY_CURRENT_USER, registry_key)
-            except FileNotFoundError:
-                pass
-
-    print("  许可证对话框：试用状态读回、有效导入即时激活并逐字节落盘、"
-          "篡改签名被拒且旧许可未变")
-    return True
-
-
 def test_markdown_preview(root):
     """Markdown 预览：面板里渲染出来的**就是**解析结果，而且跟着改动实时更新。
 
@@ -7353,8 +7552,7 @@ def test_markdown_preview(root):
         if not generated:
             print("  FAIL: 浏览器预览没有生成 HTML 文件")
             return False
-        with open(generated, "r", encoding="utf-8", errors="replace") as handle:
-            html = handle.read()
+        html = read_text_with_retry(generated)
         for expected in ("<!DOCTYPE html>", "<h1>标题一</h1>", "<strong>粗</strong>",
                          "<a href=\"https://example.com\">链接</a>", "<hr>", "<blockquote>"):
             if expected not in html:

@@ -234,6 +234,11 @@ try {
     if (-not (Test-Path -LiteralPath $installedReadme)) {
         throw "安装完成但找不到 $installedReadme"
     }
+    foreach ($name in @("LICENSE.txt", "NOTICE.txt", "THIRD_PARTY_COMPONENTS.md", "源代码说明.txt")) {
+        if (-not (Test-Path -LiteralPath (Join-Path $testRoot $name))) {
+            throw "安装完成但缺少许可证材料：$name"
+        }
+    }
     if ((Get-Sha256 $installedExe) -ne $sourceHash) {
         throw "安装后的 notepadcc.exe 与构建产物哈希不一致"
     }
@@ -279,8 +284,12 @@ try {
                 Select-Object -First 1
     $adminReadme = Get-ChildItem -LiteralPath $adminRoot -Recurse -Filter "安装说明.txt" |
                    Select-Object -First 1
-    if (-not $adminExe -or -not $adminReadme) {
-        throw "整机包管理安装后没有找到程序与说明文件"
+    $adminLicense = Get-ChildItem -LiteralPath $adminRoot -Recurse -Filter "LICENSE.txt" |
+                    Select-Object -First 1
+    $adminSourceNotice = Get-ChildItem -LiteralPath $adminRoot -Recurse -Filter "源代码说明.txt" |
+                         Select-Object -First 1
+    if (-not $adminExe -or -not $adminReadme -or -not $adminLicense -or -not $adminSourceNotice) {
+        throw "整机包管理安装后没有找到程序、说明或许可证材料"
     }
     if ((Get-Sha256 $adminExe.FullName) -ne $sourceHash) {
         throw "整机包管理安装后的 notepadcc.exe 与构建产物哈希不一致"
@@ -291,7 +300,7 @@ try {
     $archive = [IO.Compression.ZipFile]::OpenRead($portableZip)
     try {
         $leaves = @($archive.Entries | ForEach-Object { [IO.Path]::GetFileName($_.FullName) })
-        foreach ($name in @("notepadcc.exe", "portable", "说明.txt")) {
+        foreach ($name in @("notepadcc.exe", "portable", "说明.txt", "LICENSE.txt", "源代码说明.txt")) {
             if ($leaves -notcontains $name) {
                 throw "绿色 zip 缺少 $name"
             }

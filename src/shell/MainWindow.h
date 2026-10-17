@@ -27,6 +27,7 @@
 #include "infra/UpdateService.h"
 #include "infra/ScriptRunner.h"
 #include "shell/StatusBar.h"
+#include "shell/MenuBar.h"
 #include "shell/TabBar.h"
 #include "shell/ToolBar.h"
 #include "shell/FolderPanel.h"
@@ -66,6 +67,9 @@ public:
     // 编辑控件拿着焦点，WM_KEYDOWN 根本送不到主窗口来，而把 Esc 绑成全局快捷键
     // 又会在非全屏时反过来触发全屏。返回 true 表示这个键已经被消化掉了。
     bool ExitFullScreenOnEscape();
+    // Alt：把焦点交给自绘菜单栏（消息循环里调用；编辑控件自己的 WM_SYSKEYDOWN
+    // 到不了主窗口）。全屏或菜单栏隐藏时返回 false。
+    bool ActivateMenuBar();
 
 private:
     static LRESULT CALLBACK WndProcThunk(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -325,15 +329,12 @@ private:
     bool OpenDocumentPath(const std::wstring& path);
     // 打开后留在 loadWarning 里的提示（二进制内容、混合行尾、大文件档）在状态栏露面一次
     void AnnounceActiveLoadWarning();
-    // B7：试用/宽限/时钟回拨的启动提示（设计 5.3 / 9 章），一次会话至多露面一次
-    void AnnounceLicenseNotice();
     void ApplyChromeTheme();
     void ApplyStyleSchemeToAllViews();
     void CommandAutoComplete();
     const edit::LanguageDef* ActiveLanguage() const;
     void WriteConvertBackup(const std::wstring& path) const;
     void CommandRegisterAssociations(bool registerThem);
-    void CommandLicense();
     void CommandAbout();
 
     // ---- 分屏 / 克隆视图（设计文档 6.3）----
@@ -388,6 +389,7 @@ private:
     bool externalChangePromptOpen_ = false;
     bool crashTest_ = false;
     std::unique_ptr<core::DocumentManager> documents_;
+    MenuBar                    menuBar_;
     TabBar                     tabBar_;
     FolderPanel                folderPanel_;
     FunctionListPanel          functionListPanel_;

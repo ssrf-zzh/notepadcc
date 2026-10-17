@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>notepadcc {{VERSION}} 下载</title>
+  <style>
+    :root {
+      --bg: #f6f7fb;
+      --surface: #ffffff;
+      --surface-soft: #eef2ff;
+      --text: #171a21;
+      --muted: #5d6472;
+      --line: #e3e6ec;
+      --accent: #2563eb;
+      --accent-2: #7c3aed;
+      --ok: #137a55;
+      --warn: #9a5b00;
+      --shadow: 0 20px 60px rgba(31, 41, 55, .10);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #101216;
+        --surface: #17191e;
+        --surface-soft: #1e2638;
+        --text: #f1f3f7;
+        --muted: #a3aab7;
+        --line: #2d3139;
+        --accent: #60a5fa;
+        --accent-2: #c084fc;
+        --ok: #68d3a7;
+        --warn: #f4bf69;
+        --shadow: 0 24px 70px rgba(0, 0, 0, .35);
+      }
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(900px 500px at 10% -10%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 65%),
+        radial-gradient(800px 500px at 100% 0%, color-mix(in srgb, var(--accent-2) 15%, transparent), transparent 60%),
+        var(--bg);
+      color: var(--text);
+      font: 15px/1.65 "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+      min-height: 100vh;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .wrap { width: min(1120px, calc(100% - 32px)); margin: 0 auto; }
+    header { padding: 28px 0 18px; }
+    .brand { display: flex; align-items: center; gap: 12px; font-weight: 650; letter-spacing: -.01em; }
+    .mark {
+      width: 34px; height: 34px; border-radius: 10px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      box-shadow: 0 8px 24px color-mix(in srgb, var(--accent) 35%, transparent);
+      position: relative;
+    }
+    .mark::before {
+      content: ""; position: absolute; inset: 10px 8px;
+      border-left: 2px solid white; border-right: 2px solid white; opacity: .95;
+    }
+    .mark::after {
+      content: ""; position: absolute; width: 2px; height: 14px; left: 16px; top: 10px;
+      background: white; transform: skewX(-18deg);
+    }
+    .hero { padding: 44px 0 28px; }
+    .eyebrow { color: var(--accent); font-weight: 650; letter-spacing: .08em; font-size: 12px; text-transform: uppercase; }
+    h1 { margin: 8px 0 12px; font-size: clamp(38px, 7vw, 68px); line-height: 1.04; letter-spacing: -.045em; }
+    h1 span { color: var(--muted); font-weight: 450; }
+    .lead { max-width: 760px; color: var(--muted); font-size: clamp(16px, 2vw, 19px); }
+    .pills { display: flex; flex-wrap: wrap; gap: 8px; margin: 22px 0 0; }
+    .pill {
+      padding: 5px 10px; border: 1px solid var(--line); border-radius: 999px;
+      background: color-mix(in srgb, var(--surface) 82%, transparent); color: var(--muted); font-size: 13px;
+    }
+    .pill.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--line)); }
+    .pill.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+    .grid { display: grid; grid-template-columns: 1.45fr .75fr; gap: 18px; align-items: start; }
+    .card {
+      background: color-mix(in srgb, var(--surface) 92%, transparent);
+      border: 1px solid var(--line); border-radius: 22px; box-shadow: var(--shadow);
+      backdrop-filter: blur(14px);
+    }
+    .downloads { padding: 10px; }
+    .download-row {
+      display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 14px;
+      align-items: center; padding: 15px; border-radius: 15px;
+    }
+    .download-row + .download-row { border-top: 1px solid var(--line); }
+    .download-row:hover { background: color-mix(in srgb, var(--surface-soft) 65%, transparent); }
+    .icon {
+      width: 42px; height: 42px; border-radius: 12px; display: grid; place-items: center;
+      background: var(--surface-soft); color: var(--accent); font-weight: 700; font-size: 12px;
+    }
+    .download-title { font-weight: 650; }
+    .download-meta { color: var(--muted); font-size: 13px; }
+    .button {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-height: 38px; padding: 0 15px; border-radius: 10px; background: var(--accent);
+      color: #fff; font-weight: 650; font-size: 14px; white-space: nowrap;
+    }
+    .button:hover { text-decoration: none; filter: brightness(1.06); }
+    .side { padding: 22px; position: sticky; top: 18px; }
+    .side h2 { margin: 0 0 10px; font-size: 17px; }
+    .side p, .side li { color: var(--muted); }
+    .side ul { padding-left: 18px; margin: 12px 0 18px; }
+    .notice {
+      padding: 12px 14px; border-radius: 12px; font-size: 13px;
+      background: color-mix(in srgb, var(--warn) 10%, var(--surface)); border: 1px solid color-mix(in srgb, var(--warn) 30%, var(--line));
+    }
+    .notice.ok { background: color-mix(in srgb, var(--ok) 10%, var(--surface)); border-color: color-mix(in srgb, var(--ok) 30%, var(--line)); }
+    section { margin: 40px 0; }
+    h2 { font-size: 24px; letter-spacing: -.02em; margin: 0 0 14px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 12px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    code { font: 12px/1.5 "Cascadia Mono", Consolas, monospace; overflow-wrap: anywhere; color: var(--text); }
+    .table-card { padding: 8px 12px 4px; overflow: auto; }
+    footer { padding: 28px 0 50px; color: var(--muted); font-size: 13px; }
+    @media (max-width: 820px) {
+      .grid { grid-template-columns: 1fr; }
+      .side { position: static; }
+      .download-row { grid-template-columns: 38px minmax(0, 1fr); }
+      .download-row .button { grid-column: 2; justify-self: start; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="brand"><span class="mark" aria-hidden="true"></span><span>notepadcc</span></header>
+    <main>
+      <div class="hero">
+        <div class="eyebrow">Native Windows editor</div>
+        <h1>notepadcc <span>{{VERSION}}</span></h1>
+        <p class="lead">轻量、原生、可离线。面向代码、日志与长文本的 Windows x64 编辑器。</p>
+        <div class="pills">
+          <span class="pill">Windows 10 1809+ / x64</span>
+          <span class="pill">解压即用</span>
+          <span class="pill">静态运行库</span>
+          {{SIGNING_BADGE}}
+        </div>
+      </div>
+
+      <div class="grid">
+        <div class="card downloads">
+          {{DOWNLOAD_ROWS}}
+        </div>
+        <aside class="card side">
+          <h2>下载前请核对</h2>
+          <p>每个文件都有 SHA-256，完整清单同时写入 <code>SHA256SUMS</code> 与 <code>release-manifest.json</code>。</p>
+          <ul>
+            <li>绿色版不会写注册表或 <code>%APPDATA%</code>。</li>
+            <li>MSI 分按用户与按整机两种包。</li>
+            <li>项目按 GPL-3.0-only 授权，对应源码 zip 与本页二进制同时提供。</li>
+            <li>SBOM、NOTICE 与第三方许可证随发行目录提供。</li>
+          </ul>
+          <div class="notice {{SIGNING_CLASS}}">{{SIGNING_NOTE}}</div>
+        </aside>
+      </div>
+
+      <section>
+        <h2>文件与校验值</h2>
+        <div class="card table-card">
+          <table>
+            <thead><tr><th>文件</th><th>大小</th><th>SHA-256</th></tr></thead>
+            <tbody>{{CHECKSUM_ROWS}}</tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h2>合规与审计</h2>
+        <p><a href="RELEASE_NOTES.md">发布说明</a> · <a href="NOTICE">NOTICE</a> ·
+           <a href="LICENSE">GPL-3.0 许可证</a> ·
+           <a href="THIRD_PARTY_COMPONENTS.md">第三方组件清单</a> ·
+           <a href="sbom.cdx.json">CycloneDX SBOM</a> ·
+           <a href="SHA256SUMS">SHA256SUMS</a></p>
+      </section>
+    </main>
+    <footer>
+      <div>构建提交：<code>{{COMMIT}}</code> · 渠道：{{CHANNEL}} · 日期：{{DATE}}</div>
+      <div>正式渠道发布前必须完成 Authenticode 签名与时间戳；未签名候选包只用于内部验收。</div>
+    </footer>
+  </div>
+</body>
+</html>

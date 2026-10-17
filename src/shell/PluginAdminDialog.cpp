@@ -8,6 +8,7 @@
 
 #include "infra/Log.h"
 #include "plugin/PluginHost.h"
+#include "shell/ChromeStyle.h"
 
 namespace npcc::shell {
 namespace {
@@ -246,6 +247,7 @@ bool PluginAdmin::Show(HWND owner, const npcc::plugin::PluginHost& plugins) {
             },
             reinterpret_cast<LPARAM>(font_));
     }
+    ApplyDialogChrome(hwnd_);
     FillList();
     Layout();
 

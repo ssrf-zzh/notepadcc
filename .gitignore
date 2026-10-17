@@ -12,6 +12,13 @@
 *.ilk
 *.exe
 
+# 签名私钥：只放离线签发环境，绝不入库、不进发行包
+/keys/
+*.pfx
+*.p12
+*.key
+*.pem
+
 # 第三方源码（由 scripts/fetch_deps.ps1 拉取，不入库）
 /third_party/_dl/
 /third_party/scintilla/

@@ -85,7 +85,7 @@ struct SearchDefaults {
 // 所以这里用"字段缺失"与"空表"两种状态区分（见 ConfigCenter::Save）。
 struct ToolbarConfig {
     bool         visible = true;
-    int          iconSize = 16;        // 逻辑像素，按 DPI 缩放后使用
+    int          iconSize = 20;        // 逻辑像素，按 DPI 缩放后使用（现代工具栏的呼吸感）
     ToolbarItems items;                // 空 = 用默认表
     bool         custom = false;       // 用户动过按钮表（区分"没配过"与"配成了空表"）
 };
@@ -120,12 +120,6 @@ struct RemoteConfig {
 struct ScriptConfig {
     std::wstring  interpreter;
     std::uint32_t timeoutSeconds = 60;   // 1~3600 秒；超时终止脚本，结果收进新文档
-};
-
-// 许可与在线激活（B6）：<license> 节的 serviceUrl。
-// 空 = 没配置——在线激活会明确提示“改用离线激活”，不会往某处瞎发请求。
-struct LicenseConfig {
-    std::wstring serviceUrl;
 };
 
 // 配置中心（设计文档 4.5 / 7.2）。
@@ -166,7 +160,6 @@ public:
     UpdateConfig&   Update() noexcept { return update_; }
     RemoteConfig&   Remote() noexcept { return remote_; }
     ScriptConfig&   Script() noexcept { return script_; }
-    LicenseConfig&  License() noexcept { return license_; }
 
     const GeneralConfig&  General() const noexcept { return general_; }
     const EditConfig&     Edit() const noexcept { return edit_; }
@@ -179,7 +172,6 @@ public:
     const UpdateConfig&   Update() const noexcept { return update_; }
     const RemoteConfig&   Remote() const noexcept { return remote_; }
     const ScriptConfig&   Script() const noexcept { return script_; }
-    const LicenseConfig&  License() const noexcept { return license_; }
 
     // 加载过程中被回退的属性名，供"关于/诊断"展示
     const std::vector<std::wstring>& Warnings() const noexcept { return warnings_; }
@@ -196,7 +188,6 @@ private:
     UpdateConfig    update_;
     RemoteConfig    remote_;
     ScriptConfig    script_;
-    LicenseConfig   license_;
     std::vector<std::wstring> warnings_;
     long long       lastSaveTick_ = 0;
     bool            dirty_ = false;

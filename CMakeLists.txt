@@ -181,12 +181,6 @@ set(NPCC_CORE_SOURCES
     src/infra/SftpRunner.cpp
     src/infra/RemoteService.cpp
     src/infra/ScriptRunner.cpp
-    src/license/LicenseTypes.cpp
-    src/license/LicenseVerifier.cpp
-    src/license/LicenseStore.cpp
-    src/license/Fingerprint.cpp
-    src/license/LicenseService.cpp
-    src/license/ActivationClient.cpp
     src/io/AtomicFile.cpp
     src/io/FileReader.cpp
     src/io/FileWatcher.cpp
@@ -205,6 +199,8 @@ set(NPCC_CORE_SOURCES
     src/search/Wildcard.cpp
     src/shell/MainWindow.cpp
     src/shell/ChromeStyle.cpp
+    src/shell/MessageDialog.cpp
+    src/shell/MenuBar.cpp
     src/shell/MenuBuilder.cpp
     src/shell/FunctionListPanel.cpp
     src/shell/FolderPanel.cpp
@@ -229,11 +225,11 @@ set(NPCC_CORE_SOURCES
     src/shell/ToolbarDialog.cpp
     src/shell/RemoteDialog.cpp
     src/shell/RemoteSiteDialog.cpp
-    src/shell/LicenseDialog.cpp
     src/shell/UpdateDialog.cpp)
 
 add_library(notepadcc_core STATIC ${NPCC_CORE_SOURCES})
-target_include_directories(notepadcc_core PUBLIC src "${CMAKE_CURRENT_SOURCE_DIR}/plugins-sdk")
+target_include_directories(notepadcc_core PUBLIC
+    src "${CMAKE_CURRENT_SOURCE_DIR}/res" "${CMAKE_CURRENT_SOURCE_DIR}/plugins-sdk")
 target_link_libraries(notepadcc_core PUBLIC
     scintilla lexilla pcre2-8-static npcc_flags comctl32 comdlg32 shell32
     # 更新检查（M3 第十块）：WinHTTP 下载、WinVerifyTrust 的 Authenticode 校验、
@@ -303,7 +299,12 @@ endif()
 
 if (MINGW)
     # -municode 提供 wWinMain 入口
-    target_link_options(notepadcc PRIVATE -municode -mwindows)
+    # GCC 默认还会额外链接 default-manifest.o，与 res/notepadcc.rc 的清单
+    # 形成同 ID 双清单（ld: multiple non-default manifests）。用最小 specs
+    # 覆盖去掉自动清单，保留 crtend 等正常收尾对象。
+    target_link_options(notepadcc PRIVATE
+        -municode -mwindows
+        "-specs=${CMAKE_CURRENT_SOURCE_DIR}/res/mingw-no-default-manifest.specs")
 endif()
 
 set_target_properties(notepadcc PROPERTIES OUTPUT_NAME "notepadcc")

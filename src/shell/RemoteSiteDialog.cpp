@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "infra/Log.h"
+#include "shell/ChromeStyle.h"
 
 namespace npcc::shell {
 namespace {
@@ -468,6 +469,7 @@ bool SiteEditorImpl::Show(HWND owner, std::vector<core::RemoteSite> sites) {
             reinterpret_cast<LPARAM>(font_));
     }
 
+    ApplyDialogChrome(hwnd_);
     RebuildList(0);
     if (sites_.empty()) {
         ClearForm();

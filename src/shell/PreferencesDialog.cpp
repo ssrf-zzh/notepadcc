@@ -12,6 +12,8 @@
 #include "core/UpdateManifest.h"
 #include "infra/Log.h"
 #include "infra/UpdateService.h"
+#include "shell/ChromeStyle.h"
+#include "shell/MessageDialog.h"
 
 namespace npcc::shell {
 namespace {
@@ -724,6 +726,7 @@ bool PreferencesDialog::Show(HWND owner, npcc::core::ConfigCenter& config) {
             reinterpret_cast<LPARAM>(font_));
     }
 
+    ApplyDialogChrome(hwnd_);
     LoadFromConfig();
     Layout();
     ShowPage(0);
@@ -791,7 +794,7 @@ LRESULT PreferencesDialog::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
                     std::wstring error;
                     int          badControl = 0;
                     if (!StoreToConfig(error, badControl)) {
-                        ::MessageBoxW(hwnd_, error.c_str(), L"首选项", MB_ICONWARNING);
+                        ShowMessageBox(hwnd_, error.c_str(), L"首选项", MB_ICONWARNING);
                         if (HWND control = Ctrl(badControl); control != nullptr) {
                             ::SetFocus(control);
                         }

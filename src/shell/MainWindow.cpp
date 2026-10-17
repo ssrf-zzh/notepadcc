@@ -1,5 +1,6 @@
 #include "shell/MainWindow.h"
 
+#include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
 #include <shlobj.h>   // SHChangeNotify（文件关联变更后通知资源管理器）
@@ -16,6 +17,7 @@
 #include <vector>
 
 #include "infra/Log.h"
+#include "core/AboutInfo.h"
 #include "core/Messages.h"
 #include "core/SessionManager.h"
 #include "edit/ColumnEdit.h"
@@ -27,6 +29,7 @@
 #include "shell/MenuBuilder.h"
 #include "shell/TabBar.h"
 #include "shell/ChromeStyle.h"
+#include "shell/MessageDialog.h"
 #include "shell/ColumnDialog.h"
 #include "shell/PreferencesDialog.h"
 #include "shell/ShortcutDialog.h"
@@ -39,8 +42,6 @@
 #include "shell/ToolbarDialog.h"
 #include "shell/UpdateDialog.h"
 #include "shell/RemoteDialog.h"
-#include "shell/LicenseDialog.h"
-#include "license/LicenseService.h"
 #include "core/Diff.h"
 #include "core/ExportHtml.h"
 #include "core/ExportRtf.h"
@@ -61,6 +62,7 @@
 #include "infra/Paths.h"
 #include "io/AtomicFile.h"
 #include "io/FileReader.h"
+#include "resource.h"
 
 namespace npcc::shell {
 namespace {
@@ -76,7 +78,6 @@ constexpr UINT_PTR kTimerJsonTree = 6;          // JSON 树面板的节流定时
 constexpr UINT_PTR kTimerXmlTree = 7;           // XML 树面板的节流定时器（一次性）
 constexpr UINT_PTR kTimerUpdateCheck = 8;       // 启动后的延迟更新检查（一次性）
 constexpr UINT_PTR kTimerScript = 9;            // 脚本执行器的轮询（M3 第十二块）
-constexpr UINT_PTR kTimerLicenseNotice = 10;   // 等其它启动模态框收尾（B7）
 
 enum : npcc::core::CmdId {
     kCmdFileNew     = npcc::core::MakeCmdId(1, 1),
@@ -233,7 +234,6 @@ enum : npcc::core::CmdId {
 
     kCmdHelpAbout = npcc::core::MakeCmdId(12, 1),
     kCmdHelpCheckUpdate = npcc::core::MakeCmdId(12, 2),
-    kCmdHelpLicense = npcc::core::MakeCmdId(12, 0x020),   // 许可证（设计 8.4：Help + 0x020）
 
     // Scintilla 原生命令：不新增语义，直接转发
     kSciRedo      = 2011,
@@ -272,6 +272,7 @@ void CopyTextToClipboard(HWND owner, const std::wstring& text) {
 MainWindow::~MainWindow() {
     // 先停掉监视线程：它的回调会往本窗口投消息，窗口没了就不该再跑
     fileWatcher_.reset();
+    menuBar_.Destroy();
     tabBar_.Destroy();
     documents_.reset();
     if (accel_ != nullptr) {
@@ -290,8 +291,19 @@ bool MainWindow::RegisterWindowClass(HINSTANCE instance) const {
     wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;   // 分隔条要能接双击
     wc.lpfnWndProc = &MainWindow::WndProcThunk;
     wc.hInstance = instance;
-    wc.hIcon = ::LoadIconW(nullptr, IDI_APPLICATION);
-    wc.hIconSm = wc.hIcon;
+    wc.hIcon = static_cast<HICON>(::LoadImageW(
+        instance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 0, 0,
+        LR_DEFAULTSIZE | LR_DEFAULTCOLOR));
+    wc.hIconSm = static_cast<HICON>(::LoadImageW(
+        instance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+        ::GetSystemMetrics(SM_CXSMICON), ::GetSystemMetrics(SM_CYSMICON),
+        LR_DEFAULTCOLOR));
+    if (wc.hIcon == nullptr) {
+        wc.hIcon = ::LoadIconW(nullptr, IDI_APPLICATION);
+    }
+    if (wc.hIconSm == nullptr) {
+        wc.hIconSm = wc.hIcon;
+    }
     wc.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_WINDOW + 1));
     wc.lpszClassName = kClassName;
@@ -348,6 +360,16 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
 
             tabBar_.Create(hwnd_, 1);
             statusBar_.Create(hwnd_, 2);
+            statusBar_.SetAuthor(
+                std::wstring(core::kAuthorName) + L" · " + core::kAuthorNickname,
+                std::wstring(L"姓名：") + core::kAuthorName +
+                    L"\n网络昵称：" + core::kAuthorNickname +
+                    L"\n邮箱：" + core::kAuthorEmail +
+                    L"\n\n单击查看「关于 notepadcc」");
+            // 自绘菜单栏（现代 chrome 第二轮）：系统菜单栏没法跟着深浅配色，
+            // 所以 HMENU 仍由菜单构建器生成，但显示交给这个子窗口
+            MenuBar::RegisterWindowClass(::GetModuleHandleW(nullptr));
+            menuBar_.Create(hwnd_, 9);
             // 工具栏（设计文档 2.11 第 6 条）：按钮表存命令键，显示文本 / 可用 /
             // 勾选全问命令注册表，点了按钮就按命令执行——所以"宏、运行命令、插件命令
             // 也能上工具栏"是白拿的，不用给它们各写一条工具栏通道
@@ -494,7 +516,7 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             }
             menu_ = BuildMainMenu(registry_);
             if (menu_ != nullptr) {
-                ::SetMenu(hwnd_, menu_);
+                menuBar_.SetMenu(menu_);
             }
             // 工具栏要在命令（含宏、插件、运行命令）都注册好之后才装配：
             // 配置里记的是命令键，早一步装配就会有键查不到
@@ -562,6 +584,10 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
         case WM_SIZE:
             LayoutChildren();
             return 0;
+        case core::kMsgMenuHandle:
+            // 自绘菜单栏不把 HMENU 挂到窗口上；回归与脚本从这条消息拿同一份菜单。
+            // 全屏时返回 0，和"菜单栏收起来"的语义一致。
+            return fullScreen_ ? 0 : reinterpret_cast<LRESULT>(menu_);
         case WM_INITMENUPOPUP: {
             // 菜单的勾选态与灰显在**菜单要显示出来的时候**才刷（设计文档 1.3 规则 1：
             // 勾选态由命令注册表回答）。这一条此前整类缺失——`queryChecked` 装上了，
@@ -719,6 +745,16 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
                 HandleFunctionNotify(*reinterpret_cast<const FunctionNotify*>(lParam));
                 return 0;
             }
+            if (header->hwndFrom == statusBar_.Handle()) {
+                if (header->code == NM_CLICK) {
+                    const auto* click = reinterpret_cast<const NMCLICK*>(lParam);
+                    if (click != nullptr && click->dwItemSpec == 3) {
+                        CommandAbout();
+                        return 0;
+                    }
+                }
+                break;
+            }
             if (DocumentOfView(header->hwndFrom) != nullptr) {
                 HandleEditorNotify(*header);
                 return 0;
@@ -794,7 +830,6 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             return 0;
         case core::kMsgStartupNotice:
             AnnounceActiveLoadWarning();
-            AnnounceLicenseNotice();
             return 0;
         case core::kMsgUpdateResult: {
             // 启动自动检查的结果（手动检查的结果投给对话框自己，不走这里）
@@ -859,12 +894,6 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
                 if (PollScript()) {
                     FinishScript();
                 }
-                return 0;
-            }
-            if (wParam == kTimerLicenseNotice) {
-                // 一次性：还在等就由 AnnounceLicenseNotice 自己重挂
-                ::KillTimer(hwnd_, kTimerLicenseNotice);
-                AnnounceLicenseNotice();
                 return 0;
             }
             if (wParam == kTimerMarkdownPreview) {
@@ -1474,9 +1503,6 @@ void MainWindow::RegisterCommands() {
         [this](const CmdContext&) { CommandShowRunDialog(); });
 
     // ---- 帮助 ----
-    add(kCmdHelpLicense, CmdCategory::Help, L"cmd.help.license", L"许可证(&L)…",
-        core::kCmdNone, [this](const CmdContext&) { CommandLicense(); });
-    addSeparator(L"cmd.help.sepLicense");
     add(kCmdHelpCheckUpdate, CmdCategory::Help, L"cmd.help.checkUpdate", L"检查更新(&U)...",
         core::kCmdNone, [this](const CmdContext&) { CommandCheckUpdate(); });
     addSeparator(L"cmd.help.sepUpdate");
@@ -1613,11 +1639,8 @@ void MainWindow::RebuildMenu() {
     }
     HMENU previous = menu_;
     menu_ = rebuilt;
-    // 全屏时菜单栏是收起来的（见 CommandToggleFullScreen）：这里不能顺手把它挂回去
-    if (!fullScreen_) {
-        ::SetMenu(hwnd_, menu_);
-    }
-    ::DrawMenuBar(hwnd_);
+    // 自绘菜单栏直接换数据源；全屏时它自己仍是隐藏的，不在这里改可见性
+    menuBar_.SetMenu(menu_);
     if (previous != nullptr) {
         ::DestroyMenu(previous);
     }
@@ -1661,27 +1684,45 @@ void MainWindow::LayoutChildren() const {
     ::GetClientRect(hwnd_, &client);
     statusBar_.Resize(client);
 
+    // 菜单栏占最上面一条；它不挂着系统菜单，所以是货真价实的客户区子窗口
+    const int menuHeight = menuBar_.Visible() ? menuBar_.Height() : 0;
+    if (menuBar_.Handle() != nullptr) {
+        ::MoveWindow(menuBar_.Handle(), 0, 0, client.right, menuHeight, TRUE);
+    }
+
     // 工具栏在最上面一条：它占掉的高度要让给下面的标签栏与面板，
     // 所以先算出来，再拿它当"上边距"
     const int toolbarHeight = toolbar_.Visible() ? toolbar_.Height() : 0;
+    const int chromeTop = menuHeight;
     if (toolbar_.Handle() != nullptr) {
-        ::MoveWindow(toolbar_.Handle(), 0, 0, client.right, toolbarHeight, TRUE);
+        ::MoveWindow(toolbar_.Handle(), 0, chromeTop, client.right, toolbarHeight, TRUE);
     }
 
     const int tabHeight = tabBar_.Height();
     if (tabBar_.Handle() != nullptr) {
-        ::MoveWindow(tabBar_.Handle(), 0, toolbarHeight, client.right, tabHeight, TRUE);
+        ::MoveWindow(tabBar_.Handle(), 0, chromeTop + toolbarHeight, client.right, tabHeight,
+                     TRUE);
     }
 
     int bottomInset = statusBar_.Height();
-    if (searchPanel_.Visible() && searchPanel_.Handle() != nullptr) {
-        const int panelHeight = searchPanel_.Height();
+    // 底部面板只能占菜单 / 工具栏 / 标签栏与状态栏之间的空间。窗口缩小时若
+    // 直接把 Height() 当面板高度，面板会顶到窗口外面（y 变成负数，盖住 chrome）。
+    // 这里先扣掉 chrome 与状态栏，再按可用高度截断；面板内部会把列表压短。
+    const int contentTop = chromeTop + toolbarHeight + tabHeight;
+    int bottomSpace = std::max(0, static_cast<int>(client.bottom) - bottomInset - contentTop);
+    const int findHeight = findBar_.Visible() && findBar_.Handle() != nullptr
+                               ? std::min(findBar_.Height(), bottomSpace)
+                               : 0;
+    bottomSpace -= findHeight;
+    const int panelHeight = searchPanel_.Visible() && searchPanel_.Handle() != nullptr
+                                ? std::min(searchPanel_.Height(), bottomSpace)
+                                : 0;
+    if (panelHeight > 0) {
         ::MoveWindow(searchPanel_.Handle(), 0, client.bottom - bottomInset - panelHeight,
                      client.right, panelHeight, TRUE);
         bottomInset += panelHeight;
     }
-    if (findBar_.Visible() && findBar_.Handle() != nullptr) {
-        const int findHeight = findBar_.Height();
+    if (findHeight > 0) {
         ::MoveWindow(findBar_.Handle(), 0, client.bottom - bottomInset - findHeight,
                      client.right, findHeight, TRUE);
         bottomInset += findHeight;
@@ -1698,7 +1739,7 @@ void MainWindow::LayoutChildren() const {
     if (panelWidth > 0) {
         RECT column{};
         column.left = 0;
-        column.top = toolbarHeight + tabHeight;
+        column.top = chromeTop + toolbarHeight + tabHeight;
         column.right = panelWidth;
         column.bottom = client.bottom - bottomInset;
         if (column.bottom > column.top) {
@@ -1720,7 +1761,7 @@ void MainWindow::LayoutChildren() const {
 
     RECT viewRect{};
     viewRect.left = panelWidth;
-    viewRect.top = toolbarHeight + tabHeight;
+    viewRect.top = chromeTop + toolbarHeight + tabHeight;
     viewRect.right = client.right;
     viewRect.bottom = client.bottom - bottomInset;
     if (viewRect.bottom < viewRect.top) {
@@ -3745,13 +3786,17 @@ void MainWindow::CommandAutoComplete() {
 // 深浅、护眼各一组配色（见 ChromeStyle.h）；窗口边框走 DWM，Windows 11 上
 // 顺带要圆角与深色标题栏，老系统上 DWM/uxtheme 缺导出就静默降级。
 void MainWindow::ApplyChromeTheme() {
+    SetChromeThemeState(darkMode_, eyeCare_);
     ApplyDarkModePreference(darkMode_);   // 系统画的菜单也跟着深浅走
     ApplyModernWindowChrome(hwnd_, darkMode_, eyeCare_);
+    menuBar_.SetTheme(darkMode_, eyeCare_);
     tabBar_.SetDark(darkMode_);
     tabBar_.SetEyeCare(eyeCare_);
     toolbar_.SetDark(darkMode_);
     toolbar_.SetEyeCare(eyeCare_);
     statusBar_.SetTheme(darkMode_, eyeCare_);
+    findBar_.SetTheme(darkMode_, eyeCare_);
+    searchPanel_.SetTheme(darkMode_, eyeCare_);
 }
 
 void MainWindow::ApplyStyleSchemeToAllViews() {
@@ -5286,30 +5331,6 @@ void MainWindow::AnnounceActiveLoadWarning() {
     statusBar_.SetMessage(document->buffer.loadWarning);
 }
 
-// B7：试用到期 / 宽限 / 时钟回拨的启动提示。文案与"这次会话露没露过"的记账都在
-// LicenseService；这里只管弹窗、回执，以及"输入许可"按钮的去处。
-void MainWindow::AnnounceLicenseNotice() {
-    license::LicenseService& service = license::LicenseService::Instance();
-    if (recoveryPending_) {
-        // 恢复提示的消息框还开着：等它收尾再露面，免得两个对话框叠罗汉。
-        // 不重投 kMsgStartupNotice——消息框自带消息泵，重投会在它的循环里立刻又进来。
-        ::SetTimer(hwnd_, kTimerLicenseNotice, 500, nullptr);
-        return;
-    }
-    const license::StartupNotice notice = service.PendingStartupNotice();
-    if (notice.kind == license::LicenseNotice::None) {
-        return;
-    }
-    const LicenseNoticeOutcome outcome = LicenseNoticeDialog::Show(hwnd_, notice);
-    service.MarkNoticeShown(notice.kind);
-    if (outcome.dontShowAgain) {
-        service.DismissNoticeForever(notice.kind);
-    }
-    if (outcome.openLicense) {
-        CommandLicense();
-    }
-}
-
 bool MainWindow::OpenDocumentPath(const std::wstring& path) {
     const core::OpenOutcome outcome = documents_->Open(path);
     if (outcome.status != core::OpenStatus::Ok &&
@@ -5978,7 +5999,7 @@ void MainWindow::CommandToggleFullScreen() {
         }
         fullScreenStyle_ = ::GetWindowLongPtrW(hwnd_, GWL_STYLE);
         fullScreenExStyle_ = ::GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
-        ::SetMenu(hwnd_, nullptr);
+        menuBar_.SetVisible(false);
 
         MONITORINFO monitor{};
         monitor.cbSize = sizeof(monitor);
@@ -6001,7 +6022,8 @@ void MainWindow::CommandToggleFullScreen() {
     } else {
         ::SetWindowLongPtrW(hwnd_, GWL_STYLE, fullScreenStyle_);
         ::SetWindowLongPtrW(hwnd_, GWL_EXSTYLE, fullScreenExStyle_);
-        ::SetMenu(hwnd_, menu_);
+        menuBar_.SetVisible(true);
+        menuBar_.SetMenu(menu_);
         ::SetWindowPlacement(hwnd_, &fullScreenPlacement_);
         ::SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
@@ -6018,6 +6040,14 @@ bool MainWindow::ExitFullScreenOnEscape() {
         return false;
     }
     CommandToggleFullScreen();
+    return true;
+}
+
+bool MainWindow::ActivateMenuBar() {
+    if (fullScreen_ || !menuBar_.Visible() || menuBar_.Menu() == nullptr) {
+        return false;
+    }
+    menuBar_.Activate();
     return true;
 }
 
@@ -6757,56 +6787,19 @@ void MainWindow::CommandManageShortcuts() {
     }
 }
 
-void MainWindow::CommandLicense() {
-    const LicenseDialogOutcome outcome = LicenseDialog::Show(
-        hwnd_, UpdatePool(), infra::Utf8FromWide(config_.License().serviceUrl));
-    if (outcome.changed) {
-        // 许可文件换过了：菜单跟着新状态走（B7 的付费门禁也在这条路上生效）。
-        RebuildMenu();
-        statusBar_.SetMessage(L"许可状态已更新。");
-    }
-}
-
 void MainWindow::CommandAbout() {
-    const license::LicenseService& licenseService = license::LicenseService::Instance();
-    std::wstring licenseLine = L"许可：";
-    switch (licenseService.State()) {
-        case license::LicenseState::Licensed: {
-            licenseLine += licenseService.EditionValue() == license::Edition::Enterprise
-                               ? L"已激活（Enterprise"
-                               : L"已激活（Pro";
-            const std::wstring holder = infra::WideFromUtf8(licenseService.Info().holder);
-            if (!holder.empty()) {
-                licenseLine += L"，持有人：" + holder;
-            }
-            if (licenseService.Info().expiresAt.has_value()) {
-                const std::string iso =
-                    license::FormatIso8601Utc(*licenseService.Info().expiresAt);
-                licenseLine += L"，有效期至 " + infra::WideFromUtf8(iso.substr(0, 10));
-            }
-            licenseLine += L"）";
-            break;
-        }
-        case license::LicenseState::Trial:
-            licenseLine += L"试用中，还剩 " +
-                           std::to_wstring(licenseService.TrialDaysLeft()) + L" 天";
-            break;
-        case license::LicenseState::Grace:
-            licenseLine += L"已到期（宽限期还剩 " +
-                           std::to_wstring(licenseService.GraceDaysLeft()) + L" 天）";
-            break;
-        case license::LicenseState::Free:
-            licenseLine +=
-                L"Free（" + license::DescribeLicenseError(licenseService.LastError()) + L"）";
-            break;
-    }
+    const std::wstring author =
+        std::wstring(L"姓名：") + core::kAuthorName +
+        L"\n网络昵称：" + core::kAuthorNickname +
+        L"\n邮箱：" + core::kAuthorEmail;
     const std::wstring text =
         std::wstring(L"notepadcc ") + core::kAppVersion +
-        L"（M0 + 多标签）\n\n"
-        L"原生 Win32 + Scintilla 的轻量文本 / 源码编辑器。\n"
-        L"已完成：多标签与标签栏（拖拽排序、中键关闭、右键菜单、脏标记）、"
-        L"多编码打开与保存、原子写盘、语法着色、命令注册表与可重绑快捷键。\n\n" +
-        licenseLine;
+        L"\n\n" + author +
+        L"\n\n原生 Win32 + Scintilla 的轻量文本 / 源码编辑器。\n"
+        L"Copyright (C) 2026 notepadcc contributors\n"
+        L"GNU General Public License v3.0 only (GPL-3.0-only)\n\n"
+        L"官方发行免费。许可证全文见发行目录的 LICENSE；\n"
+        L"对应源代码见同一版本的 notepadcc-<版本>-source.zip。";
     ::MessageBoxW(hwnd_, text.c_str(), L"关于 notepadcc", MB_ICONINFORMATION);
 }
 

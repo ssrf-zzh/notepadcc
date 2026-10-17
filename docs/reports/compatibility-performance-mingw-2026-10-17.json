@@ -1,0 +1,110 @@
+{
+  "schema": "notepadcc-b14-performance-v1",
+  "generatedAt": "2026-10-17T13:01:25+08:00",
+  "buildDir": "D:\\codepad\\codepad\\build",
+  "exeSha256": "944dbd4e2bf37114034101148a3dd39442b29b477c871a436d8feaaad2ab09ff",
+  "metrics": {
+    "coldStart": {
+      "samplesSeconds": [
+        1.1393823999969754,
+        0.2574797999986913,
+        0.25653710000915453
+      ],
+      "medianSeconds": 0.2574797999986913,
+      "maxSeconds": 1.1393823999969754,
+      "idle": {
+        "workingSetMiB": 21.5703125,
+        "privateMiB": 4.09375,
+        "peakWorkingSetMiB": 21.5703125
+      }
+    },
+    "tenDocuments": {
+      "memory": {
+        "workingSetMiB": 32.71484375,
+        "privateMiB": 15.140625,
+        "peakWorkingSetMiB": 32.71484375
+      },
+      "documentCount": 10
+    },
+    "file50mb": {
+      "openSeconds": 0.26271660000202246,
+      "workingSetMiB": 125.8828125,
+      "findSeconds": 0.14098230001400225,
+      "saveSeconds": 0.13206599999102764
+    },
+    "tier3": {
+      "windowSeconds": 0.2600580000143964,
+      "readySeconds": 16.160494300012942,
+      "responsiveSeconds": 0.0,
+      "workingSetMiB": 90.453125
+    }
+  },
+  "checks": [
+    {
+      "name": "冷启动中位数",
+      "actual": 0.2574797999986913,
+      "limit": 1.0,
+      "unit": "s",
+      "op": "<=",
+      "pass": true
+    },
+    {
+      "name": "空闲常驻内存",
+      "actual": 21.5703125,
+      "limit": 40.0,
+      "unit": "MiB",
+      "op": "<=",
+      "pass": true
+    },
+    {
+      "name": "10 个中等文档内存",
+      "actual": 32.71484375,
+      "limit": 40.0,
+      "unit": "MiB",
+      "op": "<=",
+      "pass": true
+    },
+    {
+      "name": "50 MB 打开到可交互",
+      "actual": 0.26271660000202246,
+      "limit": 2.0,
+      "unit": "s",
+      "op": "<=",
+      "pass": true
+    },
+    {
+      "name": "50 MB 首个字面量匹配",
+      "actual": 0.14098230001400225,
+      "limit": 0.3,
+      "unit": "s",
+      "op": "<=",
+      "pass": true
+    },
+    {
+      "name": "10 文档确实装入",
+      "actual": 10,
+      "limit": 10,
+      "unit": "个",
+      "op": "==",
+      "pass": true
+    },
+    {
+      "name": "50 MB 保存完成",
+      "actual": 0.13206599999102764,
+      "limit": 30.0,
+      "unit": "s",
+      "op": "<=",
+      "pass": true
+    }
+  ],
+  "compatibility": {
+    "os": "Windows-11-10.0.26200-SP0",
+    "version": "10.0 build 26200",
+    "architecture": "AMD64",
+    "dpi": 192,
+    "meetsRuntimeFloor": true,
+    "win10_1809": "未实测：本机没有 Win10 1809 主机或现成虚拟机",
+    "scaling": "仅实测当前系统 DPI；100%/125%/150%/200% 非本机矩阵",
+    "uiRegression": "2026-10-17 全量界面回归 PASS（49 段，含暗色、护眼、现代 chrome 与业务对话框像素检查）"
+  }
+}

@@ -9,6 +9,7 @@
 #include "edit/HexModel.h"
 #include "infra/Log.h"
 #include "shell/MacroDialog.h"
+#include "shell/MessageDialog.h"
 
 namespace npcc::shell {
 namespace {
@@ -420,7 +421,7 @@ void HexView::PromptForOffset() {
     }
     std::uint64_t offset = 0;
     if (!edit::ParseHexJump(text, offset)) {
-        ::MessageBoxW(parent_,
+        ShowMessageBox(parent_,
                       L"看不懂这个偏移。写十六进制请带 0x 前缀（例如 0x1F0），"
                       L"不带前缀的按十进制算。",
                       L"跳到偏移", MB_ICONINFORMATION);

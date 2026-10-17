@@ -10,7 +10,7 @@
 namespace npcc::shell {
 namespace {
 
-int DpiScaleFor(HWND hwnd, int value) {
+int DpiOf(HWND hwnd) {
     UINT dpi = 96;
     const HMODULE user32 = ::GetModuleHandleW(L"user32.dll");
     if (user32 != nullptr) {
@@ -24,7 +24,11 @@ int DpiScaleFor(HWND hwnd, int value) {
             }
         }
     }
-    return ::MulDiv(value, static_cast<int>(dpi), 96);
+    return static_cast<int>(dpi);
+}
+
+int DpiScaleFor(HWND hwnd, int value) {
+    return ::MulDiv(value, DpiOf(hwnd), 96);
 }
 
 }  // namespace
@@ -51,16 +55,7 @@ bool TabBar::Create(HWND parent, int controlId) {
         return false;
     }
 
-    NONCLIENTMETRICSW metrics{};
-    metrics.cbSize = sizeof(metrics);
-    LOGFONTW logFont{};
-    if (::SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0) != 0) {
-        logFont = metrics.lfMessageFont;
-    } else {
-        ::wcscpy_s(logFont.lfFaceName, L"Microsoft YaHei UI");
-        logFont.lfHeight = -12;
-    }
-    font_ = ::CreateFontIndirectW(&logFont);
+    font_ = CreateChromeFont(DpiOf(hwnd_), 95, false);
     return true;
 }
 
@@ -101,11 +96,11 @@ int TabBar::Height() const {
 }
 
 void TabBar::RebuildMetrics() const {
-    tabHeight_ = Scale(30);
-    paddingX_ = Scale(10);
-    minTabWidth_ = Scale(96);
+    tabHeight_ = Scale(32);
+    paddingX_ = Scale(12);
+    minTabWidth_ = Scale(104);
     maxTabWidth_ = Scale(240);
-    closeBoxSize_ = Scale(16);
+    closeBoxSize_ = Scale(18);
 
     tabWidths_.assign(items_.size(), minTabWidth_);
     if (hwnd_ == nullptr) {
@@ -325,8 +320,9 @@ void TabBar::Paint(HDC target, const RECT& client) {
     ::FillRect(target, &client, background);
     ::DeleteObject(background);
 
-    const int radius = Scale(7);
+    const int radius = Scale(8);
     const int underline = Scale(3);
+    const int hairline = Scale(1);
     const int textPadding = paddingX_;
     int activeLeft = 0;
     int activeRight = 0;
@@ -346,9 +342,15 @@ void TabBar::Paint(HDC target, const RECT& client) {
             hasActive = true;
             activeLeft = std::max<int>(rc.left, client.left);
             activeRight = std::min<int>(rc.right, client.right);
-            RECT tab = rc;
+            // 先铺一圈 1px 的边，再铺里层：当前页签像一张浮起来的卡片，
+            // 但底边仍与编辑区同色、由强调色下划线收口。
+            RECT border = rc;
+            border.bottom += radius;
+            FillRoundedRect(target, border, radius, colours.line);
+            RECT tab = border;
+            ::InflateRect(&tab, -hairline, -hairline);
             tab.bottom += radius;
-            FillRoundedRect(target, tab, radius, colours.tabActive);
+            FillRoundedRect(target, tab, std::max(1, radius - hairline), colours.tabActive);
         } else if (isHot && !(dragging_ && static_cast<int>(i) == dragIndex_)) {
             RECT tab = rc;
             tab.bottom += radius;
@@ -358,7 +360,6 @@ void TabBar::Paint(HDC target, const RECT& client) {
 
     // (2) 底边细线：当前标签脚下让开一段——"页签和编辑区连成一片"是这一眼最要紧的。
     //     用 FillRect 而不是画线笔，细线宽度才能跟着 DPI 走（200% 下还是"一条线"）。
-    const int hairline = Scale(1);
     const HBRUSH lineBrush = ::CreateSolidBrush(colours.line);
     if (!hasActive || activeLeft > client.left) {
         RECT leftLine{client.left, client.bottom - hairline,
@@ -432,9 +433,22 @@ void TabBar::Paint(HDC target, const RECT& client) {
             ::InflateRect(&bubble, Scale(2), Scale(2));
             FillRoundedRect(target, bubble, (bubble.right - bubble.left) / 2, colours.dangerSoft);
         }
-        ::SetTextColor(target, closeHot ? colours.danger : colours.textMuted);
-        ::DrawTextW(target, L"\u00d7", -1, &closeRect,
-                    DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+        const int closeX = (closeRect.left + closeRect.right) / 2;
+        const int closeY = (closeRect.top + closeRect.bottom) / 2;
+        const int arm = Scale(3);
+        LOGBRUSH closeBrush{};
+        closeBrush.lbStyle = BS_SOLID;
+        closeBrush.lbColor = closeHot ? colours.danger : colours.textMuted;
+        const HPEN closePen = ::ExtCreatePen(
+            PS_GEOMETRIC | PS_SOLID | PS_ENDCAP_ROUND,
+            static_cast<DWORD>(std::max(1, Scale(1))), &closeBrush, 0, nullptr);
+        const HGDIOBJ oldClosePen = ::SelectObject(target, closePen);
+        ::MoveToEx(target, closeX - arm, closeY - arm, nullptr);
+        ::LineTo(target, closeX + arm, closeY + arm);
+        ::MoveToEx(target, closeX + arm, closeY - arm, nullptr);
+        ::LineTo(target, closeX - arm, closeY + arm);
+        ::SelectObject(target, oldClosePen);
+        ::DeleteObject(closePen);
     }
 
     // 拖拽落点指示线

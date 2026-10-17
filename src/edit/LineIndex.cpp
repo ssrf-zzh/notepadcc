@@ -23,16 +23,18 @@ Terminator FindTerminator(const char* data, std::uint64_t size, std::uint64_t fr
     if (from >= limit) {
         return result;
     }
-    const char* base = data + from;
-    const std::size_t span = static_cast<std::size_t>(limit - from);
-    const char* lf = static_cast<const char*>(std::memchr(base, '\n', span));
-    const char* cr = static_cast<const char*>(std::memchr(base, '\r', span));
-    if (lf == nullptr && cr == nullptr) {
+    // 从当前位置线性找到最近的行尾，而不是每行都从块头各做一次
+    // memchr('\n') + memchr('\r')。后者的复杂度是 O(行数 × 块大小)：
+    // 8 MB 块里有 8 万行时，索引要几秒到十几秒，界面看着像卡死。
+    std::uint64_t at = from;
+    while (at < limit && data[at] != '\n' && data[at] != '\r') {
+        ++at;
+    }
+    if (at >= limit) {
         return result;
     }
     result.found = true;
-    if (cr != nullptr && (lf == nullptr || cr < lf)) {
-        const std::uint64_t at = static_cast<std::uint64_t>(cr - data);
+    if (data[at] == '\r') {
         if (at + 1 >= size) {
             // 文件最后一个字节是孤立 \r：它就是一个行尾
             result.start = at;
@@ -53,7 +55,6 @@ Terminator FindTerminator(const char* data, std::uint64_t size, std::uint64_t fr
         }
         return result;
     }
-    const std::uint64_t at = static_cast<std::uint64_t>(lf - data);
     result.start = at;
     result.next = at + 1;
     return result;

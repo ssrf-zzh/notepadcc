@@ -6,6 +6,7 @@
 #include <string>
 
 #include "infra/Log.h"
+#include "shell/ChromeStyle.h"
 
 namespace npcc::shell {
 namespace {
@@ -154,6 +155,7 @@ bool ColumnDialog::Show(HWND owner, int lineCount, ColumnDialogResult& result) {
             reinterpret_cast<LPARAM>(font_));
     }
 
+    ApplyDialogChrome(hwnd_);
     Layout();
     RefreshPreview();
 

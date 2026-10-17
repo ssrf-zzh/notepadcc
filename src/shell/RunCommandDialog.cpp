@@ -4,6 +4,9 @@
 
 #include <cwchar>
 
+#include "shell/ChromeStyle.h"
+#include "shell/MessageDialog.h"
+
 namespace npcc::shell {
 namespace {
 
@@ -138,7 +141,7 @@ void RunCommandDialog::Layout() {
 void RunCommandDialog::Accept(RunDialogAction action) {
     const std::wstring command = CommandText();
     if (command.empty()) {
-        ::MessageBoxW(hwnd_, L"命令行是空的，先写一条再运行。", L"运行命令", MB_ICONINFORMATION);
+        ShowMessageBox(hwnd_, L"命令行是空的，先写一条再运行。", L"运行命令", MB_ICONINFORMATION);
         return;
     }
     result_.action = action;
@@ -310,6 +313,7 @@ bool RunCommandDialog::Show(HWND owner, const std::vector<core::RunCommandDef>& 
             },
             reinterpret_cast<LPARAM>(font_));
     }
+    ApplyDialogChrome(hwnd_);
     Layout();
 
     ::EnableWindow(owner_, FALSE);

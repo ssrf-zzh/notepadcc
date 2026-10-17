@@ -5,6 +5,7 @@
 
 #include "core/Localization.h"
 #include "core/Messages.h"
+#include "shell/ChromeStyle.h"
 
 namespace npcc::shell {
 namespace {
@@ -256,6 +257,7 @@ void UpdateDialogImpl::ShowChecking(HWND owner, infra::ThreadPool& pool,
             },
             reinterpret_cast<LPARAM>(font_));
     }
+    ApplyDialogChrome(hwnd_);
     Layout();
 
     // 后台线程跑完整条校验链；结果投回**本对话框**。用户提前关掉对话框时
@@ -356,6 +358,7 @@ void UpdateDialogImpl::ShowAvailable(HWND owner, const infra::UpdateCheckReport&
             },
             reinterpret_cast<LPARAM>(font_));
     }
+    ApplyDialogChrome(hwnd_);
     ApplyReport(report);
     Layout();
     ::EnableWindow(owner_, FALSE);

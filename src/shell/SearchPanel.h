@@ -9,6 +9,7 @@
 #include "search/CrossFileReplace.h"
 #include "search/SearchConfig.h"
 #include "search/SearchResult.h"
+#include "shell/ChromeStyle.h"
 
 namespace npcc::shell {
 
@@ -29,6 +30,7 @@ enum SearchPanelControl : int {
     kSearchPanelReplaceEdit = 712,
     kSearchPanelReplacePreview = 713,
     kSearchPanelApply = 714,
+    kSearchPanelScrollCorner = 715,
     kSearchPanelLimit  = 799,
 };
 
@@ -40,6 +42,9 @@ public:
 
     bool Create(HWND parent);
     void Destroy();
+
+    // 与查找栏同一套四主题外观：编辑框 / 列表跟随深色，按钮 / 复选框自绘。
+    void SetTheme(bool dark, bool eyeCare);
 
     HWND Handle() const noexcept { return hwnd_; }
     int  Height() const;
@@ -85,7 +90,29 @@ private:
 
     int  Scale(int value) const;
     void Layout();
+    struct Placement {
+        HWND handle = nullptr;
+        RECT rect{};
+    };
+    std::vector<Placement> BuildPlacements(int width) const;
     void ApplyFont();
+    void UpdateThemeResources();
+    void ApplyThemeToControls();
+    void InstallButtonSubclasses();
+    void PaintBackground(HDC dc) const;
+    void PaintControl(HWND control, HDC dc) const;
+    void PaintScrollCorner(HDC dc) const;
+    void UpdateScrollCorner();
+    void ScheduleScrollCorner();
+    ChromeColours Theme() const;
+    static LRESULT CALLBACK ButtonSubclass(HWND hwnd, UINT message, WPARAM wParam,
+                                           LPARAM lParam, UINT_PTR id, DWORD_PTR ref);
+    LRESULT ButtonSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+    static LRESULT CALLBACK ListSubclass(HWND hwnd, UINT message, WPARAM wParam,
+                                         LPARAM lParam, UINT_PTR id, DWORD_PTR ref);
+    LRESULT ListSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+    static LRESULT CALLBACK CornerWndProc(HWND hwnd, UINT message, WPARAM wParam,
+                                          LPARAM lParam);
     HWND MakeControl(const wchar_t* className, DWORD style, DWORD exStyle, int id,
                      const wchar_t* cue);
     void SetupColumns();
@@ -103,6 +130,12 @@ private:
     HFONT                 font_ = nullptr;
     HWND                  list_ = nullptr;
     HWND                  status_ = nullptr;
+    HWND                  scrollCorner_ = nullptr;
+    bool                  dark_ = false;
+    bool                  eyeCare_ = false;
+    bool                  scrollCornerPending_ = false;
+    HBRUSH                background_ = nullptr;
+    HBRUSH                field_ = nullptr;
     std::vector<RowRef>   rows_;
     bool                  truncated_ = false;
     bool                  replacePreview_ = false;

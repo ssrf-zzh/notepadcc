@@ -5,6 +5,7 @@
 #include <cwchar>
 
 #include "core/Localization.h"
+#include "shell/ChromeStyle.h"
 
 namespace npcc::shell {
 namespace {
@@ -229,6 +230,7 @@ bool ComparePickDialog::Show(HWND owner, const std::vector<std::wstring>& names,
             },
             reinterpret_cast<LPARAM>(font_));
     }
+    ApplyDialogChrome(hwnd_);
     Layout();
 
     ::EnableWindow(owner_, FALSE);

@@ -68,13 +68,18 @@ void PaintGlyph(HDC dc, const RECT& box, const std::wstring& key, COLORREF colou
         return;
     }
     const int unit = std::max(2, size / 8);
-    const int stroke = std::max(1, size / 12);
+    const int stroke = std::max(2, size / 10);
     const int left = box.left;
     const int top = box.top;
     const int right = box.right - 1;
     const int bottom = box.bottom - 1;
 
-    HPEN pen = ::CreatePen(PS_SOLID, stroke, colour);
+    // 几何笔 + 圆头圆角：20/40 像素的图标也不会出现方头折角，观感更接近矢量图标
+    LOGBRUSH brushSpec{};
+    brushSpec.lbStyle = BS_SOLID;
+    brushSpec.lbColor = colour;
+    HPEN pen = ::ExtCreatePen(PS_GEOMETRIC | PS_SOLID | PS_ENDCAP_ROUND | PS_JOIN_ROUND,
+                              static_cast<DWORD>(stroke), &brushSpec, 0, nullptr);
     const HGDIOBJ oldPen = ::SelectObject(dc, pen);
     const HGDIOBJ oldBrush = ::SelectObject(dc, ::GetStockObject(NULL_BRUSH));
     HBRUSH fill = ::CreateSolidBrush(colour);
@@ -100,9 +105,15 @@ void PaintGlyph(HDC dc, const RECT& box, const std::wstring& key, COLORREF colou
         ::LineTo(dc, right, bottom - unit);
         ::LineTo(dc, left, bottom - unit);
     } else if (KeyHas(key, L".save")) {
-        ::Rectangle(dc, left, top, right, bottom);
-        ::Rectangle(dc, left + unit * 2, top, right - unit * 2, top + unit * 2);
-        ::Rectangle(dc, left + unit, bottom - unit * 3, right - unit, bottom);
+        // 现代"保存"记号：向下的箭头落进托盘，不再画软盘
+        const int center = (left + right) / 2;
+        ::MoveToEx(dc, left + unit * 2, bottom - unit * 2, nullptr);
+        ::LineTo(dc, center, top + unit * 3);
+        ::LineTo(dc, right - unit * 2, bottom - unit * 2);
+        ::MoveToEx(dc, left + unit * 2, bottom - unit, nullptr);
+        ::LineTo(dc, left + unit * 2, bottom);
+        ::LineTo(dc, right - unit * 2, bottom);
+        ::LineTo(dc, right - unit * 2, bottom - unit);
     } else if (KeyHas(key, L".undo") || KeyHas(key, L".redo")) {
         const bool forward = KeyHas(key, L".redo");
         const int head = forward ? right - unit : left + unit;
@@ -253,11 +264,11 @@ int ToolBar::Scale(int value) const {
 }
 
 int ToolBar::CellSize() const {
-    return Scale(iconSize_) + Scale(3) * 2;
+    return Scale(iconSize_) + Scale(6) * 2;
 }
 
 int ToolBar::SeparatorWidth() const {
-    return Scale(7);
+    return Scale(9);
 }
 
 int ToolBar::Height() const {
@@ -294,16 +305,7 @@ bool ToolBar::Create(HWND parent, int controlId) {
     if (hwnd_ == nullptr) {
         return false;
     }
-    NONCLIENTMETRICSW metrics{};
-    metrics.cbSize = sizeof(metrics);
-    LOGFONTW logFont{};
-    if (::SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0) != 0) {
-        logFont = metrics.lfMessageFont;
-    } else {
-        ::wcscpy_s(logFont.lfFaceName, L"Microsoft YaHei UI");
-        logFont.lfHeight = -12;
-    }
-    font_ = ::CreateFontIndirectW(&logFont);
+    font_ = CreateChromeFont(DpiOf(hwnd_), 90, false);
 
     tooltip_ = ::CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
                                  WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, CW_USEDEFAULT,
@@ -560,7 +562,8 @@ void ToolBar::Paint(HDC dc) const {
         const int left = ItemLeft(i);
         if (items_[i].id == 0) {
             const int x = left + SeparatorWidth() / 2;
-            RECT line{x, Scale(5), x + 1, client.bottom - Scale(5)};
+            const int hairline = Scale(1);
+            RECT line{x, Scale(7), x + hairline, client.bottom - Scale(7)};
             HBRUSH brush = ::CreateSolidBrush(colors.separator);
             ::FillRect(dc, &line, brush);
             ::DeleteObject(brush);
@@ -581,7 +584,7 @@ void ToolBar::Paint(HDC dc) const {
             ::InflateRect(&fill, -Scale(2), -Scale(3));
             const COLORREF colour = pressed ? colors.pressed
                                             : (checked ? colors.checked : colors.hot);
-            FillRoundedRect(dc, fill, Scale(6), colour);
+            FillRoundedRect(dc, fill, Scale(7), colour);
         }
         const int inset = (CellSize() - Scale(iconSize_)) / 2;
         RECT glyph{box.left + inset, box.top + inset, box.right - inset, box.bottom - inset};

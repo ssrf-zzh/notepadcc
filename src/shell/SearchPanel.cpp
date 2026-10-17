@@ -3,6 +3,7 @@
 #include <commctrl.h>
 
 #include <algorithm>
+#include <cwchar>
 
 #include "infra/Log.h"
 #include "search/TextBytes.h"
@@ -13,6 +14,8 @@ namespace {
 constexpr int kGap = 6;
 constexpr int kRowHeight = 25;
 constexpr int kListHeight = 170;
+constexpr UINT kMsgUpdateScrollCorner = WM_APP + 41;
+constexpr const wchar_t* kScrollCornerClass = L"notepadccSearchScrollCorner";
 
 void SetListSubItem(HWND list, int item, int subItem, const std::wstring& text) {
     LVITEMW entry{};
@@ -33,9 +36,18 @@ bool SearchPanel::Create(HWND parent) {
     wc.lpfnWndProc = &SearchPanel::WndProcThunk;
     wc.hInstance = ::GetModuleHandleW(nullptr);
     wc.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_BTNFACE + 1));
+    // 背景由 WM_PAINT 按主题填，避免深色 / 护眼模式被系统灰盖住
+    wc.hbrBackground = nullptr;
     wc.lpszClassName = L"notepadccSearchPanel";
     ::RegisterClassExW(&wc);
+
+    WNDCLASSEXW corner{};
+    corner.cbSize = sizeof(corner);
+    corner.lpfnWndProc = &SearchPanel::CornerWndProc;
+    corner.hInstance = ::GetModuleHandleW(nullptr);
+    corner.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
+    corner.lpszClassName = kScrollCornerClass;
+    ::RegisterClassExW(&corner);
 
     hwnd_ = ::CreateWindowExW(0, L"notepadccSearchPanel", L"",
                               WS_CHILD | WS_CLIPCHILDREN,
@@ -82,15 +94,25 @@ bool SearchPanel::Create(HWND parent) {
     ::SetWindowTextW(::GetDlgItem(hwnd_, kSearchPanelClose), L"关闭");
 
     list_ = MakeControl(WC_LISTVIEWW,
-                        WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | LVS_REPORT |
+                        WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | WS_CLIPSIBLINGS |
+                            LVS_REPORT |
                             LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER,
                         0, kSearchPanelList, nullptr);
-    status_ = MakeControl(L"STATIC", WS_CHILD | WS_VISIBLE | SS_LEFT, 0, kSearchPanelStatus,
-                          nullptr);
+    // 系统列表的滚动条交叉角不跟 DarkMode_Explorer 走，会留一块系统白。
+    // 用专用自绘子窗口盖住它，比改系统非客户区的绘制可靠；列表与覆盖层都要
+    // WS_CLIPSIBLINGS，否则列表重画非客户区时会盖过同级覆盖层。
+    scrollCorner_ = ::CreateWindowExW(
+        0, kScrollCornerClass, L"", WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 0, 0, hwnd_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSearchPanelScrollCorner)),
+        ::GetModuleHandleW(nullptr), this);
+    status_ = MakeControl(L"STATIC",
+                          WS_CHILD | WS_VISIBLE | SS_LEFT | SS_ENDELLIPSIS | SS_CENTERIMAGE,
+                          0, kSearchPanelStatus, nullptr);
 
     ApplyFont();
     SetupColumns();
     Layout();
+    SetTheme(dark_, eyeCare_);
     SetStatus(L"就绪");
     SetApplyEnabled(false);
     return true;
@@ -107,6 +129,14 @@ void SearchPanel::Destroy() {
         ::DeleteObject(font_);
         font_ = nullptr;
     }
+    if (background_ != nullptr) {
+        ::DeleteObject(background_);
+        background_ = nullptr;
+    }
+    if (field_ != nullptr) {
+        ::DeleteObject(field_);
+        field_ = nullptr;
+    }
     rows_.clear();
 }
 
@@ -122,16 +152,8 @@ HWND SearchPanel::MakeControl(const wchar_t* className, DWORD style, DWORD exSty
 }
 
 void SearchPanel::ApplyFont() {
-    NONCLIENTMETRICSW metrics{};
-    metrics.cbSize = sizeof(metrics);
-    LOGFONTW logFont{};
-    if (::SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0) != 0) {
-        logFont = metrics.lfMessageFont;
-    } else {
-        ::wcscpy_s(logFont.lfFaceName, L"Microsoft YaHei UI");
-        logFont.lfHeight = -12;
-    }
-    font_ = ::CreateFontIndirectW(&logFont);
+    // 与查找栏 / 菜单栏 / 状态栏同一条字体链
+    font_ = CreateChromeFont(static_cast<int>(Scale(96)), 95, false);
     if (font_ != nullptr) {
         ::EnumChildWindows(
             hwnd_,
@@ -141,10 +163,360 @@ void SearchPanel::ApplyFont() {
             },
             reinterpret_cast<LPARAM>(font_));
     }
+    InstallButtonSubclasses();
     if (list_ != nullptr) {
         ::SendMessageW(list_, LVM_SETEXTENDEDLISTVIEWSTYLE, 0,
                        LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+        ::SetWindowSubclass(list_, &SearchPanel::ListSubclass, 6000,
+                            reinterpret_cast<DWORD_PTR>(this));
     }
+}
+
+ChromeColours SearchPanel::Theme() const {
+    return ChromeColoursFor(dark_, eyeCare_);
+}
+
+void SearchPanel::SetTheme(bool dark, bool eyeCare) {
+    dark_ = dark;
+    eyeCare_ = eyeCare;
+    UpdateThemeResources();
+    if (hwnd_ == nullptr) {
+        return;
+    }
+    ApplyThemeToControls();
+    ::InvalidateRect(hwnd_, nullptr, TRUE);
+    ::EnumChildWindows(
+        hwnd_,
+        [](HWND child, LPARAM) -> BOOL {
+            ::InvalidateRect(child, nullptr, TRUE);
+            return TRUE;
+        },
+        0);
+}
+
+void SearchPanel::UpdateThemeResources() {
+    if (background_ != nullptr) {
+        ::DeleteObject(background_);
+        background_ = nullptr;
+    }
+    if (field_ != nullptr) {
+        ::DeleteObject(field_);
+        field_ = nullptr;
+    }
+    if (hwnd_ != nullptr) {
+        const ChromeColours colours = Theme();
+        background_ = ::CreateSolidBrush(colours.strip);
+        field_ = ::CreateSolidBrush(colours.tabActive);
+    }
+}
+
+void SearchPanel::ApplyThemeToControls() {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+    const ChromeColours colours = Theme();
+    ::EnumChildWindows(
+        hwnd_,
+        [](HWND child, LPARAM param) -> BOOL {
+            const auto* self = reinterpret_cast<const SearchPanel*>(param);
+            wchar_t className[32]{};
+            ::GetClassNameW(child, className, 32);
+            if (::_wcsicmp(className, L"Edit") == 0) {
+                ApplyControlTheme(child, self->dark_, L"DarkMode_CFD");
+            } else if (::_wcsicmp(className, L"SysListView32") == 0) {
+                ApplyControlTheme(child, self->dark_, L"DarkMode_Explorer");
+                const HWND header = ListView_GetHeader(child);
+                if (header != nullptr) {
+                    ApplyControlTheme(header, self->dark_, L"DarkMode_Explorer");
+                    ::InvalidateRect(header, nullptr, TRUE);
+                }
+            } else if (::_wcsicmp(className, L"Button") == 0) {
+                ::InvalidateRect(child, nullptr, TRUE);
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(this));
+
+    if (list_ != nullptr) {
+        ::SendMessageW(list_, LVM_SETBKCOLOR, 0, colours.tabActive);
+        ::SendMessageW(list_, LVM_SETTEXTBKCOLOR, 0, colours.tabActive);
+        ::SendMessageW(list_, LVM_SETTEXTCOLOR, 0, colours.text);
+    }
+}
+
+void SearchPanel::InstallButtonSubclasses() {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+    ::EnumChildWindows(
+        hwnd_,
+        [](HWND child, LPARAM param) -> BOOL {
+            wchar_t className[32]{};
+            ::GetClassNameW(child, className, 32);
+            if (::_wcsicmp(className, L"Button") == 0) {
+                ::SetWindowSubclass(child, &SearchPanel::ButtonSubclass,
+                                    static_cast<UINT_PTR>(5000 + ::GetDlgCtrlID(child)), param);
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(this));
+}
+
+void SearchPanel::PaintBackground(HDC dc) const {
+    RECT client{};
+    ::GetClientRect(hwnd_, &client);
+    const HBRUSH brush = background_ != nullptr ? background_ : ::GetSysColorBrush(COLOR_WINDOW);
+    ::FillRect(dc, &client, brush);
+}
+
+void SearchPanel::PaintScrollCorner(HDC dc) const {
+    if (scrollCorner_ == nullptr || dc == nullptr) {
+        return;
+    }
+    RECT client{};
+    ::GetClientRect(scrollCorner_, &client);
+    // 这里必须自己填：Static 在 PrintWindow / PRF_CLIENT 下会退回系统灰，
+    // 真实屏幕与截图就成了两种颜色。自绘后两条路径都取同一份主题色。
+    const HBRUSH brush = field_ != nullptr ? field_ : ::GetSysColorBrush(COLOR_WINDOW);
+    ::FillRect(dc, &client, brush);
+}
+
+LRESULT CALLBACK SearchPanel::CornerWndProc(HWND hwnd, UINT message, WPARAM wParam,
+                                            LPARAM lParam) {
+    auto* self = reinterpret_cast<SearchPanel*>(::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+        self = static_cast<SearchPanel*>(create->lpCreateParams);
+        ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+    }
+    if (self == nullptr) {
+        return ::DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+    switch (message) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT paint{};
+            const HDC dc = ::BeginPaint(hwnd, &paint);
+            self->PaintScrollCorner(dc);
+            ::EndPaint(hwnd, &paint);
+            return 0;
+        }
+        case WM_PRINTCLIENT:
+        case WM_PRINT:
+            self->PaintScrollCorner(reinterpret_cast<HDC>(wParam));
+            return 0;
+        case WM_DESTROY:
+            ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            return 0;
+        default:
+            break;
+    }
+    return ::DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+void SearchPanel::PaintControl(HWND control, HDC dc) const {
+    if (control == nullptr || dc == nullptr) {
+        return;
+    }
+    RECT client{};
+    ::GetClientRect(control, &client);
+    wchar_t text[256]{};
+    ::GetWindowTextW(control, text, 256);
+
+    const LONG_PTR style = ::GetWindowLongPtrW(control, GWL_STYLE);
+    const bool checkbox = (style & BS_TYPEMASK) == BS_AUTOCHECKBOX ||
+                          (style & BS_TYPEMASK) == BS_CHECKBOX ||
+                          (style & BS_TYPEMASK) == BS_AUTO3STATE ||
+                          (style & BS_TYPEMASK) == BS_3STATE;
+    const bool enabled = ::IsWindowEnabled(control) != 0;
+    const bool focused = ::GetFocus() == control;
+    POINT cursor{};
+    ::GetCursorPos(&cursor);
+    const bool hovered = ::WindowFromPoint(cursor) == control;
+    const DWORD state = static_cast<DWORD>(::SendMessageW(control, BM_GETSTATE, 0, 0));
+    const bool pressed = (state & BST_PUSHED) != 0;
+    const bool checked = ::SendMessageW(control, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    const int controlId = ::GetDlgCtrlID(control);
+    const bool primary = controlId == kSearchPanelStart;
+    const ChromeColours colours = Theme();
+    const int dpi = static_cast<int>(Scale(96));
+
+    if (checkbox) {
+        DrawChromeCheckBox(dc, client, text, font_, colours, dpi, dark_, checked, hovered,
+                           focused, enabled);
+    } else {
+        DrawChromePushButton(dc, client, text, font_, colours, dpi, dark_, primary, hovered,
+                             pressed, focused, enabled);
+    }
+}
+
+LRESULT CALLBACK SearchPanel::ButtonSubclass(HWND hwnd, UINT message, WPARAM wParam,
+                                             LPARAM lParam, UINT_PTR /*id*/, DWORD_PTR ref) {
+    auto* self = reinterpret_cast<SearchPanel*>(ref);
+    return self != nullptr ? self->ButtonSubclassProc(hwnd, message, wParam, lParam)
+                           : ::DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
+LRESULT SearchPanel::ButtonSubclassProc(HWND hwnd, UINT message, WPARAM wParam,
+                                        LPARAM lParam) {
+    switch (message) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT paint{};
+            const HDC dc = ::BeginPaint(hwnd, &paint);
+            PaintControl(hwnd, dc);
+            ::EndPaint(hwnd, &paint);
+            return 0;
+        }
+        case WM_PRINTCLIENT:
+            PaintControl(hwnd, reinterpret_cast<HDC>(wParam));
+            return 0;
+        case WM_MOUSEMOVE: {
+            TRACKMOUSEEVENT track{};
+            track.cbSize = sizeof(track);
+            track.dwFlags = TME_LEAVE;
+            track.hwndTrack = hwnd;
+            ::TrackMouseEvent(&track);
+            ::InvalidateRect(hwnd, nullptr, FALSE);
+            break;
+        }
+        case WM_MOUSELEAVE:
+        case WM_SETFOCUS:
+        case WM_KILLFOCUS:
+        case WM_ENABLE:
+        case WM_SETTEXT:
+        case WM_UPDATEUISTATE:
+        case WM_LBUTTONDOWN:
+        case WM_LBUTTONUP:
+            ::InvalidateRect(hwnd, nullptr, FALSE);
+            break;
+        default:
+            break;
+    }
+    return ::DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
+LRESULT CALLBACK SearchPanel::ListSubclass(HWND hwnd, UINT message, WPARAM wParam,
+                                           LPARAM lParam, UINT_PTR /*id*/, DWORD_PTR ref) {
+    auto* self = reinterpret_cast<SearchPanel*>(ref);
+    if (self != nullptr) {
+        return self->ListSubclassProc(hwnd, message, wParam, lParam);
+    }
+    return ::DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
+void SearchPanel::UpdateScrollCorner() {
+    scrollCornerPending_ = false;
+    if (scrollCorner_ == nullptr || list_ == nullptr) {
+        return;
+    }
+    SCROLLINFO vertical{};
+    vertical.cbSize = sizeof(vertical);
+    vertical.fMask = SIF_RANGE | SIF_PAGE;
+    SCROLLINFO horizontal{};
+    horizontal.cbSize = sizeof(horizontal);
+    horizontal.fMask = SIF_RANGE | SIF_PAGE;
+    const bool verticalShown =
+        ::GetScrollInfo(list_, SB_VERT, &vertical) != 0 &&
+        vertical.nMax - vertical.nMin + 1 > static_cast<int>(vertical.nPage);
+    const bool horizontalShown =
+        ::GetScrollInfo(list_, SB_HORZ, &horizontal) != 0 &&
+        horizontal.nMax - horizontal.nMin + 1 > static_cast<int>(horizontal.nPage);
+    if (!verticalShown || !horizontalShown) {
+        ::ShowWindow(scrollCorner_, SW_HIDE);
+        return;
+    }
+    RECT area{};
+    ::GetWindowRect(list_, &area);
+    ::MapWindowPoints(nullptr, hwnd_, reinterpret_cast<POINT*>(&area), 2);
+    const int width = area.right - area.left;
+    const int height = area.bottom - area.top;
+    const int scrollWidth = ::GetSystemMetrics(SM_CXVSCROLL);
+    const int scrollHeight = ::GetSystemMetrics(SM_CYHSCROLL);
+    ::SetWindowPos(scrollCorner_, HWND_TOP, area.left + width - scrollWidth,
+                   area.top + height - scrollHeight, scrollWidth, scrollHeight,
+                   SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+void SearchPanel::ScheduleScrollCorner() {
+    if (hwnd_ == nullptr || scrollCornerPending_) {
+        return;
+    }
+    scrollCornerPending_ = true;
+    ::PostMessageW(hwnd_, kMsgUpdateScrollCorner, 0, 0);
+}
+
+LRESULT SearchPanel::ListSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == WM_SIZE || message == WM_HSCROLL || message == WM_VSCROLL ||
+        message == WM_MOUSEWHEEL) {
+        const LRESULT result = ::DefSubclassProc(hwnd, message, wParam, lParam);
+        ScheduleScrollCorner();
+        return result;
+    }
+    // 表头的 NM_CUSTOMDRAW 只会送到列表视图本身，不会再到搜索面板。
+    // 在这里拦一次，深色主题下表头才不会留一条系统白条。
+    if (message == WM_NOTIFY) {
+        const auto* header = reinterpret_cast<const NMHDR*>(lParam);
+        if (header != nullptr && header->code == NM_CUSTOMDRAW &&
+            header->hwndFrom == ListView_GetHeader(hwnd)) {
+            const auto* draw = reinterpret_cast<const NMCUSTOMDRAW*>(lParam);
+            if (draw->dwDrawStage == CDDS_PREPAINT) {
+                RECT client{};
+                ::GetClientRect(header->hwndFrom, &client);
+                const HBRUSH brush = background_ != nullptr
+                                         ? background_
+                                         : ::GetSysColorBrush(COLOR_BTNFACE);
+                ::FillRect(draw->hdc, &client, brush);
+                return CDRF_NOTIFYITEMDRAW;
+            }
+            // 表头给每个子项发的是 CDDS_ITEMPREPAINT | CDDS_SUBITEM；原来用
+            // == CDDS_ITEMPREPAINT 判断，永远进不来，系统白底就留了下来。
+            if ((draw->dwDrawStage & CDDS_ITEMPREPAINT) == CDDS_ITEMPREPAINT) {
+                const HBRUSH brush = background_ != nullptr
+                                         ? background_
+                                         : ::GetSysColorBrush(COLOR_BTNFACE);
+                ::FillRect(draw->hdc, &draw->rc, brush);
+                RECT line = draw->rc;
+                line.top = line.bottom - std::max(1, Scale(1));
+                const HBRUSH lineBrush = ::CreateSolidBrush(Theme().line);
+                ::FillRect(draw->hdc, &line, lineBrush);
+                ::DeleteObject(lineBrush);
+                line = draw->rc;
+                line.left = line.right - std::max(1, Scale(1));
+                const HBRUSH dividerBrush = ::CreateSolidBrush(Theme().line);
+                ::FillRect(draw->hdc, &line, dividerBrush);
+                ::DeleteObject(dividerBrush);
+
+                wchar_t text[256]{};
+                HDITEMW item{};
+                item.mask = HDI_TEXT;
+                item.pszText = text;
+                item.cchTextMax = static_cast<int>(std::size(text));
+                if (::SendMessageW(header->hwndFrom, HDM_GETITEMW, draw->dwItemSpec,
+                                   reinterpret_cast<LPARAM>(&item)) != 0) {
+                    const HGDIOBJ oldFont = font_ != nullptr
+                                                ? ::SelectObject(draw->hdc, font_)
+                                                : nullptr;
+                    ::SetBkMode(draw->hdc, TRANSPARENT);
+                    ::SetTextColor(draw->hdc, Theme().text);
+                    RECT textRect = draw->rc;
+                    ::InflateRect(&textRect, -Scale(6), 0);
+                    ::DrawTextW(draw->hdc, text, -1, &textRect,
+                                DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX |
+                                    DT_END_ELLIPSIS);
+                    if (oldFont != nullptr) {
+                        ::SelectObject(draw->hdc, oldFont);
+                    }
+                }
+                ::SetTextColor(draw->hdc, Theme().text);
+                ::SetBkMode(draw->hdc, TRANSPARENT);
+                return CDRF_SKIPDEFAULT;
+            }
+        }
+    }
+    return ::DefSubclassProc(hwnd, message, wParam, lParam);
 }
 
 void SearchPanel::SetupColumns() {
@@ -182,7 +554,136 @@ int SearchPanel::Scale(int value) const {
 }
 
 int SearchPanel::Height() const {
-    return Scale(kRowHeight) * 2 + Scale(kListHeight) + Scale(kGap) * 4;
+    if (hwnd_ == nullptr) {
+        return 0;
+    }
+    RECT parent{};
+    ::GetClientRect(::GetParent(hwnd_), &parent);
+    int width = parent.right - parent.left;
+    if (width <= 0) {
+        RECT own{};
+        ::GetClientRect(hwnd_, &own);
+        width = own.right - own.left;
+    }
+    int bottom = 0;
+    for (const Placement& placement : BuildPlacements(width)) {
+        bottom = std::max(bottom, static_cast<int>(placement.rect.bottom));
+    }
+    return bottom + Scale(kListHeight) + Scale(kGap) * 2;
+}
+
+std::vector<SearchPanel::Placement> SearchPanel::BuildPlacements(int width) const {
+    std::vector<Placement> placements;
+    if (hwnd_ == nullptr || width <= 0) {
+        return placements;
+    }
+    const int gap = Scale(kGap);
+    const int availableWidth = width - gap * 2;
+    const bool compact = availableWidth < Scale(560);
+    const int itemGap = compact ? Scale(4) : Scale(6);
+    const int rowHeight = Scale(kRowHeight);
+    // 中文标签需要按字形宽度留位：「区分大小写」/「匹配换行」约 5 个字，
+    // 「在文件中查找」6 个字。只按英文按钮的直觉取 88 会在 960 宽时画出省略号。
+    const int checkWidth = Scale(104);
+    const int buttonWidth = Scale(compact ? 110 : 116);
+    const int smallButton = Scale(compact ? 48 : 60);
+    const int replaceButtonWidth = Scale(compact ? 84 : 92);
+    const int right = std::max(gap * 2, width - gap);
+    const int available = right - gap;
+    int y = gap;
+    int x = gap;
+    auto place = [&](HWND control, int controlWidth) {
+        if (control == nullptr) {
+            return;
+        }
+        if (x > gap && x + controlWidth > right) {
+            x = gap;
+            y += rowHeight + gap;
+        }
+        placements.push_back(
+            {control, RECT{x, y, x + controlWidth, y + rowHeight}});
+        x += controlWidth + itemGap;
+    };
+
+    // 第一行：查找框尽量占满，三个复选框放得下就并排，否则整体换到下一行。
+    const int checkTotal = checkWidth * 3 + itemGap * 2;
+    const int minFindWidth = Scale(180);
+    const bool checksInline = available >= minFindWidth + itemGap + checkTotal;
+    const int findWidth = checksInline ? available - itemGap - checkTotal : available;
+    if (const HWND find = ::GetDlgItem(hwnd_, kSearchPanelFind); find != nullptr) {
+        placements.push_back({find, RECT{x, y, x + findWidth, y + rowHeight}});
+        x += findWidth + itemGap;
+    }
+    if (checksInline) {
+        for (const int id : {kSearchPanelCase, kSearchPanelWord, kSearchPanelRegex}) {
+            place(::GetDlgItem(hwnd_, id), checkWidth);
+        }
+    } else {
+        x = gap;
+        y += rowHeight + gap;
+        for (const int id : {kSearchPanelCase, kSearchPanelWord, kSearchPanelRegex}) {
+            place(::GetDlgItem(hwnd_, id), checkWidth);
+        }
+    }
+
+    // 第二行：五个操作按钮按空间换行；状态文字优先贴右，放不下再单独占一行。
+    y += rowHeight + gap;
+    x = gap;
+    const int actionWidths[] = {buttonWidth, replaceButtonWidth, replaceButtonWidth,
+                                smallButton, smallButton};
+    const int actionIds[] = {kSearchPanelStart, kSearchPanelReplacePreview,
+                             kSearchPanelApply, kSearchPanelStop, kSearchPanelClose};
+    for (int index = 0; index < 5; ++index) {
+        place(::GetDlgItem(hwnd_, actionIds[index]), actionWidths[index]);
+    }
+    const int statusMinWidth = Scale(compact ? 130 : 160);
+    const int statusWidth = std::min(Scale(260), std::max(statusMinWidth, width / 3));
+    if (status_ != nullptr) {
+        if (x > gap && right - x >= statusMinWidth) {
+            const int statusLeft = std::max(x, right - statusWidth);
+            placements.push_back(
+                {status_, RECT{statusLeft, y, right, y + rowHeight}});
+        } else {
+            x = gap;
+            y += rowHeight + gap;
+            placements.push_back({status_, RECT{x, y, right, y + rowHeight}});
+        }
+    }
+
+    // 第三行起：目录 / 过滤器 / 替换框。宽度够就三列，窄了先让目录独占一行，
+    // 再窄就把三个输入框逐行铺满。
+    y += rowHeight + gap;
+    x = gap;
+    const int filterWidth = Scale(compact ? 150 : 220);
+    const int replaceWidth = Scale(compact ? 130 : 180);
+    const int minDirWidth = Scale(compact ? 150 : 180);
+    const bool fieldsInline = available >=
+        minDirWidth + itemGap * 2 + filterWidth + replaceWidth;
+    const HWND dir = ::GetDlgItem(hwnd_, kSearchPanelDir);
+    const HWND filter = ::GetDlgItem(hwnd_, kSearchPanelFilter);
+    const HWND replace = ::GetDlgItem(hwnd_, kSearchPanelReplaceEdit);
+    if (fieldsInline) {
+        const int dirWidth = available - itemGap * 2 - filterWidth - replaceWidth;
+        placements.push_back({dir, RECT{x, y, x + dirWidth, y + rowHeight}});
+        x += dirWidth + itemGap;
+        placements.push_back({filter, RECT{x, y, x + filterWidth, y + rowHeight}});
+        x += filterWidth + itemGap;
+        placements.push_back({replace, RECT{x, y, x + replaceWidth, y + rowHeight}});
+    } else if (available >= Scale(200)) {
+        placements.push_back({dir, RECT{x, y, x + available, y + rowHeight}});
+        y += rowHeight + gap;
+        const int halfWidth = (available - itemGap) / 2;
+        placements.push_back({filter, RECT{x, y, x + halfWidth, y + rowHeight}});
+        x += halfWidth + itemGap;
+        placements.push_back(
+            {replace, RECT{x, y, right, y + rowHeight}});
+    } else {
+        for (const HWND control : {dir, filter, replace}) {
+            placements.push_back({control, RECT{x, y, right, y + rowHeight}});
+            y += rowHeight + gap;
+        }
+    }
+    return placements;
 }
 
 void SearchPanel::Layout() {
@@ -191,73 +692,32 @@ void SearchPanel::Layout() {
     }
     RECT client{};
     ::GetClientRect(hwnd_, &client);
-    const int width = client.right - client.left;
-    const int rowHeight = Scale(kRowHeight);
-    const int gap = Scale(kGap);
-    const int row1 = gap;
-    const int row2 = gap * 2 + rowHeight;
-    const int listTop = row2 + rowHeight + gap;
-
-    auto place = [&](HWND control, int x, int y, int w, int h) {
-        if (control != nullptr) {
-            ::MoveWindow(control, x, y, w, h, TRUE);
-        }
-    };
-
-    const int buttonWidth = Scale(92);
-    const int smallButton = Scale(60);
-    const int checkWidth = Scale(88);
-    const int replaceButtonWidth = Scale(68);
-    int x = gap;
-
-    // 第一行：查找内容 + 选项 + 操作按钮
-    const int reserved = checkWidth * 3 + buttonWidth + replaceButtonWidth * 2 +
-                         smallButton + gap * 10;
-    const int findWidth = std::max(Scale(160), width - reserved - gap);
-    place(::GetDlgItem(hwnd_, kSearchPanelFind), x, row1, findWidth, rowHeight);
-    x += findWidth + gap;
-    for (const int id : {kSearchPanelCase, kSearchPanelWord, kSearchPanelRegex}) {
-        place(::GetDlgItem(hwnd_, id), x, row1, checkWidth, rowHeight);
-        x += checkWidth;
+    int width = client.right - client.left;
+    if (width <= 0) {
+        RECT parent{};
+        ::GetClientRect(::GetParent(hwnd_), &parent);
+        width = parent.right - parent.left;
     }
-    x += gap;
-    place(::GetDlgItem(hwnd_, kSearchPanelStart), x, row1, buttonWidth, rowHeight);
-    x += buttonWidth + gap;
-    place(::GetDlgItem(hwnd_, kSearchPanelReplacePreview), x, row1, replaceButtonWidth,
-          rowHeight);
-    x += replaceButtonWidth + gap;
-    place(::GetDlgItem(hwnd_, kSearchPanelApply), x, row1, replaceButtonWidth, rowHeight);
-    x += replaceButtonWidth + gap;
-    place(::GetDlgItem(hwnd_, kSearchPanelStop), x, row1, smallButton, rowHeight);
-    x += smallButton + gap;
-    place(::GetDlgItem(hwnd_, kSearchPanelClose), x, row1, smallButton, rowHeight);
-
-    // 第二行：目录 + 过滤器 + 替换为 + 状态
-    x = gap;
-    const int statusWidth = Scale(240);
-    const int replaceWidth = Scale(200);
-    const int filterWidth = Scale(240);
-    const int dirWidth = std::max(
-        Scale(140), width - statusWidth - filterWidth - replaceWidth - gap * 6);
-    place(::GetDlgItem(hwnd_, kSearchPanelDir), x, row2, dirWidth, rowHeight);
-    x += dirWidth + gap;
-    place(::GetDlgItem(hwnd_, kSearchPanelFilter), x, row2, filterWidth, rowHeight);
-    x += filterWidth + gap;
-    place(::GetDlgItem(hwnd_, kSearchPanelReplaceEdit), x, row2, replaceWidth, rowHeight);
-    place(status_, width - statusWidth - gap, row2, statusWidth, rowHeight);
-
-    // 结果列表填满剩余空间
-    const int listHeight =
-        std::max(rowHeight, static_cast<int>(client.bottom) - listTop - gap);
-    place(list_, gap, listTop, std::max(10, width - gap * 2), listHeight);
-
-    // 列宽随窗口调整
+    int bottom = 0;
+    for (const Placement& placement : BuildPlacements(width)) {
+        if (placement.handle != nullptr) {
+            ::MoveWindow(placement.handle, placement.rect.left, placement.rect.top,
+                         placement.rect.right - placement.rect.left,
+                         placement.rect.bottom - placement.rect.top, TRUE);
+            bottom = std::max(bottom, static_cast<int>(placement.rect.bottom));
+        }
+    }
+    const int gap = Scale(kGap);
+    const int listTop = bottom + gap;
+    const int listHeight = std::max(Scale(kRowHeight), static_cast<int>(client.bottom) - listTop - gap);
     if (list_ != nullptr) {
+        ::MoveWindow(list_, gap, listTop, std::max(10, width - gap * 2), listHeight, TRUE);
         const int total = std::max(100, width - gap * 2 - Scale(24));
         ::SendMessageW(list_, LVM_SETCOLUMNWIDTH, 0, total * 35 / 100);
         ::SendMessageW(list_, LVM_SETCOLUMNWIDTH, 1, Scale(56));
         ::SendMessageW(list_, LVM_SETCOLUMNWIDTH, 2, total * 60 / 100);
     }
+    ScheduleScrollCorner();
 }
 
 void SearchPanel::Show() {
@@ -357,6 +817,7 @@ void SearchPanel::ClearResults() {
         ::SendMessageW(list_, LVM_SETEXTENDEDLISTVIEWSTYLE, LVS_EX_CHECKBOXES, 0);
     }
     SetApplyEnabled(false);
+    ScheduleScrollCorner();
 }
 
 void SearchPanel::BeginReplacePreview() {
@@ -434,6 +895,7 @@ void SearchPanel::AppendReplacePlan(const search::FileReplacePlan& plan) {
                    reinterpret_cast<LPARAM>(&stateItem));
 
     rows_.push_back(RowRef{plan.path, 0, planIndex});
+    ScheduleScrollCorner();
 }
 
 void SearchPanel::EndReplacePreview() {
@@ -443,6 +905,7 @@ void SearchPanel::EndReplacePreview() {
         ::SendMessageW(list_, LVM_SETCOLUMNWIDTH, 2, Scale(520));
     }
     SetApplyEnabled(!plans_.empty());
+    ScheduleScrollCorner();
 }
 
 std::vector<search::FileReplacePlan> SearchPanel::CheckedPlans() const {
@@ -526,6 +989,7 @@ void SearchPanel::AppendFileResult(const search::FileSearchResult& result) {
         SetListSubItem(list_, inserted, 2, text);
         rows_.push_back(RowRef{result.path, hit.line});
     }
+    ScheduleScrollCorner();
 }
 
 void SearchPanel::SetStatus(const std::wstring& text) {
@@ -597,13 +1061,45 @@ LRESULT CALLBACK SearchPanel::WndProcThunk(HWND hwnd, UINT message, WPARAM wPara
 
 LRESULT SearchPanel::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT paint{};
+            const HDC dc = ::BeginPaint(hwnd_, &paint);
+            PaintBackground(dc);
+            ::EndPaint(hwnd_, &paint);
+            return 0;
+        }
+        case WM_PRINTCLIENT:
+            PaintBackground(reinterpret_cast<HDC>(wParam));
+            return 0;
         case WM_SIZE:
             Layout();
+            // 系统列表控件在尺寸变化后偶尔会退回浅色底；重新套一次主题，
+            // 尤其是被压到只剩一两行时也能保持深色。
+            if (dark_) {
+                ApplyThemeToControls();
+            }
             return 0;
-        case WM_CTLCOLORSTATIC: {
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN: {
             const HDC dc = reinterpret_cast<HDC>(wParam);
             ::SetBkMode(dc, TRANSPARENT);
-            return reinterpret_cast<LRESULT>(::GetSysColorBrush(COLOR_BTNFACE));
+            ::SetTextColor(dc, Theme().text);
+            if (reinterpret_cast<HWND>(lParam) == scrollCorner_) {
+                return reinterpret_cast<LRESULT>(
+                    field_ != nullptr ? field_ : ::GetSysColorBrush(COLOR_WINDOW));
+            }
+            return reinterpret_cast<LRESULT>(
+                background_ != nullptr ? background_ : ::GetSysColorBrush(COLOR_BTNFACE));
+        }
+        case WM_CTLCOLOREDIT: {
+            const HDC dc = reinterpret_cast<HDC>(wParam);
+            ::SetBkMode(dc, TRANSPARENT);
+            ::SetTextColor(dc, Theme().text);
+            ::SetBkColor(dc, Theme().tabActive);
+            return reinterpret_cast<LRESULT>(
+                field_ != nullptr ? field_ : ::GetSysColorBrush(COLOR_WINDOW));
         }
         case WM_NOTIFY: {
             const auto* header = reinterpret_cast<const NMHDR*>(lParam);
@@ -615,6 +1111,13 @@ LRESULT SearchPanel::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
         }
         case WM_COMMAND:
             ::SendMessageW(::GetParent(hwnd_), WM_COMMAND, wParam, lParam);
+            return 0;
+        case WM_THEMECHANGED:
+            ApplyThemeToControls();
+            ::InvalidateRect(hwnd_, nullptr, TRUE);
+            return 0;
+        case kMsgUpdateScrollCorner:
+            UpdateScrollCorner();
             return 0;
         case WM_DESTROY:
             ::SetWindowLongPtrW(hwnd_, GWLP_USERDATA, 0);

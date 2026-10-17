@@ -4,8 +4,8 @@
 
 namespace npcc::core {
 
-// 更新清单的 RSA 验签（设计文档 6.7 第 1 条）已下沉到 infra::Crypto（B1：
-// 算法与许可验签共用一处实现，也修掉 infra 层更新服务反向引用 core 的问题）。
+// 更新清单的 RSA 验签（设计文档 6.7 第 1 条）已下沉到 infra::Crypto，
+// 也修掉 infra 层更新服务反向引用 core 的问题。
 // 本文件只留 Authenticode 校验与错误码文案——它们绑在 Windows 信任链上，
 // 不属于"字节级加密设施"。
 

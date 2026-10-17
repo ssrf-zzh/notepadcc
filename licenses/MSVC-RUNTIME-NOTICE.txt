@@ -1,0 +1,21 @@
+Microsoft Visual C++ Runtime Notice
+===================================
+
+The Microsoft Visual C++ build of notepadcc uses the /MT compiler and linker
+option to statically link C/C++ runtime object code supplied with Microsoft
+Visual Studio Build Tools. Microsoft Corporation retains all rights in that
+runtime code.
+
+The redistribution terms for the Microsoft Visual C++ Runtime are the
+Microsoft Software License Terms that accompany the Visual Studio Build Tools
+used to produce the binary. Those terms are not reproduced in this file
+because they are installed with the toolchain and can differ by Visual Studio
+edition and version. This notice does not replace or modify Microsoft's
+license terms.
+
+Toolchain family: MSVC 14.44 (the exact version is recorded in sbom.cdx.json)
+Reference: https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist
+
+Anyone redistributing a build of notepadcc must first confirm that their
+Microsoft toolchain license permits redistribution of the statically linked
+runtime code in that build.

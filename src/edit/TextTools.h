@@ -58,7 +58,7 @@ std::string ToUpperCase(std::string_view text, std::uint32_t codePage);
 std::string ToLowerCase(std::string_view text, std::uint32_t codePage);
 
 // ---- 转换工具 ----
-// Base64 的实现在 infra::Crypto（B1 起与更新 / 许可验签共用一处实现）；
+// Base64 的实现在 infra::Crypto（与更新验签共用一处实现）；
 // 这里保留入口：工具菜单、编解码对话框与单测都用它。
 std::string Base64Encode(std::string_view bytes);
 // 失败（含非法字符或长度不合法）返回 false，不改动 out

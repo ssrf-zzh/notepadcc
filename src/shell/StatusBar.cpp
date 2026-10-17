@@ -37,7 +37,7 @@ StatusBar::~StatusBar() {
 
 bool StatusBar::Create(HWND parent, int controlId) {
     hwnd_ = ::CreateWindowExW(0, STATUSCLASSNAMEW, nullptr,
-                              WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
+                              WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP | SBARS_TOOLTIPS,
                               0, 0, 0, 0, parent,
                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(controlId)),
                               ::GetModuleHandleW(nullptr), nullptr);
@@ -48,16 +48,7 @@ bool StatusBar::Create(HWND parent, int controlId) {
     ::SetWindowSubclass(hwnd_, &StatusBar::SubclassProc, 1,
                         reinterpret_cast<DWORD_PTR>(this));
 
-    NONCLIENTMETRICSW metrics{};
-    metrics.cbSize = sizeof(metrics);
-    LOGFONTW logFont{};
-    if (::SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0) != 0) {
-        logFont = metrics.lfMessageFont;
-    } else {
-        ::wcscpy_s(logFont.lfFaceName, L"Microsoft YaHei UI");
-        logFont.lfHeight = -12;
-    }
-    font_ = ::CreateFontIndirectW(&logFont);
+    font_ = CreateChromeFont(DpiOf(hwnd_), 90, false);
     // 把字体也交给控件自己：它按这个字体算自己的高度（Height() 读的就是它算出来的），
     // 不设的话控件用默认字体，和自绘用的字体差半号
     if (font_ != nullptr) {
@@ -93,6 +84,11 @@ void StatusBar::Resize(const RECT& client) const {
     // 第 4 段留给宏录制指示：它必须有自己的位置，否则会被"下一次 UpdateStatus"冲掉
     int parts[4] = {width * 42 / 100, width * 68 / 100, width * 87 / 100, -1};
     ::SendMessageW(hwnd_, SB_SETPARTS, 4, reinterpret_cast<LPARAM>(parts));
+    SetText(3, recording_ ? L"\u25cf REC" : authorText_);
+    if (!authorTooltip_.empty()) {
+        ::SendMessageW(hwnd_, SB_SETTIPTEXTW, 3,
+                       reinterpret_cast<LPARAM>(authorTooltip_.c_str()));
+    }
 }
 
 int StatusBar::Height() const {
@@ -153,8 +149,21 @@ void StatusBar::SetMessage(const std::wstring& text) const {
     SetText(0, text);
 }
 
-void StatusBar::SetMacroRecording(bool recording) const {
-    SetText(3, recording ? L"\u25cf REC" : L"");
+void StatusBar::SetMacroRecording(bool recording) {
+    recording_ = recording;
+    SetText(3, recording ? L"\u25cf REC" : authorText_);
+}
+
+void StatusBar::SetAuthor(const std::wstring& text, const std::wstring& tooltip) {
+    authorText_ = text;
+    authorTooltip_ = tooltip;
+    if (!recording_) {
+        SetText(3, authorText_);
+    }
+    if (hwnd_ != nullptr && !tooltip.empty()) {
+        ::SendMessageW(hwnd_, SB_SETTIPTEXTW, 3,
+                       reinterpret_cast<LPARAM>(tooltip.c_str()));
+    }
 }
 
 LRESULT CALLBACK StatusBar::SubclassProc(HWND hwnd, UINT message, WPARAM wParam,
@@ -177,6 +186,21 @@ LRESULT CALLBACK StatusBar::SubclassProc(HWND hwnd, UINT message, WPARAM wParam,
         case WM_NCDESTROY:
             ::RemoveWindowSubclass(hwnd, &StatusBar::SubclassProc, 1);
             break;
+        case WM_SETCURSOR: {
+            if (LOWORD(lParam) == HTCLIENT) {
+                POINT point{};
+                ::GetCursorPos(&point);
+                ::ScreenToClient(hwnd, &point);
+                int edges[4]{};
+                const LRESULT parts = ::SendMessageW(
+                    hwnd, SB_GETPARTS, 4, reinterpret_cast<LPARAM>(edges));
+                if (parts >= 4 && point.x >= edges[2]) {
+                    ::SetCursor(::LoadCursorW(nullptr, IDC_HAND));
+                    return TRUE;
+                }
+            }
+            break;
+        }
         default:
             break;
     }
@@ -234,8 +258,10 @@ void StatusBar::Paint(HDC dc) const {
                            reinterpret_cast<LPARAM>(buffer.data()));
             RECT textRect{left + textPad, 0, right - textPad, client.bottom};
             if (textRect.right > textRect.left) {
+                const UINT alignment = (i == 3) ? DT_RIGHT : DT_LEFT;
                 ::DrawTextW(dc, buffer.c_str(), -1, &textRect,
-                            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+                            DT_SINGLELINE | DT_VCENTER | alignment | DT_END_ELLIPSIS |
+                            DT_NOPREFIX);
             }
         }
         left = right;

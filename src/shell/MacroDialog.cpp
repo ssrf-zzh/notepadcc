@@ -5,6 +5,9 @@
 #include <cwchar>
 #include <vector>
 
+#include "shell/ChromeStyle.h"
+#include "shell/MessageDialog.h"
+
 namespace npcc::shell {
 namespace {
 
@@ -212,6 +215,7 @@ bool SmallDialog::Show(HWND owner, DialogSpec& spec) {
             },
             reinterpret_cast<LPARAM>(font_));
     }
+    ApplyDialogChrome(hwnd_);
     Layout();
 
     ::EnableWindow(owner_, FALSE);
@@ -310,7 +314,7 @@ bool AskMacroName(HWND owner, const std::wstring& suggested, std::wstring& out) 
     }
     if (spec.value.empty()) {
         // 空名字没法在菜单里区分，也不能当标识用
-        ::MessageBoxW(owner, L"名字不能是空的。", L"保存宏", MB_ICONWARNING);
+        ShowMessageBox(owner, L"名字不能是空的。", L"保存宏", MB_ICONWARNING);
         return false;
     }
     out = spec.value;
@@ -363,7 +367,7 @@ bool AskRunCommandName(HWND owner, const std::wstring& suggested, std::wstring& 
         return false;
     }
     if (spec.value.empty()) {
-        ::MessageBoxW(owner, L"名字不能是空的。", L"保存运行命令", MB_ICONWARNING);
+        ShowMessageBox(owner, L"名字不能是空的。", L"保存运行命令", MB_ICONWARNING);
         return false;
     }
     out = spec.value;
@@ -388,7 +392,7 @@ bool AskMacroRunOptions(HWND owner, const std::wstring& macroName, MacroRunOptio
     }
     const int count = ::_wtoi(spec.value.c_str());
     if (count < 1 || count > 10000) {
-        ::MessageBoxW(owner, L"重复次数要在 1 ~ 10000 之间。", L"执行宏", MB_ICONWARNING);
+        ShowMessageBox(owner, L"重复次数要在 1 ~ 10000 之间。", L"执行宏", MB_ICONWARNING);
         return false;
     }
     out.repeatCount = count;

@@ -3,7 +3,7 @@
 把 notepadcc详细设计说明书.md 转换为排版良好的 .docx。
 
 用法:
-    python tools/md2docx.py <input.md> <output.docx> [--no-com]
+    python tools/md2docx.py <input.md> <output.docx> [--no-com] [--header "页眉文字"]
 
 支持: ATX 标题、段落、围栏代码块(可缩进)、Markdown 表格、
       有序/无序列表、引用、分隔线、行内 **加粗** 与 `代码`。
@@ -22,6 +22,7 @@ from docx.shared import Cm, Pt, RGBColor
 EA_FONT = "微软雅黑"
 LATIN_FONT = "Segoe UI"
 CODE_FONT = "Consolas"
+DEFAULT_HEADER = "notepadcc 详细设计说明书"
 
 # 正文里 Markdown 的 h2/h3/h4 会映射为 Word 的 Heading 1/2/3，因此封面之外没有 Heading 1 冲突
 HEAD_SIZE = {1: 15.5, 2: 13, 3: 11.5, 4: 11, 5: 10.5, 6: 10.5}
@@ -205,7 +206,7 @@ def build_styles(doc):
     qpf.space_after = Pt(4)
 
 
-def setup_section(doc):
+def setup_section(doc, header_text=DEFAULT_HEADER):
     sec = doc.sections[0]
     sec.page_width = Cm(21.0)
     sec.page_height = Cm(29.7)
@@ -218,7 +219,7 @@ def setup_section(doc):
 
     hp = sec.header.paragraphs[0]
     hp.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    hr = hp.add_run("notepadcc 详细设计说明书")
+    hr = hp.add_run(header_text)
     set_run_font(hr, LATIN_FONT, EA_FONT, 8.5)
     hr.font.color.rgb = RGBColor(0x80, 0x80, 0x80)
 
@@ -451,8 +452,26 @@ def add_toc(doc):
 
 
 def main():
-    src = sys.argv[1]
-    dst = sys.argv[2]
+    args = sys.argv[1:]
+    positional, header_text = [], DEFAULT_HEADER
+    skip_next = False
+    for idx, arg in enumerate(args):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--header" and idx + 1 < len(args):
+            header_text = args[idx + 1]
+            skip_next = True
+        elif arg.startswith("--header="):
+            header_text = arg.split("=", 1)[1]
+        elif arg.startswith("--"):
+            continue  # 兼容 --no-com 等旧参数
+        else:
+            positional.append(arg)
+    if len(positional) < 2:
+        print(__doc__.strip())
+        raise SystemExit(2)
+    src, dst = positional[0], positional[1]
 
     with open(src, "r", encoding="utf-8") as fh:
         lines = fh.read().splitlines()
@@ -469,7 +488,7 @@ def main():
 
     doc = Document()
     build_styles(doc)
-    setup_section(doc)
+    setup_section(doc, header_text)
 
     render(doc, cover, src)
 

@@ -7,9 +7,9 @@
 
 namespace npcc::infra {
 
-// 字节级加密设施（B1）：SHA-256、Base64、RSA-2048 PKCS#1 v1.5 验签、随机字节。
-// 设计依据《notepadcc许可与激活设计.md》8.1：更新验签与许可验签共用这一处实现，
-// 算法全走系统组件（BCrypt）与自研 SHA-256，不引入第三方库（设计文档 1.2 的选型原则）。
+// 字节级加密设施：SHA-256、Base64、RSA-2048 PKCS#1 v1.5 验签、随机字节。
+// 更新验签使用这一处实现；算法全走系统组件（BCrypt）与自研 SHA-256，
+// 不引入第三方库（设计文档 1.2 的选型原则）。
 //
 // 原先的实现散在 core/Sha256、edit/TextTools 与 core/UpdateVerify 里：infra 层的
 // 更新服务要反向引用 core 才拿得到 SHA-256，方向是反的，这次一并收拢到这一层。
@@ -55,8 +55,7 @@ bool Base64Decode(std::string_view text, std::string& out);
 
 // ----- RSA-2048 + SHA-256 + PKCS#1 v1.5 验签（BCrypt）-----
 // data 是被签名的**原始字节**：签名覆盖的是字节本身，不是解析出来的字段，
-// 所以校验必须发生在解析之前（先验字节，再谈字段内容）。更新清单与许可文件
-// 都遵循这条顺序。
+// 所以校验必须发生在解析之前（先验字节，再谈字段内容）。更新清单遵循这条顺序。
 // signatureBase64 / publicKeyBase64 都是标准 base64；公钥是 BCrypt RSAPUBLIC_BLOB，
 // 见 core/UpdateKey.h 与 tools/make_update_key.ps1。
 bool RsaVerifyPkcs1Sha256(const void* data, std::size_t size,

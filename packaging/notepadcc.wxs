@@ -10,7 +10,8 @@
   便携版仍由 scripts/package.ps1 生成，彼此不混用。
 
   构建参数（由 scripts/package_msi.ps1 传入）：
-    ProductVersion / SourceExe / SourceReadme / PackageScope / PackageLabel /
+    ProductVersion / SourceExe / SourceReadme / SourceLicense / SourceNotice /
+    SourceThirdParty / SourceSourceNotice / PackageScope / PackageLabel /
     UpgradeCode / PerUser
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
@@ -25,6 +26,8 @@
                         Description="notepadcc $(var.ProductVersion)（$(var.PackageLabel)）" />
     <MajorUpgrade DowngradeErrorMessage="已安装较新的 notepadcc 版本，请先在“应用和功能”中卸载。" />
     <MediaTemplate EmbedCab="yes" />
+    <Icon Id="NotepadccIcon" SourceFile="$(var.SourceIcon)" />
+    <Property Id="ARPPRODUCTICON" Value="NotepadccIcon" />
 
     <Feature Id="MainFeature" Title="notepadcc" Level="1">
       <ComponentGroupRef Id="ProductComponents" />
@@ -75,6 +78,18 @@
         <File Id="UserGuideTxt" Source="$(var.SourceReadme)" KeyPath="yes" />
 <?endif?>
       </Component>
+      <Component Id="LicenseFiles" Guid="$(var.LicenseFilesGuid)">
+<?if $(var.PerUser) = 1?>
+        <File Id="ProjectLicenseTxt" Source="$(var.SourceLicense)" Name="LICENSE.txt" />
+        <RegistryValue Root="HKCU" Key="Software\notepadcc\Installer"
+                       Name="LicenseFiles" Type="integer" Value="1" KeyPath="yes" />
+<?else?>
+        <File Id="ProjectLicenseTxt" Source="$(var.SourceLicense)" Name="LICENSE.txt" KeyPath="yes" />
+<?endif?>
+        <File Id="ProjectNoticeTxt" Source="$(var.SourceNotice)" Name="NOTICE.txt" />
+        <File Id="ThirdPartyComponents" Source="$(var.SourceThirdParty)" Name="THIRD_PARTY_COMPONENTS.md" />
+        <File Id="SourceNoticeTxt" Source="$(var.SourceSourceNotice)" Name="源代码说明.txt" />
+      </Component>
     </DirectoryRef>
 
     <DirectoryRef Id="ApplicationProgramsFolder">
@@ -82,6 +97,7 @@
         <Shortcut Id="StartMenuShortcut"
                   Name="notepadcc"
                   Description="notepadcc $(var.ProductVersion)"
+                  Icon="NotepadccIcon"
                   Target="[INSTALLFOLDER]notepadcc.exe"
                   WorkingDirectory="INSTALLFOLDER" />
         <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
@@ -93,6 +109,7 @@
     <ComponentGroup Id="ProductComponents">
       <ComponentRef Id="MainExecutable" />
       <ComponentRef Id="UserGuide" />
+      <ComponentRef Id="LicenseFiles" />
       <ComponentRef Id="ApplicationShortcut" />
     </ComponentGroup>
   </Fragment>

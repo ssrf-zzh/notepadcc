@@ -4,6 +4,7 @@
 
 #include "core/XPath.h"
 #include "infra/Log.h"
+#include "shell/ChromeStyle.h"
 
 namespace npcc::shell {
 namespace {
@@ -370,6 +371,7 @@ bool XPathDialog::Show(HWND owner, const std::string& utf8Text, XPathDialogResul
             },
             reinterpret_cast<LPARAM>(font_));
     }
+    ApplyDialogChrome(hwnd_);
     Layout();
 
     ::EnableWindow(owner_, FALSE);

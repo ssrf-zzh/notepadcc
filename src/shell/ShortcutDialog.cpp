@@ -9,6 +9,8 @@
 
 #include "core/CommandText.h"
 #include "core/ShortcutStore.h"
+#include "shell/ChromeStyle.h"
+#include "shell/MessageDialog.h"
 
 namespace npcc::shell {
 namespace {
@@ -365,7 +367,7 @@ void ShortcutDialog::Capture(uint8_t modifiers, uint16_t keyCode) {
         const std::wstring question = combo + L" 已经分配给了「" + otherName + L"」。\n\n" +
                                       L"改给「" + name + L"」吗？（「" + otherName +
                                       L"」会失去这个快捷键）";
-        if (::MessageBoxW(hwnd_, question.c_str(), L"快捷键冲突", MB_YESNO | MB_ICONWARNING) !=
+        if (ShowMessageBox(hwnd_, question.c_str(), L"快捷键冲突", MB_YESNO | MB_ICONWARNING) !=
             IDYES) {
             SetStatus(L"已取消：" + combo + L" 仍然属于「" + otherName + L"」。");
             return;
@@ -473,6 +475,7 @@ bool ShortcutDialog::Show(HWND owner, npcc::core::CommandRegistry& registry,
             },
             reinterpret_cast<LPARAM>(font_));
     }
+    ApplyDialogChrome(hwnd_);
     // 列表要自己截键盘输入，所以挂一层子类化
     if (HWND list = ListBox(); list != nullptr) {
         listProc_ = reinterpret_cast<WNDPROC>(::SetWindowLongPtrW(

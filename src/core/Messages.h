@@ -24,7 +24,7 @@ enum : UINT {
     kMsgStartupNotice   = WM_APP + 16,  // 窗口显示后再露面一次的打开提示（二进制、大文件档等）
     kMsgUpdateResult    = WM_APP + 17,  // 更新检查结果（指针所有权转移给接手的窗口）
     kMsgRemoteResult    = WM_APP + 18,  // 远程操作结果（指针所有权转移给远程对话框）
-    kMsgLicenseActivateResult = WM_APP + 19, // 许可激活结果（指针所有权转移给许可证对话框）
+    kMsgMenuHandle      = WM_APP + 20,  // 自绘菜单栏：返回 HMENU（全屏时返回 0）
     kMsgUserRangeStart  = WM_APP + 100, // 以下保留给外壳内部
 };
 

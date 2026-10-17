@@ -5,6 +5,8 @@
       notepadcc.exe      程序本体（静态链接，不依赖 VC++ 可再发行组件）
       portable           便携模式标记：放在程序旁边就不再读写 %APPDATA%
       说明.txt           用法与"绿色"的边界说明
+      LICENSE.txt        GPL-3.0 许可证全文
+      源代码说明.txt     对应源码包位置与 GPL 分发要求
 
     用法：
       powershell -ExecutionPolicy Bypass -File scripts\package.ps1
@@ -63,6 +65,7 @@ if (Test-Path $stage) {
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
 Copy-Item -LiteralPath $exePath -Destination (Join-Path $stage "notepadcc.exe")
+Copy-Item -LiteralPath (Join-Path $root "LICENSE") -Destination (Join-Path $stage "LICENSE.txt")
 # 便携标记：文件名就叫 portable，内容写一句人话，方便用户自己看懂
 Set-Content -LiteralPath (Join-Path $stage "portable") -Encoding UTF8 -Value @"
 这个文件的存在表示 notepadcc 以「便携模式」运行。
@@ -91,6 +94,14 @@ notepadcc $Version（便携版 x64）
 
 系统要求
   Windows 10 1809 或更高（x64）。已静态链接运行库，不需要装 VC++ 可再发行组件。
+"@
+
+Set-Content -LiteralPath (Join-Path $stage "源代码说明.txt") -Encoding UTF8 -Value @"
+notepadcc $Version 按 GNU General Public License v3.0 only（GPL-3.0-only）发布。
+许可证全文见同目录的 LICENSE.txt。
+
+本程序对应的完整源代码在同一个发行目录的 notepadcc-$Version-source.zip 中提供。
+转发本绿色包时必须同时提供该源码包；如果只拿到了绿色包，请向分发者索取对应源码。
 "@
 
 if (Test-Path $zipPath) { Remove-Item -LiteralPath $zipPath -Force }

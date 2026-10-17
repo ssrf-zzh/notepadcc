@@ -11,6 +11,8 @@
 #include "core/Messages.h"
 #include "infra/Log.h"
 #include "infra/RemoteService.h"
+#include "shell/ChromeStyle.h"
+#include "shell/MessageDialog.h"
 
 namespace npcc::shell {
 namespace {
@@ -482,7 +484,7 @@ void RemoteDialogImpl::StartDelete() {
     const std::wstring remotePath = core::RemoteJoin(currentDir_, entry.name);
     const std::wstring prompt = std::wstring(L"确定删除远程") +
                                 (entry.isDir ? L"目录" : L"文件") + L"？\n\n" + remotePath;
-    const int answer = ::MessageBoxW(hwnd_, prompt.c_str(),
+    const int answer = ShowMessageBox(hwnd_, prompt.c_str(),
                                      entry.isDir ? L"删除远程目录" : L"删除远程文件",
                                      MB_ICONQUESTION | MB_YESNO);
     if (answer != IDYES) {
@@ -824,6 +826,7 @@ RemoteDialog::Outcome RemoteDialogImpl::Show(HWND owner, infra::ThreadPool& pool
             reinterpret_cast<LPARAM>(font_));
     }
 
+    ApplyDialogChrome(hwnd_);
     RebuildSiteCombo(L"");
     UpdateButtons();
     SetPathText();

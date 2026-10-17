@@ -3,6 +3,7 @@
 #include <commctrl.h>
 
 #include <algorithm>
+#include <cwchar>
 
 #include "infra/Log.h"
 
@@ -48,7 +49,8 @@ bool FindBar::Create(HWND parent) {
     wc.lpfnWndProc = &FindBar::WndProcThunk;
     wc.hInstance = ::GetModuleHandleW(nullptr);
     wc.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_BTNFACE + 1));
+    // 背景由 WM_PAINT 按主题填，类刷子会把深色 / 护眼底色盖回系统灰
+    wc.hbrBackground = nullptr;
     wc.lpszClassName = L"notepadccFindBar";
     ::RegisterClassExW(&wc);   // 重复注册无害
 
@@ -70,7 +72,7 @@ bool FindBar::Create(HWND parent) {
                                kReplaceEdit);
     modeCombo_ = MakeControl(WC_COMBOBOXW, L"",
                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST |
-                                 WS_VSCROLL,
+                                 WS_VSCROLL | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS,
                              kModeCombo);
     statusText_ = MakeControl(L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT, -1);
 
@@ -103,6 +105,7 @@ bool FindBar::Create(HWND parent) {
 
     ApplyFont();
     Layout();
+    SetTheme(dark_, eyeCare_);
     return true;
 }
 
@@ -117,6 +120,14 @@ void FindBar::Destroy() {
         ::DeleteObject(font_);
         font_ = nullptr;
     }
+    if (background_ != nullptr) {
+        ::DeleteObject(background_);
+        background_ = nullptr;
+    }
+    if (field_ != nullptr) {
+        ::DeleteObject(field_);
+        field_ = nullptr;
+    }
 }
 
 HWND FindBar::MakeControl(const wchar_t* className, const wchar_t* text, DWORD style, int id) {
@@ -126,16 +137,8 @@ HWND FindBar::MakeControl(const wchar_t* className, const wchar_t* text, DWORD s
 }
 
 void FindBar::ApplyFont() {
-    NONCLIENTMETRICSW metrics{};
-    metrics.cbSize = sizeof(metrics);
-    LOGFONTW logFont{};
-    if (::SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0) != 0) {
-        logFont = metrics.lfMessageFont;
-    } else {
-        ::wcscpy_s(logFont.lfFaceName, L"Microsoft YaHei UI");
-        logFont.lfHeight = -12;
-    }
-    font_ = ::CreateFontIndirectW(&logFont);
+    // 与菜单栏 / 工具栏 / 状态栏同一套外壳字体；输入框里的等宽字体由编辑器自己负责
+    font_ = CreateChromeFont(static_cast<int>(Scale(96)), 95, false);
     if (font_ != nullptr) {
         ::EnumChildWindows(
             hwnd_,
@@ -144,6 +147,13 @@ void FindBar::ApplyFont() {
                 return TRUE;
             },
             reinterpret_cast<LPARAM>(font_));
+    }
+    InstallButtonSubclasses();
+    if (modeCombo_ != nullptr) {
+        ::SendMessageW(modeCombo_, CB_SETITEMHEIGHT, static_cast<WPARAM>(-1), Scale(24));
+        ::SendMessageW(modeCombo_, CB_SETITEMHEIGHT, 0, Scale(24));
+        ::SetWindowSubclass(modeCombo_, &FindBar::ComboSubclass, 4500,
+                            reinterpret_cast<DWORD_PTR>(this));
     }
     if (findEdit_ != nullptr) {
         ::SetWindowSubclass(findEdit_, &EditSubclass, 1, reinterpret_cast<DWORD_PTR>(hwnd_));
@@ -154,6 +164,291 @@ void FindBar::ApplyFont() {
     if (statusText_ != nullptr) {
         ::SetWindowSubclass(statusText_, &StatusSubclass, 3, 0);
     }
+}
+
+ChromeColours FindBar::Theme() const {
+    return ChromeColoursFor(dark_, eyeCare_);
+}
+
+void FindBar::SetTheme(bool dark, bool eyeCare) {
+    dark_ = dark;
+    eyeCare_ = eyeCare;
+    UpdateThemeResources();
+    if (hwnd_ == nullptr) {
+        return;
+    }
+    ApplyThemeToControls();
+    ::InvalidateRect(hwnd_, nullptr, TRUE);
+    ::EnumChildWindows(
+        hwnd_,
+        [](HWND child, LPARAM) -> BOOL {
+            ::InvalidateRect(child, nullptr, TRUE);
+            return TRUE;
+        },
+        0);
+}
+
+void FindBar::UpdateThemeResources() {
+    if (background_ != nullptr) {
+        ::DeleteObject(background_);
+        background_ = nullptr;
+    }
+    if (field_ != nullptr) {
+        ::DeleteObject(field_);
+        field_ = nullptr;
+    }
+    if (hwnd_ != nullptr) {
+        const ChromeColours colours = Theme();
+        background_ = ::CreateSolidBrush(colours.strip);
+        field_ = ::CreateSolidBrush(colours.tabActive);
+    }
+}
+
+void FindBar::ApplyThemeToControls() {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+    ::EnumChildWindows(
+        hwnd_,
+        [](HWND child, LPARAM param) -> BOOL {
+            const auto* self = reinterpret_cast<const FindBar*>(param);
+            wchar_t className[32]{};
+            ::GetClassNameW(child, className, 32);
+            if (::_wcsicmp(className, L"Edit") == 0) {
+                ApplyControlTheme(child, self->dark_, L"DarkMode_CFD");
+            } else if (::_wcsicmp(className, L"ComboBox") == 0) {
+                ApplyControlTheme(child, self->dark_, L"DarkMode_Explorer");
+            } else if (::_wcsicmp(className, L"Button") == 0) {
+                ::InvalidateRect(child, nullptr, TRUE);
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(this));
+    if (modeCombo_ != nullptr) {
+        COMBOBOXINFO info{};
+        info.cbSize = sizeof(info);
+        if (::GetComboBoxInfo(modeCombo_, &info) && info.hwndList != nullptr) {
+            ApplyControlTheme(info.hwndList, dark_, L"DarkMode_Explorer");
+            ::InvalidateRect(info.hwndList, nullptr, TRUE);
+        }
+    }
+}
+
+void FindBar::InstallButtonSubclasses() {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+    ::EnumChildWindows(
+        hwnd_,
+        [](HWND child, LPARAM param) -> BOOL {
+            wchar_t className[32]{};
+            ::GetClassNameW(child, className, 32);
+            if (::_wcsicmp(className, L"Button") == 0) {
+                ::SetWindowSubclass(child, &FindBar::ButtonSubclass,
+                                    static_cast<UINT_PTR>(4000 + ::GetDlgCtrlID(child)), param);
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(this));
+}
+
+void FindBar::PaintBackground(HDC dc) const {
+    RECT client{};
+    ::GetClientRect(hwnd_, &client);
+    const HBRUSH brush = background_ != nullptr ? background_ : ::GetSysColorBrush(COLOR_WINDOW);
+    ::FillRect(dc, &client, brush);
+}
+
+void FindBar::PaintControl(HWND control, HDC dc) const {
+    if (control == nullptr || dc == nullptr) {
+        return;
+    }
+    RECT client{};
+    ::GetClientRect(control, &client);
+    wchar_t text[256]{};
+    ::GetWindowTextW(control, text, 256);
+
+    const LONG_PTR style = ::GetWindowLongPtrW(control, GWL_STYLE);
+    const bool checkbox = (style & BS_TYPEMASK) == BS_AUTOCHECKBOX ||
+                          (style & BS_TYPEMASK) == BS_CHECKBOX ||
+                          (style & BS_TYPEMASK) == BS_AUTO3STATE ||
+                          (style & BS_TYPEMASK) == BS_3STATE;
+    const bool enabled = ::IsWindowEnabled(control) != 0;
+    const bool focused = ::GetFocus() == control;
+    POINT cursor{};
+    ::GetCursorPos(&cursor);
+    const bool hovered = ::WindowFromPoint(cursor) == control;
+    const DWORD state = static_cast<DWORD>(::SendMessageW(control, BM_GETSTATE, 0, 0));
+    const bool pressed = (state & BST_PUSHED) != 0;
+    const bool checked = ::SendMessageW(control, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    const int controlId = ::GetDlgCtrlID(control);
+    const bool primary = controlId == kFindNextButton || controlId == kReplaceAllButton;
+    const ChromeColours colours = Theme();
+    const int dpi = static_cast<int>(Scale(96));
+
+    if (checkbox) {
+        DrawChromeCheckBox(dc, client, text, font_, colours, dpi, dark_, checked, hovered,
+                           focused, enabled);
+    } else {
+        DrawChromePushButton(dc, client, text, font_, colours, dpi, dark_, primary, hovered,
+                             pressed, focused, enabled);
+    }
+}
+
+void FindBar::PaintCombo(HDC dc) const {
+    if (modeCombo_ == nullptr || dc == nullptr) {
+        return;
+    }
+    RECT client{};
+    ::GetClientRect(modeCombo_, &client);
+    const ChromeColours colours = Theme();
+    const bool enabled = ::IsWindowEnabled(modeCombo_) != 0;
+    const bool focused = ::GetFocus() == modeCombo_;
+    POINT cursor{};
+    ::GetCursorPos(&cursor);
+    const bool hovered = ::WindowFromPoint(cursor) == modeCombo_;
+
+    const HBRUSH outer = background_ != nullptr ? background_
+                                                : ::GetSysColorBrush(COLOR_BTNFACE);
+    ::FillRect(dc, &client, outer);
+    RECT body = client;
+    ::InflateRect(&body, -Scale(1), -Scale(1));
+    const int radius = Scale(6);
+    const COLORREF border = focused ? colours.accent
+                                    : (hovered ? colours.textMuted : colours.line);
+    const HBRUSH fill = ::CreateSolidBrush(enabled ? colours.tabActive : colours.strip);
+    const HPEN pen = ::CreatePen(PS_SOLID, std::max(1, Scale(1)),
+                                 enabled ? border : colours.line);
+    const HGDIOBJ oldBrush = ::SelectObject(dc, fill);
+    const HGDIOBJ oldPen = ::SelectObject(dc, pen);
+    ::RoundRect(dc, body.left, body.top, body.right, body.bottom, radius, radius);
+    ::SelectObject(dc, oldPen);
+    ::SelectObject(dc, oldBrush);
+    ::DeleteObject(pen);
+    ::DeleteObject(fill);
+
+    wchar_t text[128]{};
+    const LRESULT selected = ::SendMessageW(modeCombo_, CB_GETCURSEL, 0, 0);
+    if (selected != CB_ERR) {
+        ::SendMessageW(modeCombo_, CB_GETLBTEXT, static_cast<WPARAM>(selected),
+                       reinterpret_cast<LPARAM>(text));
+    }
+    const HGDIOBJ oldFont = font_ != nullptr ? ::SelectObject(dc, font_) : nullptr;
+    ::SetBkMode(dc, TRANSPARENT);
+    ::SetTextColor(dc, enabled ? colours.text : colours.iconDisabled);
+    RECT textRect = body;
+    textRect.left += Scale(10);
+    textRect.right -= Scale(28);
+    ::DrawTextW(dc, text, -1, &textRect,
+                DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+    const int arrowX = body.right - Scale(15);
+    const int arrowY = (body.top + body.bottom) / 2;
+    const HPEN arrowPen = ::CreatePen(PS_SOLID, std::max(1, Scale(1)), colours.textMuted);
+    const HGDIOBJ previousPen = ::SelectObject(dc, arrowPen);
+    ::MoveToEx(dc, arrowX - Scale(4), arrowY - Scale(2), nullptr);
+    ::LineTo(dc, arrowX, arrowY + Scale(2));
+    ::LineTo(dc, arrowX + Scale(4), arrowY - Scale(2));
+    ::SelectObject(dc, previousPen);
+    ::DeleteObject(arrowPen);
+    if (oldFont != nullptr) {
+        ::SelectObject(dc, oldFont);
+    }
+}
+
+LRESULT CALLBACK FindBar::ButtonSubclass(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
+                                         UINT_PTR /*id*/, DWORD_PTR ref) {
+    auto* self = reinterpret_cast<FindBar*>(ref);
+    return self != nullptr ? self->ButtonSubclassProc(hwnd, message, wParam, lParam)
+                           : ::DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
+LRESULT FindBar::ButtonSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT paint{};
+            const HDC dc = ::BeginPaint(hwnd, &paint);
+            PaintControl(hwnd, dc);
+            ::EndPaint(hwnd, &paint);
+            return 0;
+        }
+        case WM_PRINTCLIENT:
+            PaintControl(hwnd, reinterpret_cast<HDC>(wParam));
+            return 0;
+        case WM_MOUSEMOVE: {
+            TRACKMOUSEEVENT track{};
+            track.cbSize = sizeof(track);
+            track.dwFlags = TME_LEAVE;
+            track.hwndTrack = hwnd;
+            ::TrackMouseEvent(&track);
+            ::InvalidateRect(hwnd, nullptr, FALSE);
+            break;
+        }
+        case WM_MOUSELEAVE:
+        case WM_SETFOCUS:
+        case WM_KILLFOCUS:
+        case WM_ENABLE:
+        case WM_SETTEXT:
+        case WM_UPDATEUISTATE:
+        case WM_LBUTTONDOWN:
+        case WM_LBUTTONUP:
+            ::InvalidateRect(hwnd, nullptr, FALSE);
+            break;
+        default:
+            break;
+    }
+    return ::DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
+LRESULT CALLBACK FindBar::ComboSubclass(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
+                                        UINT_PTR /*id*/, DWORD_PTR ref) {
+    auto* self = reinterpret_cast<FindBar*>(ref);
+    return self != nullptr ? self->ComboSubclassProc(hwnd, message, wParam, lParam)
+                           : ::DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
+LRESULT FindBar::ComboSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT paint{};
+            const HDC dc = ::BeginPaint(hwnd, &paint);
+            PaintCombo(dc);
+            ::EndPaint(hwnd, &paint);
+            return 0;
+        }
+        case WM_PRINTCLIENT:
+            PaintCombo(reinterpret_cast<HDC>(wParam));
+            return 0;
+        case CB_SETCURSEL: {
+            const LRESULT result = ::DefSubclassProc(hwnd, message, wParam, lParam);
+            ::InvalidateRect(hwnd, nullptr, FALSE);
+            return result;
+        }
+        case WM_MOUSEMOVE: {
+            TRACKMOUSEEVENT track{};
+            track.cbSize = sizeof(track);
+            track.dwFlags = TME_LEAVE;
+            track.hwndTrack = hwnd;
+            ::TrackMouseEvent(&track);
+            ::InvalidateRect(hwnd, nullptr, FALSE);
+            break;
+        }
+        case WM_MOUSELEAVE:
+        case WM_SETFOCUS:
+        case WM_KILLFOCUS:
+        case WM_ENABLE:
+        case WM_SETTEXT:
+        case WM_UPDATEUISTATE:
+            ::InvalidateRect(hwnd, nullptr, FALSE);
+            break;
+        default:
+            break;
+    }
+    return ::DefSubclassProc(hwnd, message, wParam, lParam);
 }
 
 int FindBar::Scale(int value) const {
@@ -174,8 +469,115 @@ int FindBar::Scale(int value) const {
 }
 
 int FindBar::Height() const {
-    const int rows = replaceMode_ ? 2 : 1;
-    return rows * Scale(kRowHeight) + Scale(kGap) * (rows + 1);
+    if (hwnd_ == nullptr) {
+        return 0;
+    }
+    RECT parent{};
+    ::GetClientRect(::GetParent(hwnd_), &parent);
+    int width = parent.right - parent.left;
+    if (width <= 0) {
+        RECT own{};
+        ::GetClientRect(hwnd_, &own);
+        width = own.right - own.left;
+    }
+    int bottom = 0;
+    for (const Placement& placement : BuildPlacements(width)) {
+        bottom = std::max(bottom, static_cast<int>(placement.rect.bottom));
+    }
+    return bottom + Scale(kGap);
+}
+
+std::vector<FindBar::Placement> FindBar::BuildPlacements(int width) const {
+    std::vector<Placement> placements;
+    if (hwnd_ == nullptr || width <= 0) {
+        return placements;
+    }
+    const int gap = Scale(kGap);
+    const int itemGap = Scale(6);
+    const int rowHeight = Scale(kRowHeight);
+    const int statusWidth = std::min(Scale(220), std::max(Scale(120), width / 4));
+    const int comboWidth = Scale(76);
+    const int right = std::max(gap * 2, width - gap);
+    const int available = right - gap;
+    const int minFindWidth = Scale(120);
+    const bool statusInline =
+        available >= minFindWidth + itemGap + comboWidth + itemGap + Scale(150);
+    const int findWidth = std::max(
+        minFindWidth, available - comboWidth - itemGap - (statusInline ? statusWidth + itemGap : 0));
+
+    int y = gap;
+    int x = gap;
+    placements.push_back({findEdit_, RECT{x, y, x + findWidth, y + rowHeight}});
+    x += findWidth + itemGap;
+    placements.push_back({modeCombo_, RECT{x, y, x + comboWidth, y + rowHeight}});
+    if (statusInline) {
+        placements.push_back(
+            {statusText_, RECT{right - statusWidth, y, right, y + rowHeight}});
+    } else {
+        y += rowHeight + gap;
+        placements.push_back({statusText_, RECT{gap, y, right, y + rowHeight}});
+    }
+
+    y += rowHeight + gap;
+    x = gap;
+    auto place = [&](HWND control, int controlWidth) {
+        if (control == nullptr) {
+            return;
+        }
+        if (x > gap && x + controlWidth > width - gap) {
+            x = gap;
+            y += rowHeight + gap;
+        }
+        placements.push_back(
+            {control, RECT{x, y, x + controlWidth, y + rowHeight}});
+        x += controlWidth + itemGap;
+    };
+
+    // 「区分大小写」5 个汉字 + 复选框，84 像素会在闭合态画出省略号。
+    const int checkWidth = Scale(104);
+    const int buttonWidth = Scale(60);
+    for (const int id : {kCaseCheck, kWordCheck, kDotAllCheck}) {
+        place(::GetDlgItem(hwnd_, id), checkWidth);
+    }
+    for (const int id : {kFindPrevButton, kFindNextButton, kCountButton, kMarkButton,
+                         kCloseButton}) {
+        place(::GetDlgItem(hwnd_, id), buttonWidth);
+    }
+
+    if (replaceMode_) {
+        y += rowHeight + gap;
+        x = gap;
+        const int replaceButton = Scale(60);
+        const int replaceAllButton = Scale(90);
+        const bool replaceInline =
+            available >= Scale(120) + itemGap * 2 + replaceButton + replaceAllButton;
+        if (replaceInline) {
+            const int replaceWidth =
+                available - itemGap * 2 - replaceButton - replaceAllButton;
+            placements.push_back(
+                {replaceEdit_, RECT{x, y, x + replaceWidth, y + rowHeight}});
+            x += replaceWidth + itemGap;
+            placements.push_back(
+                {::GetDlgItem(hwnd_, kReplaceButton),
+                 RECT{x, y, x + replaceButton, y + rowHeight}});
+            x += replaceButton + itemGap;
+            placements.push_back(
+                {::GetDlgItem(hwnd_, kReplaceAllButton),
+                 RECT{x, y, x + replaceAllButton, y + rowHeight}});
+        } else {
+            placements.push_back({replaceEdit_, RECT{x, y, right, y + rowHeight}});
+            y += rowHeight + gap;
+            x = gap;
+            placements.push_back(
+                {::GetDlgItem(hwnd_, kReplaceButton),
+                 RECT{x, y, x + replaceButton, y + rowHeight}});
+            x += replaceButton + itemGap;
+            placements.push_back(
+                {::GetDlgItem(hwnd_, kReplaceAllButton),
+                 RECT{x, y, x + replaceAllButton, y + rowHeight}});
+        }
+    }
+    return placements;
 }
 
 void FindBar::Layout() {
@@ -184,49 +586,21 @@ void FindBar::Layout() {
     }
     RECT client{};
     ::GetClientRect(hwnd_, &client);
-    const int width = client.right - client.left;
-    const int rowHeight = Scale(kRowHeight);
-    const int gap = Scale(kGap);
-    const int row1 = gap;
-    const int row2 = gap * 2 + rowHeight;
-
-    int x = gap;
-    auto place = [&](HWND control, int w, int y, int h) {
-        if (control == nullptr) {
-            return;
-        }
-        ::MoveWindow(control, x, y, w, h, TRUE);
-        x += w + Scale(4);
-    };
-
-    // 第一行：查找输入 + 模式 + 选项 + 操作
-    const int buttonWidth = Scale(64);
-    const int checkWidth = Scale(86);
-    int reserved = buttonWidth * 5 + checkWidth * 3 + gap * 12 + Scale(120);
-    int findWidth = std::max(Scale(120), width - reserved);
-    place(findEdit_, findWidth, row1, rowHeight);
-    place(modeCombo_, Scale(76), row1, rowHeight * 6);   // 下拉列表要高一些
-    place(::GetDlgItem(hwnd_, kCaseCheck), checkWidth, row1, rowHeight);
-    place(::GetDlgItem(hwnd_, kWordCheck), checkWidth, row1, rowHeight);
-    place(::GetDlgItem(hwnd_, kDotAllCheck), checkWidth, row1, rowHeight);
-    place(::GetDlgItem(hwnd_, kFindPrevButton), buttonWidth, row1, rowHeight);
-    place(::GetDlgItem(hwnd_, kFindNextButton), buttonWidth, row1, rowHeight);
-    place(::GetDlgItem(hwnd_, kCountButton), buttonWidth, row1, rowHeight);
-    place(::GetDlgItem(hwnd_, kMarkButton), buttonWidth, row1, rowHeight);
-    place(::GetDlgItem(hwnd_, kCloseButton), buttonWidth, row1, rowHeight);
-
-    if (replaceMode_) {
-        x = gap;
-        place(replaceEdit_, findWidth, row2, rowHeight);
-        place(::GetDlgItem(hwnd_, kReplaceButton), buttonWidth, row2, rowHeight);
-        place(::GetDlgItem(hwnd_, kReplaceAllButton), buttonWidth * 3 / 2, row2, rowHeight);
+    int width = client.right - client.left;
+    if (width <= 0) {
+        RECT parent{};
+        ::GetClientRect(::GetParent(hwnd_), &parent);
+        width = parent.right - parent.left;
     }
-
-    // 状态文字放在第一行右侧空白处
-    if (statusText_ != nullptr) {
-        const int statusWidth = Scale(220);
-        ::MoveWindow(statusText_, std::max(gap, width - statusWidth - gap), row1,
-                     statusWidth, rowHeight, TRUE);
+    for (const Placement& placement : BuildPlacements(width)) {
+        if (placement.handle != nullptr) {
+            ::MoveWindow(placement.handle, placement.rect.left, placement.rect.top,
+                         placement.rect.right - placement.rect.left,
+                         placement.handle == modeCombo_
+                             ? Scale(kRowHeight) * 6
+                             : placement.rect.bottom - placement.rect.top,
+                         TRUE);
+        }
     }
 }
 
@@ -329,6 +703,18 @@ LRESULT CALLBACK FindBar::WndProcThunk(HWND hwnd, UINT message, WPARAM wParam, L
 
 LRESULT FindBar::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT paint{};
+            const HDC dc = ::BeginPaint(hwnd_, &paint);
+            PaintBackground(dc);
+            ::EndPaint(hwnd_, &paint);
+            return 0;
+        }
+        case WM_PRINTCLIENT:
+            PaintBackground(reinterpret_cast<HDC>(wParam));
+            return 0;
         case WM_SIZE:
             Layout();
             return 0;
@@ -336,11 +722,64 @@ LRESULT FindBar::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
         case WM_CTLCOLORBTN: {
             const HDC dc = reinterpret_cast<HDC>(wParam);
             ::SetBkMode(dc, TRANSPARENT);
-            return reinterpret_cast<LRESULT>(::GetSysColorBrush(COLOR_BTNFACE));
+            ::SetTextColor(dc, Theme().text);
+            return reinterpret_cast<LRESULT>(
+                background_ != nullptr ? background_ : ::GetSysColorBrush(COLOR_BTNFACE));
+        }
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX: {
+            const HDC dc = reinterpret_cast<HDC>(wParam);
+            ::SetBkMode(dc, TRANSPARENT);
+            ::SetTextColor(dc, Theme().text);
+            ::SetBkColor(dc, Theme().tabActive);
+            return reinterpret_cast<LRESULT>(
+                field_ != nullptr ? field_ : ::GetSysColorBrush(COLOR_WINDOW));
+        }
+        case WM_DRAWITEM: {
+            auto* draw = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+            if (draw == nullptr || draw->CtlID != kModeCombo || modeCombo_ == nullptr) {
+                break;
+            }
+            wchar_t text[128]{};
+            if (draw->itemID == static_cast<UINT>(-1)) {
+                const int selected = ModeIndex();
+                ::SendMessageW(modeCombo_, CB_GETLBTEXT, static_cast<WPARAM>(selected),
+                               reinterpret_cast<LPARAM>(text));
+            } else {
+                ::SendMessageW(modeCombo_, CB_GETLBTEXT, draw->itemID,
+                               reinterpret_cast<LPARAM>(text));
+            }
+            const ChromeColours colours = Theme();
+            const bool selected = (draw->itemState & ODS_SELECTED) != 0;
+            const HBRUSH fill = ::CreateSolidBrush(selected ? colours.accentSoft
+                                                            : colours.tabActive);
+            ::FillRect(draw->hDC, &draw->rcItem, fill);
+            ::DeleteObject(fill);
+            const HGDIOBJ oldFont = font_ != nullptr ? ::SelectObject(draw->hDC, font_) : nullptr;
+            ::SetBkMode(draw->hDC, TRANSPARENT);
+            ::SetTextColor(draw->hDC, colours.text);
+            RECT textRect = draw->rcItem;
+            textRect.left += Scale(10);
+            textRect.right -= Scale(4);
+            ::DrawTextW(draw->hDC, text, -1, &textRect,
+                        DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX |
+                            DT_END_ELLIPSIS);
+            if (oldFont != nullptr) {
+                ::SelectObject(draw->hDC, oldFont);
+            }
+            return TRUE;
         }
         case WM_COMMAND:
+            if (LOWORD(wParam) == kModeCombo && HIWORD(wParam) == CBN_SELCHANGE &&
+                modeCombo_ != nullptr) {
+                ::InvalidateRect(modeCombo_, nullptr, FALSE);
+            }
             // 控件事件上抛给主窗口统一处理
             ::SendMessageW(::GetParent(hwnd_), WM_COMMAND, wParam, lParam);
+            return 0;
+        case WM_THEMECHANGED:
+            ApplyThemeToControls();
+            ::InvalidateRect(hwnd_, nullptr, TRUE);
             return 0;
         case WM_DESTROY:
             ::SetWindowLongPtrW(hwnd_, GWLP_USERDATA, 0);

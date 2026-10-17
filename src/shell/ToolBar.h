@@ -92,7 +92,7 @@ private:
     bool dark_ = false;
     bool eyeCare_ = false;
     bool visible_ = true;
-    int  iconSize_ = 16;     // 逻辑像素
+    int  iconSize_ = 20;     // 逻辑像素
     int  hot_ = -1;
     int  pressed_ = -1;
     bool tracking_ = false;  // 已经向系统要过 WM_MOUSELEAVE 了
