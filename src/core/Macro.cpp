@@ -149,7 +149,7 @@ void AppendMacrosXml(infra::XmlElement& root, const std::vector<Macro>& macros) 
     for (const Macro& macro : macros) {
         infra::XmlElementPtr item = node->AddChild(L"Macro");
         item->SetAttribute(L"name", macro.name);
-        // 与对标产品同名同写法，便于手工编辑与迁移
+        // 保持简单、稳定的 XML 写法，便于手工编辑
         item->SetAttributeBool(L"Ctrl", (macro.modifiers & kModCtrl) != 0);
         item->SetAttributeBool(L"Alt", (macro.modifiers & kModAlt) != 0);
         item->SetAttributeBool(L"Shift", (macro.modifiers & kModShift) != 0);
@@ -159,7 +159,7 @@ void AppendMacrosXml(infra::XmlElement& root, const std::vector<Macro>& macros) 
             step->SetAttributeInt(L"type", static_cast<int>(action.kind));
             switch (action.kind) {
                 case MacroAction::Kind::Command:
-                    // message 放命令 ID（对标产品那里放的是它自己的命令编号，我们用自己的）
+                    // message 放本项目的命令 ID
                     step->SetAttributeInt(L"message", static_cast<int>(action.commandId));
                     step->SetAttributeInt(L"wParam", 0);
                     step->SetAttributeInt(L"lParam", 0);
@@ -247,7 +247,7 @@ std::vector<Macro> ReadMacrosXml(const infra::XmlElement& root,
                     continue;
                 }
             } else {
-                // 试过对标产品的文件就知道：它还有别的动作类型（找替换、加书签…）。
+                // 其它编辑器还可能定义查找替换、书签等动作类型。
                 // 认不出的整条跳过并留一句，免得回放出"看起来做了什么但结果不对"。
                 warnings.push_back(macro.name + L"：认不出的步骤类型 " + std::to_wstring(type) +
                                    L"，已跳过");

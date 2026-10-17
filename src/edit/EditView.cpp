@@ -282,7 +282,7 @@ bool EditView::ApplyTextTransform(
     int32_t start = SelectionStart();
     int32_t end = SelectionEnd();
     if (start == end) {
-        // 没有选区就作用于整篇：这是对标产品的行为，用户不必先全选
+        // 没有选区就作用于整篇，用户不必先全选
         start = 0;
         end = static_cast<int32_t>(ByteLength());
     }

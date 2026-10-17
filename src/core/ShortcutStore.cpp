@@ -12,14 +12,14 @@
 namespace npcc::core {
 namespace {
 
-constexpr const wchar_t* kRootName = L"NotepadPlusCompat";
+constexpr const wchar_t* kRootName = L"NpccShortcuts";
 constexpr int            kSchemaVersion = 1;
 constexpr uint8_t        kKnownModifiers = kModCtrl | kModAlt | kModShift;
 
 constexpr const wchar_t* kShortcutElement = L"Shortcut";
 constexpr const wchar_t* kInternalSection = L"InternalCommands";
 
-// 三个修饰键属性分开写是为了跟对标产品的文件格式对齐，读的时候拼回来。
+// 三个修饰键属性分开写，读取时再合并。
 uint8_t ReadModifiers(const infra::XmlElement& node) {
     uint8_t modifiers = kModNone;
     if (node.AttributeBool(L"Ctrl", false)) {

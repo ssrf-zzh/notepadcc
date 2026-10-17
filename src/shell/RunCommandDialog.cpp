@@ -295,7 +295,7 @@ bool RunCommandDialog::Show(HWND owner, const std::vector<core::RunCommandDef>& 
     // 提示文字要写全：用户不看文档也知道 .bat 得走 cmd /c、工作目录在哪
     Make(L"STATIC",
          L"可用变量：$(FULL_CURRENT_PATH) $(CURRENT_DIRECTORY) $(FILE_NAME) $(NAME_PART) "
-         L"$(EXT_PART) $(CURRENT_WORD) $(CURRENT_LINE) $(NPP_DIRECTORY) "
+         L"$(EXT_PART) $(CURRENT_WORD) $(CURRENT_LINE) $(APP_DIRECTORY) "
          L"$(CURRENT_ENCODING) $(CURRENT_EOL)\r\n"
          L"工作目录：当前文件所在目录（未保存的文档用程序目录）。\r\n"
          L"要跑 .bat / .cmd 请写成 cmd /c xxx.bat；不勾选上面的框就直接跑，输出不进编辑器。",

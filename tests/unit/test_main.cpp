@@ -2709,13 +2709,13 @@ int main() {
         {
             const std::string custom =
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-                "<NotepadPlusCompat schemaVersion=\"1\">\n"
+                "<NpccShortcuts schemaVersion=\"1\">\n"
                 "  <InternalCommands>\n"
                 "    <Shortcut name=\"cmd.unknown\" Ctrl=\"yes\" Key=\"75\"/>\n"
                 "    <Shortcut Ctrl=\"yes\" Alt=\"no\" Shift=\"no\" Key=\"76\"/>\n"
                 "    <Shortcut name=\"cmd.save.a\" Ctrl=\"yes\" Key=\"77\"/>\n"
                 "  </InternalCommands>\n"
-                "</NotepadPlusCompat>\n";
+                "</NpccShortcuts>\n";
             Check(WriteFileDirect(path, custom), "写入测试用 shortcuts.xml");
             CommandRegistry registry;
             const npcc::core::CmdId a =
@@ -2887,7 +2887,7 @@ int main() {
             macro.actions.push_back(message);
 
             npcc::infra::XmlDocument document;
-            npcc::infra::XmlElementPtr root = document.CreateRoot(L"NotepadPlusCompat");
+            npcc::infra::XmlElementPtr root = document.CreateRoot(L"NpccShortcuts");
             npcc::core::AppendMacrosXml(*root, {macro});
             const std::string xml = document.ToUtf8();
             Check(xml.find("<Macros>") != std::string::npos &&
@@ -2927,13 +2927,13 @@ int main() {
             // 只有命令键、没有 ID 的文件（手工写的、或跨版本迁移过来的）也要认
             const std::string byName =
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-                "<NotepadPlusCompat schemaVersion=\"1\">\n"
+                "<NpccShortcuts schemaVersion=\"1\">\n"
                 "  <Macros>\n"
                 "    <Macro name=\"手写的\" Ctrl=\"no\" Alt=\"no\" Shift=\"no\" Key=\"0\">\n"
                 "      <Action type=\"0\" name=\"cmd.tool.sortAsc\"/>\n"
                 "    </Macro>\n"
                 "  </Macros>\n"
-                "</NotepadPlusCompat>\n";
+                "</NpccShortcuts>\n";
             npcc::infra::XmlDocument hand;
             Check(npcc::infra::XmlDocument::Parse(byName, hand, &parseError), "手写的文件能解析");
             warnings.clear();
@@ -2950,7 +2950,7 @@ int main() {
             // 坏文件：认不出的步骤类型、没名字的宏、空文本——跳过并记警告，别整个失效
             const std::string broken =
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-                "<NotepadPlusCompat schemaVersion=\"1\">\n"
+                "<NpccShortcuts schemaVersion=\"1\">\n"
                 "  <Macros>\n"
                 "    <Macro Ctrl=\"no\" Alt=\"no\" Shift=\"no\" Key=\"0\">\n"
                 "      <Action type=\"1\" message=\"2170\"/>\n"
@@ -2963,7 +2963,7 @@ int main() {
                 "      <Action type=\"2\" sParam=\"ok\"/>\n"
                 "    </Macro>\n"
                 "  </Macros>\n"
-                "</NotepadPlusCompat>\n";
+                "</NpccShortcuts>\n";
             npcc::infra::XmlDocument bad;
             Check(npcc::infra::XmlDocument::Parse(broken, bad, &parseError), "坏文件能解析");
             warnings.clear();
@@ -4103,7 +4103,7 @@ int main() {
         {
             Check(RemoveEmptyLines("a\n\nb\n") == "a\nb\n", "删除真正的空行");
             Check(RemoveEmptyLines("a\n   \nb\n") == "a\n   \nb\n",
-                  "只有空白的行不算空行（与对标产品一致）");
+                  "只有空白的行不算空行");
         }
 
         // 去重：保留首次 / 保留最后一次
@@ -4318,7 +4318,7 @@ int main() {
             Check(shape(FindBraceMatch(code, 23)) == "22->20", "光标在 ')' 后面：往左看");
 
             // 光标右边是括号、左边也是括号时**右边优先**：刚敲完 ')' 时插入点就在它后面，
-            // 用户期望高亮的是刚敲进去的那一个（与对标产品一致）
+            // 用户期望高亮的是刚敲进去的那一个
             const std::string adjacent = "([)]";
             Check(shape(FindBraceMatch(adjacent, 1)) == "1->3", "光标踩在 '[' 上：配 ']'");
             Check(shape(FindBraceMatch(adjacent, 2)) == "2->0",
@@ -5579,7 +5579,7 @@ int main() {
 
         // ---- 结构、名字、值、行号 ----
         {
-            const char* text = "{\n  \"name\": \"npp\",\n  \"nested\": {\n    \"n\": 1,\n"
+            const char* text = "{\n  \"name\": \"demo\",\n  \"nested\": {\n    \"n\": 1,\n"
                                "    \"arr\": [true, null, \"x\"]\n  },\n  \"empty\": {}\n}\n";
             const npcc::core::JsonTreeResult result = ParseJsonTree(text);
             Check(result.ok, "合法 JSON 应当解析成功");
@@ -5589,7 +5589,7 @@ int main() {
             if (result.root.children.size() == 3) {
                 const JsonNode& name = result.root.children[0];
                 Check(name.name == "name" && name.kind == JsonKind::String &&
-                          name.value == "npp",
+                          name.value == "demo",
                       "第一个键是字符串，名字与值都对");
                 Check(name.line == 2, "字符串在第 2 行（行号是**源文本**里的）");
                 const JsonNode& nested = result.root.children[1];
@@ -6552,8 +6552,8 @@ int main() {
         CheckWide(ExpandRunCommand(L"$(CURRENT_WORD)", context), L"Widget", "$(CURRENT_WORD)");
         CheckWide(ExpandRunCommand(L"$(CURRENT_LINE)", context), L"42",
                   "$(CURRENT_LINE) 是 1 基行号");
-        CheckWide(ExpandRunCommand(L"$(NPP_DIRECTORY)", context), L"C:\\Tools\\notepadcc",
-                  "$(NPP_DIRECTORY) 是程序目录");
+        CheckWide(ExpandRunCommand(L"$(APP_DIRECTORY)", context), L"C:\\Tools\\notepadcc",
+                  "$(APP_DIRECTORY) 是程序目录");
         CheckWide(ExpandRunCommand(L"$(CURRENT_ENCODING)", context), L"UTF-8-BOM",
                   "$(CURRENT_ENCODING)");
         CheckWide(ExpandRunCommand(L"$(CURRENT_EOL)", context), L"CRLF", "$(CURRENT_EOL)");
@@ -6570,7 +6570,7 @@ int main() {
                   "单个 $ 不动");
         CheckWide(ExpandRunCommand(L"", context), L"", "空命令行返回空");
         {
-            // 未保存的文档：路径类变量全空（与对标产品一致）
+            // 未保存的文档：路径类变量全空（与常见编辑器一致）
             RunContext blank;
             blank.appDirectory = L"C:\\Tools\\notepadcc";
             CheckWide(ExpandRunCommand(L"[$(FULL_CURRENT_PATH)]", blank), L"[]",
@@ -6579,7 +6579,7 @@ int main() {
                       "未保存的文档没有目录");
             CheckWide(ExpandRunCommand(L"[$(NAME_PART)]", blank), L"[]",
                       "没有文件名就没有名字部分");
-            CheckWide(ExpandRunCommand(L"$(NPP_DIRECTORY)", blank), L"C:\\Tools\\notepadcc",
+            CheckWide(ExpandRunCommand(L"$(APP_DIRECTORY)", blank), L"C:\\Tools\\notepadcc",
                       "没有文档也能拿到程序目录");
         }
         {
@@ -6605,7 +6605,7 @@ int main() {
         plain.command = L"explorer \"$(CURRENT_DIRECTORY)\"";
         {
             npcc::infra::XmlDocument document;
-            npcc::infra::XmlElementPtr root = document.CreateRoot(L"NotepadPlusCompat");
+            npcc::infra::XmlElementPtr root = document.CreateRoot(L"NpccShortcuts");
             npcc::core::AppendRunCommandsXml(*root, {sample, plain});
             const std::string xml = document.ToUtf8();
             Check(xml.find("UserDefinedCommands") != std::string::npos,
@@ -6633,7 +6633,7 @@ int main() {
             }
             // 一条都没有时不写空壳，免得文件里多出个没用的节
             npcc::infra::XmlDocument emptier;
-            npcc::infra::XmlElementPtr emptyRoot = emptier.CreateRoot(L"NotepadPlusCompat");
+            npcc::infra::XmlElementPtr emptyRoot = emptier.CreateRoot(L"NpccShortcuts");
             npcc::core::AppendRunCommandsXml(*emptyRoot, {});
             Check(emptier.ToUtf8().find("UserDefinedCommands") == std::string::npos,
                   "没有命令时不写空节");
@@ -6642,13 +6642,13 @@ int main() {
             // 坏记录只跳过自己，不让整份文件失效
             const std::string xml =
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-                "<NotepadPlusCompat>\n"
+                "<NpccShortcuts>\n"
                 "  <UserDefinedCommands>\n"
                 "    <Command Ctrl=\"yes\" Key=\"66\">没有名字</Command>\n"
                 "    <Command name=\"空的\"></Command>\n"
                 "    <Command name=\"好的\">echo ok</Command>\n"
                 "  </UserDefinedCommands>\n"
-                "</NotepadPlusCompat>\n";
+                "</NpccShortcuts>\n";
             npcc::infra::XmlDocument document;
             std::wstring parseError;
             Check(npcc::infra::XmlDocument::Parse(xml, document, &parseError), "解析手工写的文件");
@@ -6669,12 +6669,12 @@ int main() {
         {
             const std::string custom =
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-                "<NotepadPlusCompat schemaVersion=\"1\">\n"
+                "<NpccShortcuts schemaVersion=\"1\">\n"
                 "  <UserDefinedCommands>\n"
                 "    <Command name=\"跑一下\" Ctrl=\"yes\" Alt=\"no\" Shift=\"no\" Key=\"66\" "
                 "capture=\"no\">cmd /c echo hi</Command>\n"
                 "  </UserDefinedCommands>\n"
-                "</NotepadPlusCompat>\n";
+                "</NpccShortcuts>\n";
             Check(WriteFileDirect(shortcutPath, custom), "写入带运行命令的 shortcuts.xml");
             npcc::core::ShortcutStore store;
             npcc::core::CommandRegistry registry;
@@ -6742,14 +6742,14 @@ int main() {
             // 静默丢掉会让用户以为"快捷键没生效"是别的原因
             const std::string mixed =
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-                "<NotepadPlusCompat schemaVersion=\"1\">\n"
+                "<NpccShortcuts schemaVersion=\"1\">\n"
                 "  <InternalCommands>\n"
                 "    <Shortcut name=\"cmd.run.dialog\" Ctrl=\"no\" Alt=\"no\" Shift=\"no\" "
                 "Key=\"116\"/>\n"
                 "    <Shortcut name=\"run.编译并运行\" Ctrl=\"yes\" Alt=\"no\" Shift=\"no\" "
                 "Key=\"66\"/>\n"
                 "  </InternalCommands>\n"
-                "</NotepadPlusCompat>\n";
+                "</NpccShortcuts>\n";
             Check(WriteFileDirect(shortcutPath, mixed), "写入混有用户命令的 shortcuts.xml");
             npcc::core::CommandRegistry registry;
             const npcc::core::CmdId dialogCommand =

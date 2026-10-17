@@ -26,7 +26,7 @@ inline constexpr uint16_t kRunCommandBase = 128;
 // 静默换成空串会让命令悄悄跑错目标，那种错误比"命令没跑起来"难查得多。
 struct RunContext {
     std::wstring fullPath;          // $(FULL_CURRENT_PATH)：当前文件完整路径（未保存的文档为空）
-    std::wstring appDirectory;      // $(NPP_DIRECTORY)：程序所在目录（为兼容保留这个名字）
+    std::wstring appDirectory;      // $(APP_DIRECTORY)：程序所在目录
     std::wstring currentWord;       // $(CURRENT_WORD)：光标处的词（没有词就是空）
     int          currentLine = 1;   // $(CURRENT_LINE)：光标所在行（1 基）
     std::wstring encodingName;      // $(CURRENT_ENCODING)：UTF-8 / ANSI / UTF-16LE …

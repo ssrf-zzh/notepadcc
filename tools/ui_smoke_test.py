@@ -2500,12 +2500,12 @@ def test_plugins(root):
     # 把插件命令绑到 F9（不带修饰键也能触发，脚本没法伪造 Ctrl/Alt）
     with open(os.path.join(cfg, "shortcuts.xml"), "w", encoding="utf-8", newline="") as handle:
         handle.write('<?xml version="1.0" encoding="UTF-8"?>\n'
-                     '<NotepadPlusCompat schemaVersion="1">\n'
+                     '<NpccShortcuts schemaVersion="1">\n'
                      '  <InternalCommands>\n'
                      '    <Shortcut name="plugin.hello.hello.insert" id="0" Ctrl="no" Alt="no"'
                      ' Shift="no" Key="120"/>\n'
                      '  </InternalCommands>\n'
-                     '</NotepadPlusCompat>\n')
+                     '</NpccShortcuts>\n')
 
     log = os.path.join(cfg, "logs", "notepadcc.log")
     if os.path.exists(log):
@@ -5656,7 +5656,7 @@ def test_json_tree(root):
     exe = os.path.join(root, "build", "bin", "notepadcc.exe")
 
     nestedPath = os.path.join(work, "nested.json")
-    nestedText = ('{\n  "name": "npp",\n  "nested": {\n    "n": 1,\n'
+    nestedText = ('{\n  "name": "demo",\n  "nested": {\n    "n": 1,\n'
                   '    "arr": [true, null, "x"]\n  },\n  "empty": {}\n}\n')
     with open(nestedPath, "w", encoding="utf-8", newline="") as handle:
         handle.write(nestedText)
@@ -5708,7 +5708,7 @@ def test_json_tree(root):
             return False
         expected = [
             "v {",
-            '    "name": "npp"',
+            '    "name": "demo"',
             '  v "nested": {',
             '      "n": 1',
             '    v "arr": [',

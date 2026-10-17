@@ -1572,7 +1572,7 @@ void MainWindow::RegisterCommands() {
     registry_.BindShortcut(kCmdFileSaveAs, ctrlShift, 'S', true);
     registry_.BindShortcut(kCmdFileClose, ctrl, 'W', true);
     registry_.BindShortcut(kCmdFileCloseAll, ctrlShift, 'W', true);
-    registry_.BindShortcut(kCmdFilePrint, ctrl, 'P', true);   // 与对标产品一致
+    registry_.BindShortcut(kCmdFilePrint, ctrl, 'P', true);
     registry_.BindShortcut(kCmdEditUndo, ctrl, 'Z', true);
     registry_.BindShortcut(kCmdEditRedo, ctrl, 'Y', true);
     registry_.BindShortcut(kCmdEditCut, ctrl, 'X', true);
@@ -1602,7 +1602,7 @@ void MainWindow::RegisterCommands() {
     registry_.BindShortcut(kCmdViewSplitToggle, ctrlAlt, 'V', true);
     // 设计附录 A 把 Ctrl+Alt+M 给了"移到另一视图"（还没实现），这里先用 F6 切换焦点
     registry_.BindShortcut(kCmdViewCyclePane, core::kModNone, VK_F6, true);
-    // 基线附录 A 的两个默认键（与对标产品一致）：F11 全屏、Ctrl+B 跳到匹配括号
+    // 两个默认键：F11 全屏、Ctrl+B 跳到匹配括号
     registry_.BindShortcut(kCmdViewFullScreen, core::kModNone, VK_F11, true);
     registry_.BindShortcut(kCmdViewGotoMatchBrace, ctrl, 'B', true);
     registry_.BindShortcut(kCmdWindowNext, ctrl, VK_TAB, true);
@@ -1622,11 +1622,11 @@ void MainWindow::RegisterCommands() {
     registry_.BindShortcut(kCmdToolToggleComment, ctrl, 'Q', true);
     registry_.BindShortcut(kCmdToolBlockComment, ctrlShift, 'Q', true);
     registry_.BindShortcut(kCmdEditAutoComplete, ctrl, VK_SPACE, true);
-    // 宏：与对标产品的默认键一致（附录 A）
+    // 宏的默认键（附录 A）
     registry_.BindShortcut(kCmdMacroRecord, ctrlShift, 'R', true);
     registry_.BindShortcut(kCmdMacroPlayLast, ctrlShift, 'P', true);
     registry_.BindShortcut(kCmdMacroRunMultiple, ctrlShift, 'L', true);
-    // 运行命令：与对标产品一致，F5 打开"运行…"
+    // 运行命令：F5 打开"运行…"
     registry_.BindShortcut(kCmdRunDialog, core::kModNone, VK_F5, true);
 }
 
@@ -3438,7 +3438,7 @@ void MainWindow::CommandFindInFiles() {
 
     // 目录优先级：**工作区根** > 当前文件所在目录 > 上次用过的目录。
     // 工作区排第一是因为它本身就是用户明确选的"我在这儿干活"，在项目里搜是常见意图
-    // （对标产品的文件夹工作区插件也是这么接的）；没有工作区时保持原来的规则
+    // 常见的文件夹工作区实现也采用同样的接法；没有工作区时保持原来的规则
     if (!folderPanel_.Root().empty()) {
         searchPanel_.SetDirectory(folderPanel_.Root());
     } else if (edit::Document* document = ActiveDocument();
@@ -5887,7 +5887,7 @@ bool MainWindow::RegisterPluginCommand(const std::wstring& pluginName, const std
     command.category = core::CmdCategory::Plugin;
     command.key = L"plugin." + fullKey;
     command.text = pluginName.empty() ? name : (name + L"（" + pluginName + L"）");
-    // 插件命令**可以进宏**（对标产品也允许录），但插件自己不能再录别人
+    // 插件命令**可以进宏**，但插件自己不能再录别人
     command.flags = core::kCmdRecordable;
     command.execute = [execute, pluginCookie](const core::CmdContext&) { execute(pluginCookie); };
     const core::CmdId id = registry_.Register(std::move(command));
@@ -5984,7 +5984,7 @@ void MainWindow::CommandToggleEyeCare() {
 //
 // 窗口级全屏：收起菜单栏、去掉标题栏与边框，铺满当前显示器的**工作区**。
 // 之所以铺工作区而不是整块屏幕：压住任务栏的全屏更容易让人一时找不到怎么退出，
-// 而对标产品也是这么做的。进去之前把菜单、窗口样式、摆放位置原样存下来，退出时逐项还原——
+// 进入全屏前把菜单、窗口样式、摆放位置原样存下来，退出时逐项还原——
 // 只记一个布尔量是不够的，还原要用的东西必须一起留着。
 void MainWindow::CommandToggleFullScreen() {
     if (hwnd_ == nullptr) {

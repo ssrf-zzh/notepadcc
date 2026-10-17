@@ -780,7 +780,7 @@ BraceMatch FindBraceMatch(std::string_view text, int32_t caretPos, int32_t windo
         return result;
     }
 
-    // 光标右边优先，再看左边——与对标产品一致（见头文件里的说明）
+    // 光标右边优先，再看左边（见头文件里的说明）
     int32_t pos = -1;
     char open = 0;
     char close = 0;

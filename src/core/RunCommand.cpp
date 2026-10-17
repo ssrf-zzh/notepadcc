@@ -30,7 +30,7 @@ std::wstring FileNameOf(std::wstring_view path) {
     return std::wstring(slash == std::wstring_view::npos ? path : path.substr(slash + 1));
 }
 
-// 去掉最后一个扩展名（"a.tar.gz" 的 NAME_PART 是 "a.tar"，与对标产品一致）
+// 去掉最后一个扩展名（"a.tar.gz" 的 NAME_PART 是 "a.tar"）
 std::wstring NamePartOf(std::wstring_view fileName) {
     const std::size_t dot = fileName.find_last_of(L'.');
     if (dot == std::wstring_view::npos || dot == 0) {
@@ -49,7 +49,7 @@ std::wstring ExtPartOf(std::wstring_view fileName) {
     return std::wstring(fileName.substr(dot + 1));
 }
 
-// 三个修饰键分开写，与对标产品的 <Command Ctrl="yes" …> 拼写对齐
+// 三个修饰键分开写，保存与读取时保持对称
 void WriteModifiers(infra::XmlElement& node, uint8_t modifiers) {
     node.SetAttributeBool(L"Ctrl", (modifiers & kModCtrl) != 0);
     node.SetAttributeBool(L"Alt", (modifiers & kModAlt) != 0);
@@ -112,7 +112,7 @@ std::wstring ExpandRunCommand(std::wstring_view command, const RunContext& conte
             value = &currentLine;
         } else if (name == L"CURRENT_WORD") {
             value = &context.currentWord;
-        } else if (name == L"NPP_DIRECTORY") {
+        } else if (name == L"APP_DIRECTORY") {
             value = &context.appDirectory;
         } else if (name == L"CURRENT_ENCODING") {
             value = &context.encodingName;
@@ -129,7 +129,7 @@ std::wstring ExpandRunCommand(std::wstring_view command, const RunContext& conte
             out.append(*value);
         } else {
             // 认出来但算出来是空的（例如未保存文档的 $(CURRENT_DIRECTORY)）：
-            // 展开成空，与对标产品一致——留着字面量只会让命令跑错目标
+            // 展开成空——留着字面量只会让命令跑错目标
             out.append(scratch);
         }
         index = close + 1;
@@ -151,7 +151,7 @@ void AppendRunCommandsXml(infra::XmlElement& root,
         node->SetAttribute(L"name", def.name);
         WriteModifiers(*node, def.modifiers);
         node->SetAttributeInt(L"Key", static_cast<int>(def.keyCode));
-        // 这个属性是我们自己加的（对标产品没有）：一条命令是不是要把输出收进新文档
+        // 本项目新增的属性：一条命令是不是要把输出收进新文档
         node->SetAttributeBool(L"capture", def.captureOutput);
         node->text = def.command;
     }

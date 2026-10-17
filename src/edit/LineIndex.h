@@ -17,7 +17,7 @@ namespace npcc::edit {
 //     1 亿行在稠密形态下要 800 MB（设计里点名的那条），稀疏形态只要 200 KB。
 //
 // 行尾约定与编辑器一致：\n、\r\n、\r 都算换行；文件以换行结束时，末尾那个
-// 空行也占一行（与 Scintilla / Notepad++ 的口径相同）。
+// 空行也占一行（与 Scintilla 的口径相同）。
 class LineIndex {
 public:
     struct Options {

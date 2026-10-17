@@ -32,7 +32,7 @@ enum class SortOrder : uint8_t { Ascending, Descending };
 // ---- 行操作 ----
 std::string SortLines(std::string_view text, SortOrder order, bool caseSensitive);
 std::string SortLinesByLength(std::string_view text, SortOrder order);
-// 只删**真正空**的行（长度为 0）。只有空白的行不算空行，与对标产品一致。
+// 只删**真正空**的行（长度为 0）。只有空白的行不算空行。
 std::string RemoveEmptyLines(std::string_view text);
 // keepLast = true 时保留最后一次出现（位置也用最后一次的位置）
 std::string RemoveDuplicateLines(std::string_view text, bool keepLast);
@@ -100,7 +100,7 @@ struct BraceMatch {
 
 // 从 caretPos（字节偏移）找"光标旁的那个括号"以及它的配对。
 //
-// 两条约定都是照着对标产品来的：
+// 两条约定如下：
 //   1. **先看光标右边一个字节，再看左边一个**——刚敲完 `(` 时插入点就在它后面，
 //      用户期望高亮的是刚敲进去的那一个；
 //   2. 只数**同一种**括号（`(` 配 `)`、`[` 配 `]`、`{` 配 `}`），字符串与注释里的
