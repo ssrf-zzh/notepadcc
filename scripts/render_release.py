@@ -16,7 +16,6 @@ from pathlib import Path
 SUPPLEMENTARY_FILES = [
     "LICENSE",
     "NOTICE",
-    "THIRD_PARTY_COMPONENTS.md",
     "sbom.cdx.json",
     "licenses/Scintilla-License.txt",
     "licenses/Lexilla-License.txt",
@@ -93,7 +92,7 @@ def main() -> int:
     notes = Path(args.notes_source).resolve().read_text(encoding="utf-8")
     template = Path(args.page_template).resolve().read_text(encoding="utf-8")
     artifacts, hashed = collect_files(release_dir, args.version)
-    if not (release_dir / "RELEASE_NOTES.md").is_file():
+    if not (release_dir / "RELEASE_NOTES.txt").is_file():
         raise FileNotFoundError("missing release notes copy")
     entries = []
     for path in hashed:
@@ -110,11 +109,11 @@ def main() -> int:
     sums_path = release_dir / "SHA256SUMS"
     sums_path.write_text(sums_text, encoding="ascii", newline="\n")
 
-    notes = notes.rstrip() + "\n\n## 文件校验值\n\n| 文件 | SHA-256 |\n|---|---|\n"
-    notes += "".join(f"| `{item['path']}` | `{item['sha256']}` |\n" for item in entries)
-    notes += ("\n> 说明：以上哈希同时写入 `SHA256SUMS`；正式上传前应由发布脚本完成 "
+    notes = notes.rstrip() + "\n\n文件校验值\n----------\n\n"
+    notes += "".join(f"{item['path']}  {item['sha256']}\n" for item in entries)
+    notes += ("\n说明：以上哈希同时写入 SHA256SUMS；正式上传前应由发布脚本完成 "
               "Authenticode 签名与时间戳，再重新生成本表。\n")
-    (release_dir / "RELEASE_NOTES.md").write_text(notes, encoding="utf-8", newline="\n")
+    (release_dir / "RELEASE_NOTES.txt").write_text(notes, encoding="utf-8", newline="\n")
 
     entry_by_path = {item["path"]: item for item in entries}
     artifact_rows = []
@@ -166,9 +165,9 @@ def main() -> int:
 
     manifest_files = entries + [
         {
-            "path": "RELEASE_NOTES.md",
-            "sha256": sha256(release_dir / "RELEASE_NOTES.md"),
-            "size": (release_dir / "RELEASE_NOTES.md").stat().st_size,
+            "path": "RELEASE_NOTES.txt",
+            "sha256": sha256(release_dir / "RELEASE_NOTES.txt"),
+            "size": (release_dir / "RELEASE_NOTES.txt").stat().st_size,
         },
         {
             "path": "SHA256SUMS",

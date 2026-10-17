@@ -11,7 +11,7 @@
 
   构建参数（由 scripts/package_msi.ps1 传入）：
     ProductVersion / SourceExe / SourceReadme / SourceLicense / SourceNotice /
-    SourceThirdParty / SourceSourceNotice / PackageScope / PackageLabel /
+    SourceSourceNotice / PackageScope / PackageLabel /
     UpgradeCode / PerUser
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
@@ -87,7 +87,6 @@
         <File Id="ProjectLicenseTxt" Source="$(var.SourceLicense)" Name="LICENSE.txt" KeyPath="yes" />
 <?endif?>
         <File Id="ProjectNoticeTxt" Source="$(var.SourceNotice)" Name="NOTICE.txt" />
-        <File Id="ThirdPartyComponents" Source="$(var.SourceThirdParty)" Name="THIRD_PARTY_COMPONENTS.md" />
         <File Id="SourceNoticeTxt" Source="$(var.SourceSourceNotice)" Name="源代码说明.txt" />
       </Component>
     </DirectoryRef>

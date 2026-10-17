@@ -41,10 +41,9 @@ def main() -> int:
         f"notepadcc-{version}-x64-peruser.msi",
         f"notepadcc-{version}-x64-permachine.msi",
         f"notepadcc-{version}-source.zip",
-        "RELEASE_NOTES.md",
+        "RELEASE_NOTES.txt",
         "LICENSE",
         "NOTICE",
-        "THIRD_PARTY_COMPONENTS.md",
         "sbom.cdx.json",
         "SHA256SUMS",
         "release-manifest.json",
@@ -98,7 +97,7 @@ def main() -> int:
     for relative in sums:
         if manifest_files.get(relative, {}).get("sha256") != sums[relative]:
             return fail(f"manifest hash differs from SHA256SUMS for {relative}")
-    for relative in ("RELEASE_NOTES.md", "SHA256SUMS", "index.html"):
+    for relative in ("RELEASE_NOTES.txt", "SHA256SUMS", "index.html"):
         item = manifest_files.get(relative)
         if not item or item.get("sha256") != sha256(release / relative):
             return fail(f"manifest does not authenticate {relative}")
@@ -118,7 +117,7 @@ def main() -> int:
         if digest != sums[name]:
             return fail(f"SBOM hash differs for {name}")
 
-    notes = (release / "RELEASE_NOTES.md").read_text(encoding="utf-8")
+    notes = (release / "RELEASE_NOTES.txt").read_text(encoding="utf-8")
     page = (release / "index.html").read_text(encoding="utf-8")
     for relative, digest in sums.items():
         if relative not in notes or digest not in notes:
@@ -132,10 +131,9 @@ def main() -> int:
             return fail(f"download page has no download link for {name}")
 
     notice = (release / "NOTICE").read_text(encoding="utf-8")
-    component_table = (release / "THIRD_PARTY_COMPONENTS.md").read_text(encoding="utf-8")
     for marker in ("Scintilla", "Lexilla", "PCRE2", "SLJIT", "Microsoft Visual C++ Runtime"):
-        if marker not in notice or marker not in component_table:
-            return fail(f"NOTICE or component table omits {marker}")
+        if marker not in notice:
+            return fail(f"NOTICE omits {marker}")
     if "proprietary" in notice.casefold():
         return fail("NOTICE still declares the project as proprietary")
     project_component = sbom.get("metadata", {}).get("component", {})
@@ -173,7 +171,7 @@ def main() -> int:
     with zipfile.ZipFile(release / source_name) as archive:
         source_names = set(archive.namelist())
         required_source = [
-            "LICENSE", "README.md", "CMakeLists.txt", "SOURCE_MANIFEST.txt",
+            "LICENSE", "CMakeLists.txt", "SOURCE_MANIFEST.txt",
             "scripts/package_source.ps1", "scripts/release.ps1",
             "third_party/scintilla/License.txt", "third_party/pcre2/LICENCE.md",
         ]

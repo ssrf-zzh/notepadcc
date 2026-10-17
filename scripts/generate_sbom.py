@@ -3,7 +3,7 @@
 
 The component list is intentionally explicit. A release artifact must not gain a
 new statically linked dependency without updating this file, NOTICE, and
-THIRD_PARTY_COMPONENTS.md together.
+NOTICE together.
 """
 
 from __future__ import annotations

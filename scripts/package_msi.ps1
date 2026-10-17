@@ -101,13 +101,11 @@ $stageIcon = Join-Path $stage "notepadcc.ico"
 $stageReadme = Join-Path $stage "安装说明.txt"
 $stageLicense = Join-Path $stage "LICENSE.txt"
 $stageNotice = Join-Path $stage "NOTICE.txt"
-$stageThirdParty = Join-Path $stage "THIRD_PARTY_COMPONENTS.md"
 $stageSourceNotice = Join-Path $stage "源代码说明.txt"
 Copy-Item -LiteralPath $exePath -Destination $stageExe
 Copy-Item -LiteralPath (Join-Path $root "res\notepadcc.ico") -Destination $stageIcon
 Copy-Item -LiteralPath (Join-Path $root "LICENSE") -Destination $stageLicense
 Copy-Item -LiteralPath (Join-Path $root "NOTICE") -Destination $stageNotice
-Copy-Item -LiteralPath (Join-Path $root "THIRD_PARTY_COMPONENTS.md") -Destination $stageThirdParty
 $readme = @"
 notepadcc $Version（Windows x64 安装版）
 
@@ -151,7 +149,6 @@ $commonArguments = @(
     "-d", "SourceReadme=$stageReadme",
     "-d", "SourceLicense=$stageLicense",
     "-d", "SourceNotice=$stageNotice",
-    "-d", "SourceThirdParty=$stageThirdParty",
     "-d", "SourceSourceNotice=$stageSourceNotice"
 )
 

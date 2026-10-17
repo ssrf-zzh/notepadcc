@@ -4,8 +4,8 @@
     Artifacts produced in dist\release-<version>:
       notepadcc.exe, portable zip, per-user / per-machine MSI,
       notepadcc-<version>-source.zip (GPL-3.0 corresponding source),
-      SHA256SUMS, release-manifest.json, RELEASE_NOTES.md,
-      LICENSE, NOTICE, THIRD_PARTY_COMPONENTS.md, sbom.cdx.json, licenses\,
+      SHA256SUMS, release-manifest.json, RELEASE_NOTES.txt,
+      LICENSE, NOTICE, sbom.cdx.json, licenses\,
       index.html (static download page)
 
     Production usage with a certificate in CurrentUser\My:
@@ -169,7 +169,6 @@ Copy-Checked $perUserMsi (Join-Path $releaseDir (Split-Path -Leaf $perUserMsi))
 Copy-Checked $perMachineMsi (Join-Path $releaseDir (Split-Path -Leaf $perMachineMsi))
 Copy-Checked (Join-Path $root "LICENSE") (Join-Path $releaseDir "LICENSE")
 Copy-Checked (Join-Path $root "NOTICE") (Join-Path $releaseDir "NOTICE")
-Copy-Checked (Join-Path $root "THIRD_PARTY_COMPONENTS.md") (Join-Path $releaseDir "THIRD_PARTY_COMPONENTS.md")
 
 $sourceScript = Join-Path $PSScriptRoot "package_source.ps1"
 $sourceZip = Join-Path $dist "notepadcc-$Version-source.zip"
@@ -184,11 +183,11 @@ Copy-Checked (Join-Path $root "third_party\pcre2\LICENCE.md") (Join-Path $licens
 Copy-Checked (Join-Path $root "third_party\pcre2\deps\sljit\LICENSE") (Join-Path $licenses "SLJIT-LICENSE.txt")
 Copy-Checked (Join-Path $root "licenses\MSVC-RUNTIME-NOTICE.txt") (Join-Path $licenses "MSVC-RUNTIME-NOTICE.txt")
 
-if (-not $ReleaseNotes) { $ReleaseNotes = Join-Path $root "docs\release-notes\$Version.md" }
+if (-not $ReleaseNotes) { $ReleaseNotes = Join-Path $root "docs\release-notes\$Version.txt" }
 if (-not $PageTemplate) { $PageTemplate = Join-Path $root "packaging\download-page-template.html" }
 if (-not (Test-Path -LiteralPath $ReleaseNotes)) { throw "Missing release notes: $ReleaseNotes" }
 if (-not (Test-Path -LiteralPath $PageTemplate)) { throw "Missing page template: $PageTemplate" }
-Copy-Checked $ReleaseNotes (Join-Path $releaseDir "RELEASE_NOTES.md")
+Copy-Checked $ReleaseNotes (Join-Path $releaseDir "RELEASE_NOTES.txt")
 
 $commit = "unknown"
 $dirtyTracked = $false

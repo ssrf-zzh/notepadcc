@@ -86,7 +86,6 @@ Git commit: $commit
 Dirty tracked files: $dirtyFlag
 Generated: $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))
 
-Build and test instructions are in README.md and the repository handoff document.
 The archive includes the project source, build/test/release scripts, LICENSE,
 NOTICE, third-party license material, and the fetched Scintilla/Lexilla/PCRE2
 source trees used by the release build.

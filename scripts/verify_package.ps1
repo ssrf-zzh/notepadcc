@@ -234,7 +234,7 @@ try {
     if (-not (Test-Path -LiteralPath $installedReadme)) {
         throw "安装完成但找不到 $installedReadme"
     }
-    foreach ($name in @("LICENSE.txt", "NOTICE.txt", "THIRD_PARTY_COMPONENTS.md", "源代码说明.txt")) {
+    foreach ($name in @("LICENSE.txt", "NOTICE.txt", "源代码说明.txt")) {
         if (-not (Test-Path -LiteralPath (Join-Path $testRoot $name))) {
             throw "安装完成但缺少许可证材料：$name"
         }

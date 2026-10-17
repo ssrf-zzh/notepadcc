@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-把 notepadcc详细设计说明书.md 转换为排版良好的 .docx。
+把 Markdown 文本转换为排版良好的 .docx。
 
 用法:
     python tools/md2docx.py <input.md> <output.docx> [--no-com] [--header "页眉文字"]
