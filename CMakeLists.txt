@@ -167,6 +167,7 @@ set(NPCC_CORE_SOURCES
     src/edit/UdlLexer.cpp
     src/edit/UdlStyles.cpp
     src/infra/Crypto.cpp
+    src/infra/Http.cpp
     src/infra/TextCodec.cpp
     src/infra/Log.cpp
     src/infra/Paths.cpp

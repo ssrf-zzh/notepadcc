@@ -1,7 +1,6 @@
 #include "infra/UpdateService.h"
 
 #include <windows.h>
-#include <winhttp.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -14,6 +13,7 @@
 #include "core/UpdateManifest.h"
 #include "core/UpdateVerify.h"
 #include "infra/Crypto.h"
+#include "infra/Http.h"
 #include "infra/Log.h"
 #include "infra/Paths.h"
 
@@ -31,152 +31,24 @@ struct DownloadResult {
     std::vector<std::uint8_t>   bytes;
 };
 
-std::wstring WinErrorText(const wchar_t* what, unsigned long code) {
-    return std::wstring(what) + L"（WinHTTP 错误 " + std::to_wstring(code) + L"）";
-}
-
-// 把系统/IE 的代理配置记进日志：开着代理的机器上，"更新检查到底走没走代理"
-// 是第一手线索。取不到就什么都不写（不构成错误）。
-void LogProxyIfConfigured() {
-    WINHTTP_CURRENT_USER_IE_PROXY_CONFIG config{};
-    if (::WinHttpGetIEProxyConfigForCurrentUser(&config) == 0) {
-        return;
-    }
-    if (config.lpszProxy != nullptr) {
-        LogInfo(L"update", std::wstring(L"使用系统代理: ") + config.lpszProxy);
-    }
-    if (config.lpszProxyBypass != nullptr) {
-        LogInfo(L"update", std::wstring(L"代理绕过列表: ") + config.lpszProxyBypass);
-    }
-    if (config.lpszAutoConfigUrl != nullptr) {
-        LogInfo(L"update", std::wstring(L"代理自动配置脚本: ") + config.lpszAutoConfigUrl);
-    }
-    if (config.lpszProxy != nullptr) {
-        ::GlobalFree(config.lpszProxy);
-    }
-    if (config.lpszProxyBypass != nullptr) {
-        ::GlobalFree(config.lpszProxyBypass);
-    }
-    if (config.lpszAutoConfigUrl != nullptr) {
-        ::GlobalFree(config.lpszAutoConfigUrl);
-    }
-}
-
-struct HttpHandles {
-    HINTERNET session = nullptr;
-    HINTERNET connection = nullptr;
-    HINTERNET request = nullptr;
-    ~HttpHandles() {
-        if (request != nullptr)    ::WinHttpCloseHandle(request);
-        if (connection != nullptr) ::WinHttpCloseHandle(connection);
-        if (session != nullptr)    ::WinHttpCloseHandle(session);
-    }
-};
-
 DownloadResult DownloadUrl(const std::string& utf8Url, std::size_t maxBytes) {
     DownloadResult result;
-    const std::wstring url = WideFromUtf8(utf8Url);
-
-    URL_COMPONENTS components{};
-    components.dwStructSize = sizeof(components);
-    wchar_t host[256] = {};
-    wchar_t path[2048] = {};
-    components.lpszHostName = host;
-    components.dwHostNameLength = 255;
-    components.lpszUrlPath = path;
-    components.dwUrlPathLength = 2047;
-    if (::WinHttpCrackUrl(url.c_str(), 0, 0, &components) == 0) {
-        result.error = L"URL 解析失败：" + url;
+    HttpRequest request;
+    request.method = "GET";
+    request.url = utf8Url;
+    request.maxBytes = maxBytes;
+    request.timeoutMs = 10000;
+    const HttpResponse response = HttpSend(request);
+    if (!response.ok) {
+        result.error = response.error;
         return result;
     }
-    const bool secure = components.nScheme == INTERNET_SCHEME_HTTPS;
-    if (!secure && components.nScheme != INTERNET_SCHEME_HTTP) {
-        result.error = L"只支持 http/https 下载：" + url;
+    if (response.statusCode != 200) {
+        result.error = L"服务器返回 HTTP " + std::to_wstring(response.statusCode) + L"：" +
+                       WideFromUtf8(utf8Url);
         return result;
     }
-
-    HttpHandles handles;
-    // 回环地址绝不过代理：本地回归源与自检都指 127.0.0.1，机器上的代理配置不该插一脚。
-    // 其余地址先试"自动代理"（系统/IE 配置，含 PAC/WPAD），失败再退回默认代理设置
-    const bool loopback = ::_wcsicmp(host, L"127.0.0.1") == 0 ||
-                          ::_wcsicmp(host, L"localhost") == 0;
-    handles.session = ::WinHttpOpen(
-        kUserAgent, loopback ? WINHTTP_ACCESS_TYPE_NO_PROXY : WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (handles.session == nullptr && !loopback) {
-        handles.session = ::WinHttpOpen(kUserAgent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    }
-    if (handles.session == nullptr) {
-        result.error = WinErrorText(L"WinHTTP 会话创建失败", ::GetLastError());
-        return result;
-    }
-    ::WinHttpSetTimeouts(handles.session, 10000, 10000, 15000, 30000);
-    if (!loopback) {
-        LogProxyIfConfigured();
-    }
-
-    const wchar_t* pathPart = path[0] != L'\0' ? path : L"/";
-    handles.connection = ::WinHttpConnect(handles.session, host, components.nPort, 0);
-    if (handles.connection == nullptr) {
-        result.error = WinErrorText(L"连接失败", ::GetLastError());
-        return result;
-    }
-    handles.request = ::WinHttpOpenRequest(
-        handles.connection, L"GET", pathPart, nullptr, WINHTTP_NO_REFERER,
-        WINHTTP_DEFAULT_ACCEPT_TYPES, secure ? WINHTTP_FLAG_SECURE : 0);
-    if (handles.request == nullptr) {
-        result.error = WinErrorText(L"请求创建失败", ::GetLastError());
-        return result;
-    }
-    // 默认就是"禁止 https 降级到 http"；显式写出来，验证时不用去查默认值
-    DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
-    ::WinHttpSetOption(handles.request, WINHTTP_OPTION_REDIRECT_POLICY, &redirectPolicy,
-                       sizeof(redirectPolicy));
-
-    if (::WinHttpSendRequest(handles.request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                             WINHTTP_NO_REQUEST_DATA, 0, 0, 0) == 0 ||
-        ::WinHttpReceiveResponse(handles.request, nullptr) == 0) {
-        result.error = WinErrorText(L"请求发送失败", ::GetLastError());
-        return result;
-    }
-
-    DWORD statusCode = 0;
-    DWORD statusSize = sizeof(statusCode);
-    if (::WinHttpQueryHeaders(handles.request,
-                              WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                              WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize,
-                              WINHTTP_NO_HEADER_INDEX) == 0) {
-        result.error = WinErrorText(L"读不到 HTTP 状态码", ::GetLastError());
-        return result;
-    }
-    if (statusCode != 200) {
-        result.error = L"服务器返回 HTTP " + std::to_wstring(statusCode) + L"：" + url;
-        return result;
-    }
-
-    for (;;) {
-        DWORD available = 0;
-        if (::WinHttpQueryDataAvailable(handles.request, &available) == 0) {
-            result.error = WinErrorText(L"读数据失败", ::GetLastError());
-            return result;
-        }
-        if (available == 0) {
-            break;   // 收完
-        }
-        const std::size_t offset = result.bytes.size();
-        if (offset + available > maxBytes) {
-            result.error = L"内容超过大小上限（" + std::to_wstring(maxBytes) + L" 字节）：" + url;
-            return result;
-        }
-        result.bytes.resize(offset + available);
-        DWORD read = 0;
-        if (::WinHttpReadData(handles.request, result.bytes.data() + offset, available, &read) == 0) {
-            result.error = WinErrorText(L"读数据失败", ::GetLastError());
-            return result;
-        }
-        result.bytes.resize(offset + read);
-    }
+    result.bytes = response.bytes;
     result.ok = true;
     return result;
 }

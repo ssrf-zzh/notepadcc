@@ -1,7 +1,10 @@
 // notepadcc 单元测试：只覆盖不依赖窗口的纯逻辑（设计文档 9.1 的单元测试层）。
+#include <winsock2.h>   // B2 的回环端到端要用；必须排在 windows.h 之前
+#include <ws2tcpip.h>
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
 #include <algorithm>
 #include <filesystem>
 #include <chrono>
@@ -43,6 +46,7 @@
 #include "shell/FunctionListPanel.h"
 #include "core/SnapshotStore.h"
 #include "infra/Crypto.h"
+#include "infra/Http.h"
 #include "license/LicenseStore.h"
 #include "license/LicenseTypes.h"
 #include "license/LicenseVerifier.h"
@@ -278,6 +282,104 @@ std::string ToUtf16Bytes(const std::wstring& text, bool bigEndian) {
     }
     return out;
 }
+
+// ---- B2：进程内回环小服务器 ----
+// "真的发一次 HTTP"就要有真的对端：起一个只服务本机、端口由系统挑的 TCP 监听，
+// 把预置的 HTTP 报文原样回给调用方，并返回它收到的请求原文（好断言礼貌性细节：
+// 请求行、Host、Content-Type 与请求体）。
+struct LoopbackHttpServer {
+    SOCKET         listener = INVALID_SOCKET;
+    unsigned short port = 0;
+
+    bool Start() {
+        ::WSADATA wsa{};
+        if (::WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+            return false;
+        }
+        listener = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (listener == INVALID_SOCKET) {
+            return false;
+        }
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;   // 让系统挑空闲端口，避免和机器上别的东西撞
+        if (::bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) ==
+            SOCKET_ERROR) {
+            return false;
+        }
+        if (::listen(listener, 1) == SOCKET_ERROR) {
+            return false;
+        }
+        int length = sizeof(address);
+        if (::getsockname(listener, reinterpret_cast<sockaddr*>(&address), &length) ==
+            SOCKET_ERROR) {
+            return false;
+        }
+        port = ::ntohs(address.sin_port);
+        return true;
+    }
+
+    // 收下一条请求（最多等 waitMs 毫秒），按 response 原样回一份报文；返回请求原文
+    std::string ServeOnce(const std::string& response, int waitMs = 5000) {
+        fd_set set;
+        FD_ZERO(&set);
+        FD_SET(listener, &set);
+        timeval timeout{};
+        timeout.tv_sec = waitMs / 1000;
+        timeout.tv_usec = (waitMs % 1000) * 1000;
+        if (::select(0, &set, nullptr, nullptr, &timeout) <= 0) {
+            return {};
+        }
+        SOCKET client = ::accept(listener, nullptr, nullptr);
+        if (client == INVALID_SOCKET) {
+            return {};
+        }
+        std::string request;
+        char buffer[1024];
+        for (;;) {
+            const int read = ::recv(client, buffer, sizeof(buffer), 0);
+            if (read <= 0) {
+                break;
+            }
+            request.append(buffer, static_cast<std::size_t>(read));
+            // 头部收完再看 Content-Length：凑够"一段完整请求"就停
+            const std::size_t headerEnd = request.find("\r\n\r\n");
+            if (headerEnd != std::string::npos) {
+                std::size_t contentLength = 0;
+                const std::string headers = request.substr(0, headerEnd);
+                const std::string key = "Content-Length:";
+                const std::size_t at = headers.find(key);
+                if (at != std::string::npos) {
+                    contentLength = std::strtoul(headers.c_str() + at + key.size(), nullptr, 10);
+                }
+                if (request.size() >= headerEnd + 4 + contentLength) {
+                    break;
+                }
+            }
+        }
+        std::size_t sent = 0;
+        while (sent < response.size()) {
+            const int written = ::send(client, response.data() + sent,
+                                       static_cast<int>(response.size() - sent), 0);
+            if (written <= 0) {
+                break;
+            }
+            sent += static_cast<std::size_t>(written);
+        }
+        ::shutdown(client, SD_SEND);
+        ::closesocket(client);
+        return request;
+    }
+
+    void Stop() {
+        if (listener != INVALID_SOCKET) {
+            ::closesocket(listener);
+            listener = INVALID_SOCKET;
+        }
+        ::WSACleanup();
+    }
+};
 
 }  // namespace
 
@@ -8002,6 +8104,118 @@ int main() {
 
         std::filesystem::remove_all(serviceDir);
     }
+    Section("HTTP 客户端（URL 解析 / 回环 GET+POST）（B2）");
+    {
+        using npcc::infra::HttpGet;
+        using npcc::infra::HttpPostJson;
+        using npcc::infra::HttpResponse;
+        using npcc::infra::HttpUrl;
+        using npcc::infra::ParseHttpUrl;
+
+        // ---- URL 解析（纯字符串逻辑）----
+        const HttpUrl https = ParseHttpUrl("HTTPS://Example.COM/a/b?x=1");
+        Check(https.valid && https.secure && !https.loopback && https.host == "example.com" &&
+                  https.port == 443 && https.pathAndQuery == "/a/b?x=1",
+              "https：协议大小写归一、默认 443、路径带查询");
+
+        const HttpUrl plain = ParseHttpUrl("http://example.com");
+        Check(plain.valid && !plain.secure && plain.port == 80 && plain.pathAndQuery == "/",
+              "http：默认 80、无路径补 /");
+
+        const HttpUrl port = ParseHttpUrl("http://example.com:8080");
+        Check(port.valid && port.port == 8080 && port.pathAndQuery == "/", "显式端口");
+
+        const HttpUrl queryOnly = ParseHttpUrl("https://example.com?x=1");
+        Check(queryOnly.valid && queryOnly.pathAndQuery == "/?x=1", "只有查询串：补 /?x=1");
+
+        const HttpUrl v6 = ParseHttpUrl("http://[::1]:9000/x");
+        Check(v6.valid && v6.loopback && v6.host == "::1" && v6.port == 9000,
+              "IPv6 回环带端口");
+
+        Check(ParseHttpUrl("http://127.0.0.1/x").loopback &&
+                  ParseHttpUrl("http://LOCALHOST/x").loopback,
+              "回环：127.0.0.1 与 localhost（大小写归一）");
+        Check(!ParseHttpUrl("http://192.168.1.10/x").loopback &&
+                  !ParseHttpUrl("http://example.com/x").loopback,
+              "非回环地址不误判");
+
+        Check(!ParseHttpUrl("example.com/x").valid &&
+                  ParseHttpUrl("example.com/x").why.find("协议头") != std::string::npos,
+              "没有协议头：明确失败");
+        Check(!ParseHttpUrl("ftp://example.com/x").valid, "只支持 http / https");
+        Check(!ParseHttpUrl("http://").valid && !ParseHttpUrl("http://:80/x").valid,
+              "没有主机名：明确失败");
+        Check(!ParseHttpUrl("http://example.com:abc/x").valid &&
+                  !ParseHttpUrl("http://example.com:99999/x").valid,
+              "端口非法（非数字 / 超上限）");
+        Check(!ParseHttpUrl("http://user@example.com/x").valid, "带用户信息拒绝而不是猜");
+
+        // ---- 回环端到端：对端是这个进程里的一个真 TCP 服务器 ----
+        {
+            LoopbackHttpServer server;
+            Check(server.Start(), "准备：回环小服务器已监听");
+
+            const std::string getBody = "hello-from-loopback";
+            const std::string getResponse = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                                            "Content-Length: " + std::to_string(getBody.size()) +
+                                            "\r\nConnection: close\r\n\r\n" + getBody;
+            std::string seen;
+            std::thread thread([&] { seen = server.ServeOnce(getResponse); });
+            const HttpResponse got =
+                HttpGet("http://127.0.0.1:" + std::to_string(server.port) + "/hello", 1u << 20,
+                        5000);
+            thread.join();
+            Check(got.ok && got.statusCode == 200 &&
+                      std::string(got.bytes.begin(), got.bytes.end()) == getBody,
+                  "GET：状态与响应体");
+            Check(seen.find("GET /hello HTTP/1.1") == 0 && seen.find("Host:") != std::string::npos,
+                  "GET：请求行与 Host 头像一份真的 HTTP 请求");
+
+            const std::string postBody = "{\"hello\":\"世界\"}";
+            const std::string postResponse = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                                             "Content-Length: 2\r\nConnection: close\r\n\r\n{}";
+            std::string seenPost;
+            std::thread thread2([&] { seenPost = server.ServeOnce(postResponse); });
+            const HttpResponse posted =
+                HttpPostJson("http://127.0.0.1:" + std::to_string(server.port) + "/v1/activate",
+                             postBody, 1u << 20, 5000);
+            thread2.join();
+            Check(posted.ok && posted.statusCode == 200, "POST：200 能拿到");
+            Check(seenPost.find("POST /v1/activate HTTP/1.1") == 0 &&
+                      seenPost.find("Content-Type: application/json") != std::string::npos &&
+                      seenPost.find(postBody) != std::string::npos,
+                  "POST：路径、Content-Type 与 JSON 请求体都发出去了");
+
+            const std::string notFound = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n"
+                                         "Connection: close\r\n\r\n";
+            std::string seen404;
+            std::thread thread3([&] { seen404 = server.ServeOnce(notFound); });
+            const HttpResponse missing =
+                HttpGet("http://127.0.0.1:" + std::to_string(server.port) + "/nope", 1u << 20, 5000);
+            thread3.join();
+            Check(missing.ok && missing.statusCode == 404,
+                  "404 是响应而不是传输失败（状态码交调用方判断）");
+
+            const std::string big = "0123456789";
+            const std::string bigResponse = "HTTP/1.1 200 OK\r\nContent-Length: " +
+                                            std::to_string(big.size()) +
+                                            "\r\nConnection: close\r\n\r\n" + big;
+            std::string seenBig;
+            std::thread thread4([&] { seenBig = server.ServeOnce(bigResponse); });
+            const HttpResponse oversize =
+                HttpGet("http://127.0.0.1:" + std::to_string(server.port) + "/big", 4, 5000);
+            thread4.join();
+            Check(!oversize.ok && oversize.error.find(L"大小上限") != std::wstring::npos,
+                  "响应体超过上限：明确失败而不是截断");
+
+            server.Stop();
+        }
+
+        const HttpResponse badUrl = HttpGet("not-a-url", 1024, 5000);
+        Check(!badUrl.ok && badUrl.error.find(L"协议头") != std::wstring::npos,
+              "HttpSend 把解析失败的原因带回来（没有网络动作）");
+    }
+
     Section("远程编辑：站点校验与远程路径（M3 第十一块）");
     {
         using npcc::core::ParseRemoteProtocol;
