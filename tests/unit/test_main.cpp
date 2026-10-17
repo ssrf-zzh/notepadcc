@@ -46,6 +46,7 @@
 #include "license/LicenseStore.h"
 #include "license/LicenseTypes.h"
 #include "license/LicenseVerifier.h"
+#include "license/Fingerprint.h"
 #include "LicenseFixtures.h"
 #include "infra/SingleInstance.h"
 #include "infra/FileAssociation.h"
@@ -7669,6 +7670,165 @@ int main() {
               "读回与写入逐字节一致");
         Check(VerifyLicenseBytes(loaded, now).ok(), "落盘再读回的许可仍然验得通");
         std::filesystem::remove_all(storeDir);
+    }
+    Section("机器指纹与短码（B4）");
+    {
+        using npcc::license::Collect;
+        using npcc::license::Current;
+        using npcc::license::Fingerprint;
+        using npcc::license::FingerprintGroup;
+        using npcc::license::FingerprintItem;
+        using npcc::license::FingerprintMatch;
+        using npcc::license::FingerprintMode;
+        using npcc::license::FingerprintProvider;
+        using npcc::license::FingerprintVerdict;
+        using npcc::license::Format;
+        using npcc::license::IsWellFormedCode;
+        using npcc::license::kFingerprintAlphabet;
+        using npcc::license::Match;
+        using npcc::license::NormalizeCode;
+
+        // 字母表：32 个符号，念不清的 0 O 1 I 一个都没有
+        Check(kFingerprintAlphabet.size() == 32, "字母表 32 个符号");
+        Check(kFingerprintAlphabet.find('0') == std::string_view::npos &&
+                  kFingerprintAlphabet.find('1') == std::string_view::npos &&
+                  kFingerprintAlphabet.find('O') == std::string_view::npos &&
+                  kFingerprintAlphabet.find('I') == std::string_view::npos,
+              "字母表里没有 0 / O / 1 / I");
+
+        // 单组：固定向量（SHA-256 前 25 位 → 5 个符号；实现与测试各自独立算过一遍）
+        CheckEqual(FingerprintGroup("TEST-MACHINE"), "D7FRU", "固定向量");
+        CheckEqual(FingerprintGroup("TEST-MACHINE-B"), "9YR34", "改一个字符就换一组");
+        CheckEqual(FingerprintGroup("  test-machine  "), "D7FRU", "大小写与首尾空白先归一");
+        CheckEqual(FingerprintGroup(""), "00000", "空值 → 00000");
+        CheckEqual(FingerprintGroup(" \t "), "00000", "只有空白也当读不到");
+
+        // 采集：注入桩（本机真实的采集在下面单独验）
+        const FingerprintProvider stub{
+            [](std::string& out) { out = "guid-a"; return true; },
+            [](std::string& out) { out = "1234ABCD"; return true; },
+            [](std::string& out) { out = "Fake CPU @ 1.00GHz"; return true; },
+            [](std::string&) { return false; },
+        };
+        const Fingerprint machine = Collect(stub);
+        Check(machine.PresentCount() == 3 && machine.Has(FingerprintItem::MachineGuid) &&
+                  !machine.Has(FingerprintItem::BoardUuid),
+              "桩：三项读得到、主板 UUID 读不到");
+        const std::string code = Format(machine);
+        Check(code.size() == 23, "短码 4 组 × 5 字符 + 3 个连字符");
+        Check(IsWellFormedCode(code), "短码形态合法");
+        CheckEqual(code.substr(18), "00000", "读不到的那一项写成 00000");
+
+        // 第二台桩：四项齐全。判定逻辑用它的短码——"读不到"的项不参与匹配，
+        // 拿三项齐的那台做宽容判定只会让人误以为"少中一项"。
+        const FingerprintProvider stubFull{
+            [](std::string& out) { out = "guid-a"; return true; },
+            [](std::string& out) { out = "1234ABCD"; return true; },
+            [](std::string& out) { out = "Fake CPU @ 1.00GHz"; return true; },
+            [](std::string& out) { out = "board-1"; return true; },
+        };
+        const Fingerprint full = Collect(stubFull);
+        const std::string fullCode = Format(full);
+        Check(full.PresentCount() == 4 && IsWellFormedCode(fullCode), "四项齐全的桩");
+
+        std::string spaced = fullCode;
+        for (char& ch : spaced) {
+            if (ch == '-') {
+                ch = ' ';
+            } else if (ch >= 'A' && ch <= 'Z') {
+                ch = static_cast<char>(ch - 'A' + 'a');
+            }
+        }
+        CheckEqual(NormalizeCode(spaced), NormalizeCode(fullCode), "分隔符与大小写归一");
+        Check(Match(full, spaced, FingerprintMode::Tolerant).verdict == FingerprintVerdict::Match,
+              "带空格的小写短码照样判中");
+
+        // 同一台机器
+        const FingerprintMatch own = Match(full, fullCode, FingerprintMode::Tolerant);
+        Check(own.verdict == FingerprintVerdict::Match && own.Allows() && own.matchedGroups == 4,
+              "宽容模式：MachineGuid 中 → 放行");
+        Check(Match(full, fullCode, FingerprintMode::Exact).verdict == FingerprintVerdict::Match,
+              "严格模式：短码完全一致 → 放行");
+        Check(Match(full, fullCode, FingerprintMode::None).verdict == FingerprintVerdict::NotBound,
+              "fingerprintMode=none 的站点许可不做机器判定");
+
+        // 换一块盘：MachineGuid 仍中 → 直接放行；严格模式立刻失败
+        Fingerprint diskSwapped = full;
+        diskSwapped.values[1] = "9999FFFF";
+        Check(Match(diskSwapped, fullCode, FingerprintMode::Tolerant).verdict ==
+                  FingerprintVerdict::Match,
+              "只换盘：MachineGuid 仍中 → 放行");
+        Check(Match(diskSwapped, fullCode, FingerprintMode::Exact).verdict ==
+                  FingerprintVerdict::Mismatch,
+              "严格模式：换盘即拒绝");
+
+        // 换主板（MachineGuid 变）+ 换盘，CPU 与主板 UUID 保持 → 两项中 → 宽容放行
+        Fingerprint boardSwapped = full;
+        boardSwapped.values[0] = "guid-b";
+        boardSwapped.values[1] = "9999FFFF";
+        const FingerprintMatch tolerated = Match(boardSwapped, fullCode, FingerprintMode::Tolerant);
+        Check(tolerated.verdict == FingerprintVerdict::Tolerated && tolerated.matchedGroups == 2 &&
+                  tolerated.Allows(),
+              "MachineGuid 不中但两项中 → 宽容放行（一次性提示由界面负责）");
+        Check(Match(boardSwapped, fullCode, FingerprintMode::Exact).verdict ==
+                  FingerprintVerdict::Mismatch,
+              "严格模式不做宽容");
+
+        // 只剩一项中 → 拒绝
+        Fingerprint other = boardSwapped;
+        other.values[2] = "Another CPU @ 2.00GHz";
+        const FingerprintMatch rejected = Match(other, fullCode, FingerprintMode::Tolerant);
+        Check(rejected.verdict == FingerprintVerdict::Mismatch && rejected.matchedGroups == 1 &&
+                  !rejected.Allows(),
+              "至多一项中 → 拒绝");
+
+        // 本机读得到的项不足两项、且都没中 → Unavailable（宽容判定无从谈起）
+        Fingerprint thin = full;
+        thin.values[0] = "guid-b";
+        thin.values[1].clear();
+        thin.values[2].clear();
+        thin.values[3].clear();
+        Check(thin.PresentCount() == 1, "桩构造：只剩一项读得到");
+        const FingerprintMatch nowhere = Match(thin, fullCode, FingerprintMode::Tolerant);
+        Check(nowhere.verdict == FingerprintVerdict::Unavailable && !nowhere.Allows(),
+              "读得到的项不足两项 → Unavailable，不放行");
+
+        // 许可里带 00000 的组：只在"双方都读不到"时才算对得上
+        const FingerprintMatch partial = Match(full, code, FingerprintMode::Tolerant);
+        Check(partial.verdict == FingerprintVerdict::Match && partial.matchedGroups == 3 &&
+                  partial.unknownGroups == 1,
+              "许可里有一项读不到：那一项不算中，其余三项照常");
+        Check(Match(full, code, FingerprintMode::Exact).verdict == FingerprintVerdict::Mismatch,
+              "严格模式下读不到的那一项对不上就是拒绝");
+
+        // 短码自身的合法性：不猜易混字符，长度与字母表都严格
+        Check(!IsWellFormedCode("ABC") && !IsWellFormedCode(""), "长度不对拒绝");
+        Check(!IsWellFormedCode("K7M2P-9XQ4T-3BNWD-8HJ6O"), "含 O 的短码拒绝（不猜）");
+        Check(!IsWellFormedCode("07M2P-9XQ4T-3BNWD-8HJ6R"), "含 0 的短码拒绝（不猜）");
+        Check(IsWellFormedCode("00000-00000-00000-00000"), "四组都读不到也是一个合法短码");
+        Check(Match(full, "K7M2P-9XQ4T-3BNWD-8HJ6O", FingerprintMode::Tolerant).verdict ==
+                  FingerprintVerdict::Malformed,
+              "短码不合法 → Malformed（区别于“不是这台机器”）");
+        Check(Match(full, "00000-00000-00000-00000", FingerprintMode::Tolerant).verdict ==
+                  FingerprintVerdict::Mismatch,
+              "许可里四项都读不到 → 对不上，拒绝");
+        // 本机采集（真读注册表 / 卷序列号 / CPUID / SMBIOS）
+        const Fingerprint real = Current();
+        Check(!real.values[0].empty(), "本机读得到 MachineGuid");
+        Check(real.values[1].size() == 8 &&
+                  real.values[1].find_first_not_of("0123456789ABCDEF") == std::string::npos,
+              "卷序列号是 8 位大写十六进制");
+        Check(!real.values[2].empty(), "本机读得到 CPU 品牌串");
+        const std::string realCode = Format(real);
+        Check(IsWellFormedCode(realCode), "本机短码形态合法");
+        CheckEqual(Format(Current()), realCode, "两次采集得出的短码一致");
+        Check(Match(real, realCode, FingerprintMode::Tolerant).verdict ==
+                      FingerprintVerdict::Match &&
+                  Match(real, realCode, FingerprintMode::Exact).verdict ==
+                      FingerprintVerdict::Match,
+              "本机对本机签出的短码：两种模式都放行");
+        std::printf("    [info] 本机短码 %s（主板 UUID %s）\n", realCode.c_str(),
+                    real.values[3].empty() ? "读不到" : real.values[3].c_str());
     }
     Section("远程编辑：站点校验与远程路径（M3 第十一块）");
     {

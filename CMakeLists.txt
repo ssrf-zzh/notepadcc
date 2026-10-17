@@ -183,6 +183,7 @@ set(NPCC_CORE_SOURCES
     src/license/LicenseTypes.cpp
     src/license/LicenseVerifier.cpp
     src/license/LicenseStore.cpp
+    src/license/Fingerprint.cpp
     src/io/AtomicFile.cpp
     src/io/FileReader.cpp
     src/io/FileWatcher.cpp
