@@ -340,6 +340,11 @@ bool ConfigCenter::Load(std::wstring* error) {
             warnings_, L"script"));
     }
 
+    const infra::XmlElement* license = Section(root, L"license");
+    if (license != nullptr) {
+        license_.serviceUrl = ReadString(license, L"serviceUrl", license_.serviceUrl);
+    }
+
     // 远程站点（M3 第十一块）：一个个 <Site> 子元素。坏站点只警告并跳过
     // （少一个站点不该让程序起不来），名字重复的后来者覆盖前者——站点名
     // 同时是本地缓存目录名，"两个同名站点"在磁盘上本来就分不开。
@@ -484,6 +489,12 @@ bool ConfigCenter::Save(bool force, std::wstring* error) {
     infra::XmlElementPtr script = root->AddChild(L"script");
     script->SetAttribute(L"interpreter", script_.interpreter);
     script->SetAttributeInt(L"timeoutSeconds", static_cast<int>(script_.timeoutSeconds));
+
+    // 许可激活服务（B6）：没配置就不写这一节（跟远程站点同一个取舍）
+    if (!license_.serviceUrl.empty()) {
+        infra::XmlElementPtr license = root->AddChild(L"license");
+        license->SetAttribute(L"serviceUrl", license_.serviceUrl);
+    }
 
     // 远程站点：没配站点就不写这一节（跟工具栏项表同一个取舍）
     if (!remote_.sites.empty()) {

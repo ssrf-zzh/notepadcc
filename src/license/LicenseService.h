@@ -55,6 +55,16 @@ public:
     // 更希望退出码只回答后者（前者用 --license-info 查）。
     bool Import(const std::filesystem::path& source, LicenseError* error, std::wstring* detail);
 
+    // 从内存导入（B6 在线激活与离线对话框共用出口）：网络来的字节按同一门槛
+    // 防一遍——“结构上是真许可”才落盘，成功后立即 Reload。
+    bool ImportBytes(std::string_view bytes, LicenseError* error, std::wstring* detail);
+
+    // 离线申请串（设计 7.1）：product / requestId / fingerprint / appVersion /
+    // seats / holder，纯文本、LF 行尾。seats 与 holder 由界面收集（客户填写）；
+    // 指纹现场重采一次（比缓存诚实：程序运行期间也可能换硬件）。
+    std::string ExportChallenge(std::string_view appVersion, int seats,
+                                std::string_view holderUtf8) const;
+
     // --license-info 的输出（设计 8.5）：一行 JSON。
     std::string StatusJson() const;
 

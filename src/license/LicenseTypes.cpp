@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <ctime>
 
+#include "infra/Crypto.h"
+
 namespace npcc::license {
 namespace {
 
@@ -255,6 +257,26 @@ std::string FormatIso8601Utc(std::int64_t epochSeconds) {
 
 std::int64_t NowUnixUtc() {
     return static_cast<std::int64_t>(std::time(nullptr));
+}
+
+std::string NewRequestId() {
+    std::uint8_t bytes[16] = {};
+    if (!infra::RandomBytes(bytes, sizeof(bytes))) {
+        return "unknown";   // 随机源都起不来：给个显眼的值，别悄悄重用一个号
+    }
+    bytes[6] = static_cast<std::uint8_t>((bytes[6] & 0x0F) | 0x40);   // 版本 4
+    bytes[8] = static_cast<std::uint8_t>((bytes[8] & 0x3F) | 0x80);   // 变体 10
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(36);
+    for (int index = 0; index < 16; ++index) {
+        if (index == 4 || index == 6 || index == 8 || index == 10) {
+            out.push_back('-');
+        }
+        out.push_back(kHex[bytes[index] >> 4]);
+        out.push_back(kHex[bytes[index] & 0x0F]);
+    }
+    return out;
 }
 
 }  // namespace npcc::license

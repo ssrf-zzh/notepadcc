@@ -186,6 +186,7 @@ set(NPCC_CORE_SOURCES
     src/license/LicenseStore.cpp
     src/license/Fingerprint.cpp
     src/license/LicenseService.cpp
+    src/license/ActivationClient.cpp
     src/io/AtomicFile.cpp
     src/io/FileReader.cpp
     src/io/FileWatcher.cpp
@@ -228,6 +229,7 @@ set(NPCC_CORE_SOURCES
     src/shell/ToolbarDialog.cpp
     src/shell/RemoteDialog.cpp
     src/shell/RemoteSiteDialog.cpp
+    src/shell/LicenseDialog.cpp
     src/shell/UpdateDialog.cpp)
 
 add_library(notepadcc_core STATIC ${NPCC_CORE_SOURCES})

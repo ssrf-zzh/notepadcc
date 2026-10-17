@@ -52,6 +52,7 @@
 #include "license/LicenseVerifier.h"
 #include "license/Fingerprint.h"
 #include "license/LicenseService.h"
+#include "license/ActivationClient.h"
 #include "LicenseFixtures.h"
 #include "infra/SingleInstance.h"
 #include "infra/FileAssociation.h"
@@ -1104,6 +1105,7 @@ int main() {
                   "默认新建编码是 UTF-8");
             Check(config.LargeFile().tier1MaxBytes == 8ull * 1024 * 1024,
                   "默认大文件阈值是 8 MB");
+            Check(config.License().serviceUrl.empty(), "默认没有配置许可服务地址");
         }
 
         // 改值 → 保存 → 重新加载
@@ -1121,6 +1123,7 @@ int main() {
             config.LargeFile().tier2MaxBytes = 32ull * 1024 * 1024;
             config.LargeFile().refuseAboveBytes = 256ull * 1024 * 1024;
             config.Search().lastFilter = L"*.rs;*.toml";
+            config.License().serviceUrl = L"https://lic.example.com/";
             std::wstring error;
             Check(config.Save(true, &error), "保存配置成功");
             Check(std::filesystem::exists(path), "配置文件已落盘");
@@ -1138,6 +1141,8 @@ int main() {
             Check(reloaded.LargeFile().tier2MaxBytes == 32ull * 1024 * 1024,
                   "大文件 T2 阈值往返一致");
             Check(reloaded.Search().lastFilter == L"*.rs;*.toml", "过滤器往返一致");
+            Check(reloaded.License().serviceUrl == L"https://lic.example.com/",
+                  "许可服务地址往返一致");
             Check(reloaded.General().theme == L"light", "主题默认是浅色");
         }
 
@@ -8103,6 +8108,243 @@ int main() {
               "错误名（与 DescribeLicenseError 的中文文案各走各路）");
 
         std::filesystem::remove_all(serviceDir);
+    }
+    Section("在线激活客户端与申请串（B6）");
+    {
+        using npcc::license::ActivateInput;
+        using npcc::license::ActivationClient;
+        using npcc::license::ActivationError;
+        using npcc::license::ActivationErrorName;
+        using npcc::license::ActivationResult;
+        using npcc::license::BuildActivateRequestBody;
+        using npcc::license::DescribeActivationError;
+        using npcc::license::JsonStringField;
+        using npcc::license::LicenseError;
+        using npcc::license::LicenseService;
+        using npcc::license::LicenseState;
+        using npcc::license::MachineHashFromComputerName;
+        using npcc::license::NewRequestId;
+        using npcc::license::NormalizeLicenseKey;
+        using npcc::license::ParseActivateResponse;
+
+        // ---- 授权码归一化（粘贴进来的码不该因为空格与大小写吃 KEY_NOT_FOUND） ----
+        CheckEqual(NormalizeLicenseKey("  npcc-pro-1234 \r\n"), "NPCC-PRO-1234", "去空白 + 转大写");
+        CheckEqual(NormalizeLicenseKey("abc\tdef"), "ABCDEF", "制表符也去掉");
+        CheckEqual(NormalizeLicenseKey(""), "", "空串原样");
+
+        // ---- 计算机名哈希（设计 4.3：请求里只发它的前 8 位十六进制） ----
+        const std::string machineHash = MachineHashFromComputerName("WORKSTATION-01");
+        CheckEqual(machineHash, MachineHashFromComputerName("WORKSTATION-01"), "同名两次一致");
+        Check(machineHash.size() == 8 &&
+                  machineHash.find_first_not_of("0123456789abcdef") == std::string::npos,
+              "8 位小写十六进制");
+        Check(MachineHashFromComputerName("WORKSTATION-02") != machineHash, "不同名不同哈希");
+
+        // ---- 扁平 JSON 字符串扫描（解析服务端响应的小工具） ----
+        std::string field;
+        Check(JsonStringField("{\"a\":\"hello\"}", "a", field) && field == "hello", "普通字段");
+        Check(JsonStringField("{\"a\":\"x\\\"y\\\\z\"}", "a", field) && field == "x\"y\\z",
+              "引号与反斜杠转义");
+        Check(JsonStringField("{\"a\":\"\\u4E2D\\u6587\"}", "a", field) && field == "中文",
+              "\\uXXXX 解成 UTF-8");
+        Check(JsonStringField("{\"a\":\"\\uD83D\\uDE00\"}", "a", field) &&
+                  field == "\xF0\x9F\x98\x80",
+              "代理对合成一个码点");
+        Check(JsonStringField("{\"a\" :  \"v\"}", "a", field) && field == "v",
+              "键值之间可以有空白");
+        Check(!JsonStringField("{\"a\":\"x\"}", "b", field), "缺键：false");
+        Check(!JsonStringField("{\"a\":123}", "a", field), "值不是字符串：false");
+        Check(!JsonStringField("{\"a\":\"\\q\"}", "a", field), "不认识的转义：不猜，直接 false");
+
+        // ---- 请求体（设计第 6 章表格的六个字段） ----
+        ActivateInput input;
+        input.licenseKey = " npcc-pro-1234 ";
+        input.fingerprintText = "DMS23-R3WRZ-USZY5-498XR";
+        input.appVersion = "1.1.0";
+        input.osVersion = "10.0.22631";
+        input.computerName = "WORKSTATION-01";
+        const std::string requestBody = BuildActivateRequestBody(input, "req-1", machineHash);
+        Check(requestBody.find("\"licenseKey\":\"NPCC-PRO-1234\"") != std::string::npos,
+              "请求体里授权码已归一化");
+        Check(requestBody.find("\"fingerprint\":\"DMS23-R3WRZ-USZY5-498XR\"") !=
+                      std::string::npos &&
+                  requestBody.find("\"appVersion\":\"1.1.0\"") != std::string::npos &&
+                  requestBody.find("\"osVersion\":\"10.0.22631\"") != std::string::npos &&
+                  requestBody.find("\"machineHash\":\"" + machineHash + "\"") !=
+                      std::string::npos &&
+                  requestBody.find("\"requestId\":\"req-1\"") != std::string::npos,
+              "六个字段一个不少");
+        Check(requestBody.front() == '{' && requestBody.back() == '}', "整体是一个 JSON 对象");
+
+        // ---- 响应解析（200 / 4xx / 5xx / 意外状态全走一遍） ----
+        const std::string licenseBase64 = npcc::infra::Base64Encode(npcc::test::kLicensePro);
+        const ActivationResult okResult = ParseActivateResponse(
+            200, "{\"license\":\"" + licenseBase64 + "\",\"message\":\"欢迎\"}");
+        Check(okResult.ok() && okResult.licenseBytes == npcc::test::kLicensePro &&
+                  okResult.message == L"欢迎",
+              "200：license 解回容器原文，message 一并带回来");
+
+        const ActivationResult noLicense = ParseActivateResponse(200, "{\"message\":\"hi\"}");
+        Check(!noLicense.ok() && noLicense.error == ActivationError::BadResponse,
+              "200 缺 license → BadResponse");
+
+        const ActivationResult badBase64 = ParseActivateResponse(200, "{\"license\":\"@@@@\"}");
+        Check(!badBase64.ok() && badBase64.error == ActivationError::BadResponse &&
+                  badBase64.licenseBytes.empty(),
+              "200 坏 Base64 → BadResponse（不留半成品）");
+
+        struct ErrorCase {
+            const char*     code;
+            ActivationError expected;
+        };
+        const ErrorCase errorCases[] = {
+            {"KEY_NOT_FOUND", ActivationError::KeyNotFound},
+            {"KEY_EXHAUSTED", ActivationError::KeyExhausted},
+            {"KEY_DISABLED", ActivationError::KeyDisabled},
+            {"FINGERPRINT_MISMATCH", ActivationError::FingerprintMismatch},
+            {"SERVER_ERROR", ActivationError::ServerError},
+        };
+        bool mappingOk = true;
+        for (const ErrorCase& item : errorCases) {
+            const ActivationResult scanned = ParseActivateResponse(
+                400, std::string("{\"error\":\"") + item.code + "\",\"message\":\"说明\"}");
+            mappingOk = mappingOk && scanned.error == item.expected && scanned.message == L"说明";
+        }
+        Check(mappingOk, "400：五个协议错误码逐个映射（message 也带回来）");
+
+        const ActivationResult unknownCode = ParseActivateResponse(400, "{\"error\":\"WHAT\"}");
+        Check(!unknownCode.ok() && unknownCode.error == ActivationError::BadResponse,
+              "400 未知错误码 → BadResponse");
+        const ActivationResult noCode = ParseActivateResponse(403, "{}");
+        Check(!noCode.ok() && noCode.error == ActivationError::BadResponse,
+              "4xx 没 error 字段 → BadResponse");
+        const ActivationResult serverError = ParseActivateResponse(503, "oops");
+        Check(!serverError.ok() && serverError.error == ActivationError::ServerError,
+              "5xx → ServerError（不解释响应体）");
+        const ActivationResult weird = ParseActivateResponse(302, "");
+        Check(!weird.ok() && weird.error == ActivationError::BadResponse, "意外状态码 → BadResponse");
+
+        Check(ActivationErrorName(ActivationError::KeyExhausted) == "keyExhausted" &&
+                  ActivationErrorName(ActivationError::None) == "none",
+              "错误名是机器可读的驼峰（日志与脚本比对用）");
+        Check(DescribeActivationError(ActivationError::NetworkFailed).find(L"离线激活") !=
+                      std::wstring::npos &&
+                  DescribeActivationError(ActivationError::FingerprintMismatch).find(L"换绑") !=
+                      std::wstring::npos,
+              "网络失败 / 指纹冲突的文案都指了下一步");
+        // ---- 请求号（UUID v4 形状） ----
+        const std::string requestId = NewRequestId();
+        Check(requestId.size() == 36 && requestId[8] == '-' && requestId[13] == '-' &&
+                  requestId[18] == '-' && requestId[23] == '-' && requestId[14] == '4' &&
+                  (requestId[19] == '8' || requestId[19] == '9' || requestId[19] == 'a' ||
+                   requestId[19] == 'b') &&
+                  requestId.find_first_not_of("0123456789abcdef-") == std::string::npos,
+              "UUID v4 形状：36 字符、四个连字符、版本位 4、变体位 8/9/a/b");
+        Check(NewRequestId() != requestId, "两次生成的号不同");
+
+        // ---- 没配置服务地址：本地拦下，一个字节都不发 ----
+        const ActivationResult notConfigured = ActivationClient("").Activate(input);
+        Check(notConfigured.error == ActivationError::NotConfigured,
+              "空服务地址：本地拦下（NotConfigured）");
+
+        // ---- 回环端到端：真发一次请求，用真许可回复 ----
+        {
+            LoopbackHttpServer server;
+            Check(server.Start(), "准备：回环激活服务已监听");
+            const std::string responseBody =
+                "{\"license\":\"" + licenseBase64 + "\",\"message\":\"ok\"}";
+            const std::string response =
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
+                std::to_string(responseBody.size()) + "\r\nConnection: close\r\n\r\n" +
+                responseBody;
+            std::string seen;
+            ActivationResult activated;
+            std::thread thread([&] { seen = server.ServeOnce(response); });
+            activated = ActivationClient("http://127.0.0.1:" + std::to_string(server.port))
+                            .Activate(input);
+            thread.join();
+            Check(activated.ok() && activated.licenseBytes == npcc::test::kLicensePro,
+                  "在线激活：拿到许可容器原文");
+            Check(seen.find("POST /v1/activate HTTP/1.1") == 0 &&
+                      seen.find("\"requestId\":\"") != std::string::npos &&
+                      seen.find("\"machineHash\":\"" + machineHash + "\"") != std::string::npos,
+                  "请求打到 /v1/activate，requestId 与 machineHash 都在");
+            server.Stop();
+        }
+
+        // ---- 回环：400 错误码映射（4xx 不重试：服务端只应一次也得马上回） ----
+        {
+            LoopbackHttpServer server;
+            Check(server.Start(), "准备：回环服务（错误路径）已监听");
+            const std::string responseBody =
+                "{\"error\":\"KEY_EXHAUSTED\",\"message\":\"激活次数已用完\"}";
+            const std::string response =
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: " +
+                std::to_string(responseBody.size()) + "\r\nConnection: close\r\n\r\n" +
+                responseBody;
+            std::string seen;
+            ActivationResult rejected;
+            std::thread thread([&] { seen = server.ServeOnce(response); });
+            rejected = ActivationClient("http://127.0.0.1:" + std::to_string(server.port))
+                           .Activate(input);
+            thread.join();
+            Check(rejected.error == ActivationError::KeyExhausted &&
+                      rejected.message == L"激活次数已用完",
+                  "400 KEY_EXHAUSTED：映射到位且不重试");
+            server.Stop();
+        }
+
+        // ---- ImportBytes：内存里的许可走同一条门槛 ----
+        const std::filesystem::path b6Dir =
+            std::filesystem::temp_directory_path() / "npcc_license_b6_test";
+        std::filesystem::remove_all(b6Dir);
+        std::filesystem::create_directories(b6Dir);
+        const std::filesystem::path b6LicensePath = b6Dir / "license.dat";
+        LicenseService& service = LicenseService::Instance();
+        service.Initialize(&b6LicensePath);
+        Check(service.State() == LicenseState::Free, "准备：B6 测试目录是干净的");
+        LicenseError importError = LicenseError::None;
+        std::wstring importDetail;
+        Check(service.ImportBytes(npcc::test::kLicensePro, &importError, &importDetail),
+              "ImportBytes：真许可导入成功");
+        Check(service.State() == LicenseState::Licensed && std::filesystem::exists(b6LicensePath),
+              "ImportBytes：落盘并立即生效");
+        Check(!service.ImportBytes("这不是一张许可", &importError, &importDetail) &&
+                  importError != LicenseError::None,
+              "ImportBytes：乱码拒绝");
+        Check(service.State() == LicenseState::Licensed, "拒绝的导入不覆盖已生效的许可");
+        Check(service.ImportBytes(npcc::test::kLicenseExpired, &importError, &importDetail) &&
+                  service.State() == LicenseState::Free &&
+                  service.LastError() == LicenseError::Expired,
+              "过期许可导入得进（结构上是真许可），生效状态自然回落 Free");
+
+        // ---- 离线申请串（设计 7.1：一行一个字段、LF 收尾） ----
+        const std::string challenge = service.ExportChallenge("1.1.0", 5, "某某科技");
+        Check(challenge.rfind("product=notepadcc\n", 0) == 0, "第一行是产品名");
+        Check(challenge.find("\nrequestId=") != std::string::npos &&
+                  challenge.find("\nfingerprint=") != std::string::npos &&
+                  challenge.find("\nappVersion=1.1.0\n") != std::string::npos &&
+                  challenge.find("\nseats=5\n") != std::string::npos &&
+                  challenge.find("\nholder=某某科技\n") != std::string::npos,
+              "六个字段按设计顺序摆好");
+        Check(challenge.back() == '\n', "以 LF 收尾");
+        const std::size_t hashAt = challenge.find("fingerprint=");
+        const std::string codeLine =
+            challenge.substr(hashAt + std::string("fingerprint=").size(), 23);
+        Check(codeLine.size() == 23 && codeLine[5] == '-' && codeLine[11] == '-' &&
+                  codeLine[17] == '-' &&
+                  codeLine.find_first_not_of("23456789ABCDEFGHJKLMNPQRSTUVWXYZ-") ==
+                      std::string::npos,
+              "fingerprint 是本机短码形状（易混字符字母表）");
+        Check(service.ExportChallenge("1.1.0", 0, "x").find("\nseats=1\n") != std::string::npos &&
+                  service.ExportChallenge("1.1.0", 5000, "x").find("\nseats=999\n") !=
+                      std::string::npos,
+              "席位钳到 1~999");
+        Check(service.ExportChallenge("1.1.0", 1, "第一行\r\n第二行")
+                      .find("\nholder=第一行  第二行\n") != std::string::npos,
+              "holder 里的换行换成空格（一行一个字段）");
+
+        std::filesystem::remove_all(b6Dir);
     }
     Section("HTTP 客户端（URL 解析 / 回环 GET+POST）（B2）");
     {

@@ -39,6 +39,8 @@
 #include "shell/ToolbarDialog.h"
 #include "shell/UpdateDialog.h"
 #include "shell/RemoteDialog.h"
+#include "shell/LicenseDialog.h"
+#include "license/LicenseService.h"
 #include "core/Diff.h"
 #include "core/ExportHtml.h"
 #include "core/ExportRtf.h"
@@ -230,6 +232,7 @@ enum : npcc::core::CmdId {
 
     kCmdHelpAbout = npcc::core::MakeCmdId(12, 1),
     kCmdHelpCheckUpdate = npcc::core::MakeCmdId(12, 2),
+    kCmdHelpLicense = npcc::core::MakeCmdId(12, 0x020),   // 许可证（设计 8.4：Help + 0x020）
 
     // Scintilla 原生命令：不新增语义，直接转发
     kSciRedo      = 2011,
@@ -1463,6 +1466,9 @@ void MainWindow::RegisterCommands() {
         [this](const CmdContext&) { CommandShowRunDialog(); });
 
     // ---- 帮助 ----
+    add(kCmdHelpLicense, CmdCategory::Help, L"cmd.help.license", L"许可证(&L)…",
+        core::kCmdNone, [this](const CmdContext&) { CommandLicense(); });
+    addSeparator(L"cmd.help.sepLicense");
     add(kCmdHelpCheckUpdate, CmdCategory::Help, L"cmd.help.checkUpdate", L"检查更新(&U)...",
         core::kCmdNone, [this](const CmdContext&) { CommandCheckUpdate(); });
     addSeparator(L"cmd.help.sepUpdate");
@@ -6719,13 +6725,51 @@ void MainWindow::CommandManageShortcuts() {
     }
 }
 
+void MainWindow::CommandLicense() {
+    const LicenseDialogOutcome outcome = LicenseDialog::Show(
+        hwnd_, UpdatePool(), infra::Utf8FromWide(config_.License().serviceUrl));
+    if (outcome.changed) {
+        // 许可文件换过了：菜单跟着新状态走（B7 的付费门禁也在这条路上生效）。
+        RebuildMenu();
+        statusBar_.SetMessage(L"许可状态已更新。");
+    }
+}
+
 void MainWindow::CommandAbout() {
+    const license::LicenseService& licenseService = license::LicenseService::Instance();
+    std::wstring licenseLine = L"许可：";
+    switch (licenseService.State()) {
+        case license::LicenseState::Licensed: {
+            licenseLine += licenseService.EditionValue() == license::Edition::Enterprise
+                               ? L"已激活（Enterprise"
+                               : L"已激活（Pro";
+            const std::wstring holder = infra::WideFromUtf8(licenseService.Info().holder);
+            if (!holder.empty()) {
+                licenseLine += L"，持有人：" + holder;
+            }
+            if (licenseService.Info().expiresAt.has_value()) {
+                const std::string iso =
+                    license::FormatIso8601Utc(*licenseService.Info().expiresAt);
+                licenseLine += L"，有效期至 " + infra::WideFromUtf8(iso.substr(0, 10));
+            }
+            licenseLine += L"）";
+            break;
+        }
+        case license::LicenseState::Trial:
+            licenseLine += L"试用中";   // 倒计时由 B7 的状态机接进来
+            break;
+        case license::LicenseState::Free:
+            licenseLine +=
+                L"Free（" + license::DescribeLicenseError(licenseService.LastError()) + L"）";
+            break;
+    }
     const std::wstring text =
         std::wstring(L"notepadcc ") + core::kAppVersion +
         L"（M0 + 多标签）\n\n"
         L"原生 Win32 + Scintilla 的轻量文本 / 源码编辑器。\n"
         L"已完成：多标签与标签栏（拖拽排序、中键关闭、右键菜单、脏标记）、"
-        L"多编码打开与保存、原子写盘、语法着色、命令注册表与可重绑快捷键。";
+        L"多编码打开与保存、原子写盘、语法着色、命令注册表与可重绑快捷键。\n\n" +
+        licenseLine;
     ::MessageBoxW(hwnd_, text.c_str(), L"关于 notepadcc", MB_ICONINFORMATION);
 }
 

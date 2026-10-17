@@ -331,6 +331,7 @@ private:
     const edit::LanguageDef* ActiveLanguage() const;
     void WriteConvertBackup(const std::wstring& path) const;
     void CommandRegisterAssociations(bool registerThem);
+    void CommandLicense();
     void CommandAbout();
 
     // ---- 分屏 / 克隆视图（设计文档 6.3）----

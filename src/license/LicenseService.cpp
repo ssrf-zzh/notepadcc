@@ -151,6 +151,29 @@ bool LicenseService::Has(Feature feature) const {
 
 bool LicenseService::Import(const std::filesystem::path& source, LicenseError* error,
                             std::wstring* detail) {
+    std::string bytes;
+    LicenseError readError = LicenseError::None;
+    std::wstring readDetail;
+    if (!LoadLicenseFile(source, bytes, &readError, &readDetail)) {
+        if (error != nullptr) {
+            *error = readError;
+        }
+        if (detail != nullptr) {
+            *detail = std::move(readDetail);
+        }
+        return false;
+    }
+    if (!ImportBytes(bytes, error, detail)) {
+        return false;
+    }
+    if (detail != nullptr) {
+        *detail += L" — 已导入 " + source.wstring();
+    }
+    return true;
+}
+
+bool LicenseService::ImportBytes(std::string_view bytes, LicenseError* error,
+                                 std::wstring* detail) {
     const auto report = [error, detail](LicenseError value, std::wstring text) {
         if (error != nullptr) {
             *error = value;
@@ -160,13 +183,6 @@ bool LicenseService::Import(const std::filesystem::path& source, LicenseError* e
         }
     };
 
-    std::string bytes;
-    LicenseError readError = LicenseError::None;
-    std::wstring readDetail;
-    if (!LoadLicenseFile(source, bytes, &readError, &readDetail)) {
-        report(readError, readDetail);
-        return false;
-    }
     const LicenseVerifyResult verified = VerifyLicenseBytes(bytes, NowUnixUtc());
     if (!verified.ok() && verified.error != LicenseError::Expired &&
         verified.error != LicenseError::NotYetValid) {
@@ -175,13 +191,14 @@ bool LicenseService::Import(const std::filesystem::path& source, LicenseError* e
                verified.detail.empty() ? DescribeLicenseError(verified.error) : verified.detail);
         return false;
     }
-    if (!SaveLicenseFile(path_, bytes, &readError, &readDetail)) {
-        report(readError, readDetail);
+    LicenseError saveError = LicenseError::None;
+    std::wstring saveDetail;
+    if (!SaveLicenseFile(path_, bytes, &saveError, &saveDetail)) {
+        report(saveError, saveDetail);
         return false;
     }
     Reload();   // 导入即生效
-    report(LicenseError::None,
-           StatusLine(state_, error_, info_, detail_) + L" — 已导入 " + source.wstring());
+    report(LicenseError::None, StatusLine(state_, error_, info_, detail_));
     return true;
 }
 
@@ -235,6 +252,38 @@ std::string LicenseService::StatusJson() const {
     json += LicenseErrorName(error_);
     json += "\"}\n";
     return json;
+}
+
+std::string LicenseService::ExportChallenge(std::string_view appVersion, int seats,
+                                            std::string_view holderUtf8) const {
+    if (seats < 1) {
+        seats = 1;
+    }
+    if (seats > 999) {
+        seats = 999;   // 界面也校验，但这里兜底——申请串是合同的引子，数字不能荒唐
+    }
+    std::string holder(holderUtf8);
+    for (char& ch : holder) {
+        if (ch == '\r' || ch == '\n') {
+            ch = ' ';   // 一行一个字段：换行会把申请串劈成两半
+        }
+    }
+    std::string text;
+    text.reserve(256);
+    text += "product=";
+    text += kProductName;
+    text += "\nrequestId=";
+    text += NewRequestId();
+    text += "\nfingerprint=";
+    text += Format(Current());
+    text += "\nappVersion=";
+    text += appVersion;
+    text += "\nseats=";
+    text += std::to_string(seats);
+    text += "\nholder=";
+    text += holder;
+    text += "\n";
+    return text;
 }
 
 }  // namespace npcc::license

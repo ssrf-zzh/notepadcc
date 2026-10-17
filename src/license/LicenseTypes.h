@@ -134,6 +134,11 @@ std::string FormatIso8601Utc(std::int64_t epochSeconds);
 // 过期、宽限、时钟回拨这些判定才钉得住。
 std::int64_t NowUnixUtc();
 
+// 随机请求号（UUID v4 形状）：在线激活的 requestId 与离线申请串共用——16 字节
+// 随机数按 UUID v4 打上版本位与变体位后转小写十六进制。随机源起不来时返回
+// "unknown"：让服务端一眼看出这是异常件，而不是重用一个号。
+std::string NewRequestId();
+
 constexpr std::string_view kProductName = "notepadcc";
 constexpr std::string_view kLicenseAlgName = "RSA-2048-PKCS1-SHA256";
 
