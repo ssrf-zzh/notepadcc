@@ -6301,7 +6301,8 @@ int main() {
                 const bool knownPrefix = entry.key.compare(0, 4, L"cmd.") == 0 ||
                                          entry.key.compare(0, 4, L"cat.") == 0 ||
                                          entry.key.compare(0, 6, L"prefs.") == 0 ||
-                                         entry.key.compare(0, 8, L"compare.") == 0;
+                                         entry.key.compare(0, 8, L"compare.") == 0 ||
+                                         entry.key.compare(0, 8, L"license.") == 0;
                 if (!knownPrefix) {
                     wellFormed = false;
                 }
@@ -8952,6 +8953,357 @@ int main() {
         emptyIndex.Attach("", 0);
         Check(emptyIndex.Complete() && emptyIndex.ScanNextChunk(), "空文件：直接算扫完");
         Check(emptyIndex.LineCount() == 1, "空文件：算 1 行");
+    }
+
+    Section("试用状态机与启动提示（B7）");
+    {
+        using npcc::license::Edition;
+        using npcc::license::EvaluateSession;
+        using npcc::license::EvaluateTrial;
+        using npcc::license::Feature;
+        using npcc::license::FeatureBit;
+        using npcc::license::FeatureMask;
+        using npcc::license::Fingerprint;
+        using npcc::license::FingerprintMode;
+        using npcc::license::HasFeature;
+        using npcc::license::LicenseError;
+        using npcc::license::LicenseInfo;
+        using npcc::license::LicenseNotice;
+        using npcc::license::LicenseService;
+        using npcc::license::LicenseState;
+        using npcc::license::LicenseStateName;
+        using npcc::license::LicenseVerifyResult;
+        using npcc::license::LoadTrialState;
+        using npcc::license::MergeTrialRecords;
+        using npcc::license::NowUnixUtc;
+        using npcc::license::ProFeatureMask;
+        using npcc::license::RemainingGraceDays;
+        using npcc::license::SaveTrialState;
+        using npcc::license::SelectStartupNotice;
+        using npcc::license::StartupNotice;
+        using npcc::license::TrialEnvironment;
+        using npcc::license::TrialEvaluation;
+        using npcc::license::TrialRecord;
+        using npcc::license::kGraceDays;
+        using npcc::license::kTrialDays;
+
+        constexpr std::int64_t kDay = 86400;
+        const std::int64_t t0 = 1800000000;   // 固定基准：纯函数与真实时钟无关
+
+        // ---- EvaluateTrial：窗口边界、回拨与保守值 ----
+        const TrialEvaluation notStarted = EvaluateTrial(TrialRecord{}, t0);
+        Check(!notStarted.started && !notStarted.active && notStarted.daysLeft == 0 &&
+                  !notStarted.clockAnomaly,
+              "没有首次运行记录：试用还没开始");
+
+        TrialRecord record;
+        record.firstRunUtc = t0;
+        const TrialEvaluation day0 = EvaluateTrial(record, t0);
+        Check(day0.started && day0.active && day0.daysLeft == static_cast<int>(kTrialDays),
+              "首次运行当天：活跃且剩 30 天整");
+
+        const TrialEvaluation lastDay = EvaluateTrial(record, t0 + 29 * kDay);
+        Check(lastDay.active && lastDay.daysLeft == 1, "第 29 天：还剩 1 天（向上取整）");
+
+        const TrialEvaluation justExpired = EvaluateTrial(record, t0 + 30 * kDay);
+        Check(!justExpired.active && justExpired.daysLeft == 0, "满 30 天整：试用结束");
+
+        TrialRecord rolled;
+        rolled.firstRunUtc = t0;
+        rolled.lastSeenUtc = t0 + 10 * kDay;
+        const TrialEvaluation smallBack = EvaluateTrial(rolled, t0 + 9 * kDay);
+        Check(!smallBack.clockAnomaly && smallBack.active && smallBack.daysLeft == 20,
+              "回拨不满 24 小时：不报异常，天数按较晚的 lastSeen 算（不白得）");
+
+        TrialRecord warped;
+        warped.firstRunUtc = t0;
+        warped.lastSeenUtc = t0 + 5 * kDay + 25 * 3600;
+        const TrialEvaluation bigBack = EvaluateTrial(warped, t0 + 5 * kDay);
+        Check(bigBack.clockAnomaly && bigBack.active && bigBack.daysLeft == 24,
+              "回拨超过 24 小时：报异常，剩余天数按 lastSeen 保守算");
+
+        TrialRecord weird;
+        weird.firstRunUtc = t0 + 100 * kDay;
+        const TrialEvaluation capped = EvaluateTrial(weird, t0);
+        Check(capped.active && capped.daysLeft == static_cast<int>(kTrialDays),
+              "记录被改到未来：剩余天数封顶 30 天");
+
+        // ---- RemainingGraceDays：没有 / 未到 / 当天 / 边界 / 出界 ----
+        LicenseInfo noExpiry;
+        Check(RemainingGraceDays(noExpiry, t0) == 0, "没有到期时间：没有宽限期");
+
+        LicenseInfo future;
+        future.expiresAt = t0 + kDay;
+        Check(RemainingGraceDays(future, t0) == 0, "还没到期：没有宽限期");
+
+        LicenseInfo due;
+        due.expiresAt = t0;
+        Check(RemainingGraceDays(due, t0) == static_cast<int>(kGraceDays),
+              "到期当天：宽限期还有 7 天整");
+        Check(RemainingGraceDays(due, t0 + 7 * kDay - 1) == 1, "宽限的最后一秒：还剩 1 天");
+        Check(RemainingGraceDays(due, t0 + 7 * kDay) == 0, "满 7 天：宽限期结束");
+
+        // ---- EvaluateSession：许可 / 试用 / 宽限 的优先级 ----
+        Fingerprint machine;
+        machine.values = {"guid-a", "1234ABCD", "Fake CPU @ 1.00GHz", "board-1"};
+
+        LicenseVerifyResult licensed;
+        licensed.info.schema = 1;
+        licensed.info.product = "notepadcc";
+        licensed.info.edition = Edition::Pro;
+        licensed.info.fingerprintMode = FingerprintMode::None;   // 站点式：不判机器
+        licensed.info.features = FeatureBit(Feature::MultiCaret) | FeatureBit(Feature::Compare);
+        const auto licensedSession = EvaluateSession(licensed, machine, TrialRecord{}, t0);
+        Check(licensedSession.state == LicenseState::Licensed &&
+                  licensedSession.error == LicenseError::None &&
+                  HasFeature(licensedSession.features, Feature::MultiCaret) &&
+                  !HasFeature(licensedSession.features, Feature::DataTools),
+              "有效许可：Licensed，能力集以许可文件为准");
+
+        LicenseVerifyResult missing;
+        missing.error = LicenseError::FileMissing;
+        TrialRecord trial;
+        trial.firstRunUtc = t0;
+        const auto trialSession = EvaluateSession(missing, machine, trial, t0 + 10 * kDay);
+        Check(trialSession.state == LicenseState::Trial &&
+                  trialSession.features == ProFeatureMask() && trialSession.trialActive &&
+                  trialSession.trialDaysLeft == 20,
+              "没有许可 + 试用窗口内：Trial 按 Pro 全集给能力（还剩 20 天）");
+
+        LicenseVerifyResult expired = licensed;
+        expired.info.expiresAt = t0;
+        expired.info.features = FeatureBit(Feature::Compare);
+        const auto graceSession = EvaluateSession(expired, machine, TrialRecord{}, t0 + kDay);
+        Check(graceSession.state == LicenseState::Grace &&
+                  graceSession.error == LicenseError::Expired &&
+                  graceSession.graceDaysLeft == static_cast<int>(kGraceDays) - 1 &&
+                  HasFeature(graceSession.features, Feature::Compare),
+              "到期第 2 天：Grace，能力照旧，还剩 6 天宽限");
+
+        Fingerprint other;
+        other.values = {"guid-b", "9999FFFF", "Other CPU @ 2.00GHz", "board-9"};
+        LicenseVerifyResult foreign = licensed;
+        foreign.info.fingerprintMode = FingerprintMode::Exact;
+        foreign.info.fingerprint = npcc::license::Format(other);
+        const auto foreignSession = EvaluateSession(foreign, machine, trial, t0 + 10 * kDay);
+        Check(foreignSession.state == LicenseState::Trial &&
+                  foreignSession.error == LicenseError::FingerprintMismatch &&
+                  foreignSession.features == ProFeatureMask(),
+              "绑别人的机器 + 试用窗口内：回落 Trial（错误保留指纹不符）");
+
+        LicenseVerifyResult longExpired = licensed;
+        longExpired.info.expiresAt = t0;
+        const auto backToTrial = EvaluateSession(longExpired, machine, trial, t0 + 8 * kDay);
+        Check(backToTrial.state == LicenseState::Trial && backToTrial.features == ProFeatureMask(),
+              "过期且出了宽限、试用还没到期：回落 Trial");
+        const auto plainFree = EvaluateSession(longExpired, machine, TrialRecord{}, t0 + 8 * kDay);
+        Check(plainFree.state == LicenseState::Free && plainFree.features == 0 &&
+                  plainFree.error == LicenseError::Expired,
+              "过期且出了宽限、又没有试用记录：Free 且能力集为空");
+
+        TrialRecord clockRolled;
+        clockRolled.firstRunUtc = t0;
+        clockRolled.lastSeenUtc = t0 + 25 * 3600;
+        const auto anomalySession = EvaluateSession(missing, machine, clockRolled, t0);
+        Check(anomalySession.state == LicenseState::Trial && anomalySession.clockAnomaly &&
+                  anomalySession.error == LicenseError::ClockAnomaly,
+              "试用 + 回拨超过 24 小时：error 记 clockAnomaly（日志 Warn 级）");
+
+        // ---- SelectStartupNotice：各路门禁与"同一提示一次" ----
+        LicenseInfo graceInfo;
+        graceInfo.holder = "某某科技";
+        graceInfo.expiresAt = t0;
+        TrialRecord trialOver;
+        trialOver.firstRunUtc = t0 - 40 * kDay;   // 试用早已结束
+
+        const StartupNotice graceNotice =
+            SelectStartupNotice(graceInfo, LicenseState::Grace, trialOver, false,
+                                static_cast<int>(kGraceDays), false, false, false, false);
+        Check(graceNotice.kind == LicenseNotice::Grace &&
+                  graceNotice.daysLeft == static_cast<int>(kGraceDays) &&
+                  graceNotice.holder == "某某科技" && graceNotice.expiresAt.has_value(),
+              "宽限状态：选 Grace 提示，持有人与到期时间一并带上");
+
+        TrialRecord graceOff = trialOver;
+        graceOff.graceNoticeDismissed = true;
+        Check(SelectStartupNotice(graceInfo, LicenseState::Grace, graceOff, false,
+                                  static_cast<int>(kGraceDays), false, false, false, false)
+                      .kind == LicenseNotice::None,
+              "勾过「不再提示」：Grace 提示不再出现");
+        Check(SelectStartupNotice(graceInfo, LicenseState::Grace, trialOver, false,
+                                  static_cast<int>(kGraceDays), false, true, false, false)
+                      .kind == LicenseNotice::None,
+              "本会话已经露过：Grace 提示不重复");
+
+        Check(SelectStartupNotice(graceInfo, LicenseState::Free, trialOver, false, 0, false, false,
+                                  false, false)
+                      .kind == LicenseNotice::TrialExpired,
+              "试用到期回落：Free + 有首次运行记录 → TrialExpired");
+        Check(SelectStartupNotice(graceInfo, LicenseState::Free, trialOver, true, 0, false, false,
+                                  false, false)
+                      .kind == LicenseNotice::None,
+              "试用还没到期（trialActive）：不报试用到期");
+        TrialRecord trialOff = trialOver;
+        trialOff.trialNoticeDismissed = true;
+        Check(SelectStartupNotice(graceInfo, LicenseState::Free, trialOff, false, 0, false, false,
+                                  false, false)
+                      .kind == LicenseNotice::None,
+              "试用到期提示：勾过不再提示后不再出现");
+        Check(SelectStartupNotice(graceInfo, LicenseState::Free, trialOver, false, 0, true, false,
+                                  false, false)
+                      .kind == LicenseNotice::None,
+              "试用到期提示：本会话露过就不再来");
+
+        Check(SelectStartupNotice(graceInfo, LicenseState::Trial, trialOver, true, 0, false, false,
+                                  false, true)
+                      .kind == LicenseNotice::ClockAnomaly,
+              "试用 + 时钟回拨：选 ClockAnomaly 提示");
+        Check(SelectStartupNotice(graceInfo, LicenseState::Trial, trialOver, true, 0, false, false,
+                                  true, true)
+                      .kind == LicenseNotice::None,
+              "时钟异常：同一会话只提示一次");
+        Check(SelectStartupNotice(graceInfo, LicenseState::Free, trialOff, false, 0, false, false,
+                                  false, true)
+                      .kind == LicenseNotice::None,
+              "时钟异常：不在试用状态不露面（设计 5.2）");
+
+        // ---- MergeTrialRecords：双写取较早，其余以文件为准 ----
+        TrialRecord fileRecord;
+        fileRecord.firstRunUtc = 1000;
+        fileRecord.lastSeenUtc = 2000;
+        fileRecord.trialNoticeDismissed = true;
+        const TrialRecord mergedEarly = MergeTrialRecords(fileRecord, 500);
+        Check(mergedEarly.firstRunUtc == 500 && mergedEarly.lastSeenUtc == 2000 &&
+                  mergedEarly.trialNoticeDismissed,
+              "注册表更早：firstRun 取注册表的值，其余字段以文件为准");
+        Check(MergeTrialRecords(TrialRecord{}, 500).firstRunUtc == 500,
+              "文件还没写过：用注册表的值");
+        Check(MergeTrialRecords(fileRecord, std::nullopt).firstRunUtc == 1000,
+              "注册表读不到：保留文件的值");
+        Check(!MergeTrialRecords(TrialRecord{}, std::nullopt).firstRunUtc.has_value(),
+              "两处都没有：仍然没有首次运行记录");
+        Check(MergeTrialRecords(fileRecord, 5000).firstRunUtc == 1000,
+              "注册表更晚：不覆盖文件里更早的记录");
+
+        // ---- state.xml 往返与容错 ----
+        const std::filesystem::path stateDir =
+            std::filesystem::temp_directory_path() / "npcc_trial_state_test";
+        std::filesystem::remove_all(stateDir);
+        std::filesystem::create_directories(stateDir);
+        const std::filesystem::path statePath = stateDir / "state.xml";
+        std::wstring stateDetail;
+
+        TrialRecord stale;
+        stale.firstRunUtc = 42;
+        Check(LoadTrialState(statePath, stale, &stateDetail) && !stale.firstRunUtc.has_value(),
+              "state.xml 不存在：空记录，且清掉调用方传进来的旧值");
+
+        TrialRecord saved;
+        saved.firstRunUtc = t0;
+        saved.lastSeenUtc = t0 + 100;
+        saved.trialNoticeDismissed = true;
+        Check(SaveTrialState(statePath, saved, &stateDetail), "准备：写出一份 state.xml");
+        TrialRecord loaded;
+        Check(LoadTrialState(statePath, loaded, &stateDetail) && loaded.firstRunUtc == t0 &&
+                  loaded.lastSeenUtc == t0 + 100 && loaded.trialNoticeDismissed &&
+                  !loaded.graceNoticeDismissed,
+              "state.xml 往返：时间戳与两个提示标记都读回来");
+
+        Check(npcc::io::WriteFileAtomic((stateDir / "broken.xml").wstring(), "这不是 XML").ok,
+              "准备：写一个坏 state.xml");
+        TrialRecord broken;
+        Check(!LoadTrialState(stateDir / "broken.xml", broken, &stateDetail),
+              "坏 state.xml：返回 false（调用方按空记录兜底）");
+
+        Check(npcc::io::WriteFileAtomic((stateDir / "shell.xml").wstring(),
+                                        "<notepadcc-state></notepadcc-state>")
+                  .ok,
+              "准备：写一个没有 <trial> 的空壳 state.xml");
+        TrialRecord bare;
+        bare.firstRunUtc = 7;
+        Check(LoadTrialState(stateDir / "shell.xml", bare, &stateDetail) &&
+                  !bare.firstRunUtc.has_value(),
+              "没有 <trial> 节点：空记录（等同第一次运行）");
+        std::filesystem::remove_all(stateDir);
+
+        // ---- 状态名 / 能力集 / 注册表哨兵 ----
+        Check(LicenseStateName(LicenseState::Grace) == "grace", "状态名：grace 机器可读");
+        const FeatureMask proMask = ProFeatureMask();
+        Check(HasFeature(proMask, Feature::MultiCaret) && HasFeature(proMask, Feature::Compare) &&
+                  HasFeature(proMask, Feature::DataTools) && HasFeature(proMask, Feature::HugeFile) &&
+                  HasFeature(proMask, Feature::ScriptPlugin) &&
+                  HasFeature(proMask, Feature::RemoteEdit) && HasFeature(proMask, Feature::BatchCli) &&
+                  HasFeature(proMask, Feature::CloudSync),
+              "试用能力集：Pro 八项一个不少");
+        Check(!HasFeature(proMask, Feature::TeamConfig) &&
+                  !HasFeature(proMask, Feature::ManagedDeploy),
+              "试用能力集：Enterprise 专属两位不在内（设计 2.2）");
+        Check(!npcc::license::ReadRegistryFirstRun(L"").has_value(),
+              "空 subKey：注册表读路径明确跳过（单测不留痕）");
+        Check(!npcc::license::WriteRegistryFirstRun(12345, L""),
+              "空 subKey：注册表写路径明确跳过（单测不留痕）");
+
+        // ---- 服务级：BeginSession 双写、提示记账与 JSON ----
+        const std::filesystem::path b7Dir =
+            std::filesystem::temp_directory_path() / "npcc_trial_service_test";
+        std::filesystem::remove_all(b7Dir);
+        std::filesystem::create_directories(b7Dir);
+        const std::filesystem::path b7License = b7Dir / "license.dat";   // 不存在 = 无许可
+        LicenseService& service = LicenseService::Instance();
+        service.Initialize(&b7License);
+        TrialEnvironment env;
+        env.stateFile = b7Dir / "state.xml";
+        env.registrySubKey.clear();   // 不碰注册表：测试机上不留痕
+
+        service.BeginSession(&env);
+        Check(service.State() == LicenseState::Trial && service.TrialDaysLeft() == 30,
+              "BeginSession 首跑：试用从这一刻开始（30 天整）");
+        Check(std::filesystem::exists(env.stateFile), "双写：state.xml 落盘");
+        Check(service.PendingStartupNotice().kind == LicenseNotice::None && !service.ClockAnomaly(),
+              "试用中不打扰：没有启动提示，也没有时钟异常");
+        const std::string trialJson = service.StatusJson();
+        Check(trialJson.find("\"state\":\"trial\"") != std::string::npos &&
+                  trialJson.find("\"trialDaysLeft\":30") != std::string::npos &&
+                  trialJson.find("\"edition\":\"pro\"") != std::string::npos,
+              "--license-info：trial / 30 天 / 版次按 Pro 输出");
+
+        const std::int64_t realNow = NowUnixUtc();
+        TrialRecord aged;
+        aged.firstRunUtc = realNow - 31 * kDay;
+        Check(SaveTrialState(env.stateFile, aged, &stateDetail), "准备：首次运行改到 31 天前");
+        service.BeginSession(&env);
+        Check(service.State() == LicenseState::Free && service.TrialDaysLeft() == 0,
+              "试用到期：回落 Free");
+        Check(service.PendingStartupNotice().kind == LicenseNotice::TrialExpired,
+              "试用到期：启动时给一次提示");
+        service.MarkNoticeShown(LicenseNotice::TrialExpired);
+        Check(service.PendingStartupNotice().kind == LicenseNotice::None,
+              "露过之后：同一会话不再提示");
+        Check(service.DismissNoticeForever(LicenseNotice::TrialExpired), "「不再提示」写回成功");
+        TrialRecord dismissed;
+        Check(LoadTrialState(env.stateFile, dismissed, &stateDetail) &&
+                  dismissed.trialNoticeDismissed,
+              "「不再提示」真的落进了 state.xml");
+        service.BeginSession(&env);
+        Check(service.PendingStartupNotice().kind == LicenseNotice::None,
+              "再开一次会话：勾过不再提示就不露面");
+
+        TrialRecord warpedRecord;
+        warpedRecord.firstRunUtc = realNow - kDay;
+        warpedRecord.lastSeenUtc = realNow + 25 * 3600;
+        Check(SaveTrialState(env.stateFile, warpedRecord, &stateDetail),
+              "准备：lastSeen 写在未来 25 小时");
+        service.BeginSession(&env);
+        Check(service.ClockAnomaly() && service.State() == LicenseState::Trial,
+              "时钟回拨超过 24 小时：报异常但功能照常（仍是试用）");
+        Check(service.PendingStartupNotice().kind == LicenseNotice::ClockAnomaly,
+              "时钟异常：启动时提示一次（试用状态）");
+        Check(service.StatusJson().find("\"error\":\"clockAnomaly\"") != std::string::npos,
+              "--license-info：error 记 clockAnomaly（日志按 Warn 级）");
+        service.MarkNoticeShown(LicenseNotice::ClockAnomaly);
+        Check(service.PendingStartupNotice().kind == LicenseNotice::None,
+              "时钟异常提示：同一会话只出现一次");
+        std::filesystem::remove_all(b7Dir);
     }
 
     FinishSections();

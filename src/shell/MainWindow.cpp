@@ -76,6 +76,7 @@ constexpr UINT_PTR kTimerJsonTree = 6;          // JSON 树面板的节流定时
 constexpr UINT_PTR kTimerXmlTree = 7;           // XML 树面板的节流定时器（一次性）
 constexpr UINT_PTR kTimerUpdateCheck = 8;       // 启动后的延迟更新检查（一次性）
 constexpr UINT_PTR kTimerScript = 9;            // 脚本执行器的轮询（M3 第十二块）
+constexpr UINT_PTR kTimerLicenseNotice = 10;   // 等其它启动模态框收尾（B7）
 
 enum : npcc::core::CmdId {
     kCmdFileNew     = npcc::core::MakeCmdId(1, 1),
@@ -793,6 +794,7 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
             return 0;
         case core::kMsgStartupNotice:
             AnnounceActiveLoadWarning();
+            AnnounceLicenseNotice();
             return 0;
         case core::kMsgUpdateResult: {
             // 启动自动检查的结果（手动检查的结果投给对话框自己，不走这里）
@@ -857,6 +859,12 @@ LRESULT MainWindow::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
                 if (PollScript()) {
                     FinishScript();
                 }
+                return 0;
+            }
+            if (wParam == kTimerLicenseNotice) {
+                // 一次性：还在等就由 AnnounceLicenseNotice 自己重挂
+                ::KillTimer(hwnd_, kTimerLicenseNotice);
+                AnnounceLicenseNotice();
                 return 0;
             }
             if (wParam == kTimerMarkdownPreview) {
@@ -5278,6 +5286,30 @@ void MainWindow::AnnounceActiveLoadWarning() {
     statusBar_.SetMessage(document->buffer.loadWarning);
 }
 
+// B7：试用到期 / 宽限 / 时钟回拨的启动提示。文案与"这次会话露没露过"的记账都在
+// LicenseService；这里只管弹窗、回执，以及"输入许可"按钮的去处。
+void MainWindow::AnnounceLicenseNotice() {
+    license::LicenseService& service = license::LicenseService::Instance();
+    if (recoveryPending_) {
+        // 恢复提示的消息框还开着：等它收尾再露面，免得两个对话框叠罗汉。
+        // 不重投 kMsgStartupNotice——消息框自带消息泵，重投会在它的循环里立刻又进来。
+        ::SetTimer(hwnd_, kTimerLicenseNotice, 500, nullptr);
+        return;
+    }
+    const license::StartupNotice notice = service.PendingStartupNotice();
+    if (notice.kind == license::LicenseNotice::None) {
+        return;
+    }
+    const LicenseNoticeOutcome outcome = LicenseNoticeDialog::Show(hwnd_, notice);
+    service.MarkNoticeShown(notice.kind);
+    if (outcome.dontShowAgain) {
+        service.DismissNoticeForever(notice.kind);
+    }
+    if (outcome.openLicense) {
+        CommandLicense();
+    }
+}
+
 bool MainWindow::OpenDocumentPath(const std::wstring& path) {
     const core::OpenOutcome outcome = documents_->Open(path);
     if (outcome.status != core::OpenStatus::Ok &&
@@ -6756,7 +6788,12 @@ void MainWindow::CommandAbout() {
             break;
         }
         case license::LicenseState::Trial:
-            licenseLine += L"试用中";   // 倒计时由 B7 的状态机接进来
+            licenseLine += L"试用中，还剩 " +
+                           std::to_wstring(licenseService.TrialDaysLeft()) + L" 天";
+            break;
+        case license::LicenseState::Grace:
+            licenseLine += L"已到期（宽限期还剩 " +
+                           std::to_wstring(licenseService.GraceDaysLeft()) + L" 天）";
             break;
         case license::LicenseState::Free:
             licenseLine +=

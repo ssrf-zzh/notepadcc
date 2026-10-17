@@ -172,6 +172,7 @@ std::vector<LangPack> MakeBuiltin() {
         // 故意不翻译：语言名要用它自己的语言写，用户才找得到
         // ---- 帮助 ----
         Entry(L"cmd.help.about", L"About notepadcc", L"A"),
+        Entry(L"cmd.help.license", L"License...", L"L"),
         Entry(L"cmd.help.checkUpdate", L"Check for Updates...", L"U"),
         // ---- 菜单类别 ----
         Entry(L"cat.file", L"File"),
@@ -254,6 +255,78 @@ std::vector<LangPack> MakeBuiltin() {
         Entry(L"prefs.error.updateUrl",
               L"Update source is not allowed: {0} (https:// required; plain http://127.0.0.1 "
               L"is for local testing only)"),
+        // ---- license dialog / startup notice ----
+        Entry(L"license.dialog.title", L"License"),
+        Entry(L"license.dialog.statusGroup", L"License status"),
+        Entry(L"license.dialog.onlineGroup", L"Online activation"),
+        Entry(L"license.dialog.offlineGroup", L"Offline activation"),
+        Entry(L"license.dialog.importGroup", L"Import license file"),
+        Entry(L"license.dialog.state.active", L"Current edition: "),
+        Entry(L"license.dialog.state.trial", L"Trial"),
+        Entry(L"license.dialog.state.trialDays", L"{0} days left"),
+        Entry(L"license.dialog.state.trialHint",
+              L"Pro features are available during the trial; enter a license to activate."),
+        Entry(L"license.dialog.state.grace", L"Expired - {0} days of grace left"),
+        Entry(L"license.dialog.state.activated", L" (activated)"),
+        Entry(L"license.dialog.state.anonymousHolder", L"(unnamed)"),
+        Entry(L"license.dialog.state.holder", L"Licensee: "),
+        Entry(L"license.dialog.state.seatsSite", L"    Seats: site / unlimited"),
+        Entry(L"license.dialog.state.seats", L"    Seats: "),
+        Entry(L"license.dialog.state.validity", L"Valid: "),
+        Entry(L"license.dialog.state.until", L"through "),
+        Entry(L"license.dialog.state.utc", L" (UTC)"),
+        Entry(L"license.dialog.state.perpetual", L"Perpetual"),
+        Entry(L"license.dialog.state.free", L"Current edition: Free (not activated)"),
+        Entry(L"license.dialog.state.noLicense", L"No valid license."),
+        Entry(L"license.dialog.state.reason", L"Details: "),
+        Entry(L"license.dialog.state.fingerprint", L"Machine code: "),
+        Entry(L"license.dialog.keyLabel", L"License key: "),
+        Entry(L"license.dialog.activate", L"Activate"),
+        Entry(L"license.dialog.online.needKey",
+              L"Enter a license key first (provided after purchase, e.g. XXXXX-XXXXX-...)."),
+        Entry(L"license.dialog.online.busy",
+              L"Contacting the activation service (10-second timeout; one automatic retry on "
+              L"network failure)..."),
+        Entry(L"license.dialog.online.ok",
+              L"Activated. The license was saved and is now active."),
+        Entry(L"license.dialog.seatsLabel", L"Seats: "),
+        Entry(L"license.dialog.holderLabel", L"Organization: "),
+        Entry(L"license.dialog.challengeLabel",
+              L"Request string (send to support for offline signing):"),
+        Entry(L"license.dialog.copyChallenge", L"Copy Request"),
+        Entry(L"license.dialog.saveChallenge", L"Save to File..."),
+        Entry(L"license.dialog.browse", L"Browse..."),
+        Entry(L"license.dialog.import", L"Import"),
+        Entry(L"license.dialog.import.needPath",
+              L"Select a license file (.lic / license.dat), then click Import."),
+        Entry(L"license.dialog.importHint",
+              L"Imports are verified first; a file that fails verification never replaces the "
+              L"current license."),
+        Entry(L"license.dialog.offline.copied",
+              L"Request copied to the clipboard. Send it to support to receive a license file."),
+        Entry(L"license.dialog.offline.copyFailed",
+              L"Copy failed: another program is using the clipboard. Try again later."),
+        Entry(L"license.dialog.serviceLabel", L"Service URL: "),
+        Entry(L"license.dialog.serviceMissing",
+              L"(not configured - use offline activation below)"),
+        Entry(L"license.dialog.close", L"Close"),
+        Entry(L"license.notice.titleTrialExpired", L"Trial expired"),
+        Entry(L"license.notice.trialExpired",
+              L"The 30-day notepadcc trial has ended and Pro features have returned to the Free "
+              L"tier.\r\nOpening, editing, saving, and crash recovery are unaffected; enter a "
+              L"license to re-enable them."),
+        Entry(L"license.notice.titleGrace", L"License expired"),
+        Entry(L"license.notice.grace",
+              L"The license for \"{1}\" expired on {2}; {0} days of grace remain.\r\n"
+              L"Features remain available during the grace period. Please renew soon."),
+        Entry(L"license.notice.titleClock", L"System time appears to have changed"),
+        Entry(L"license.notice.clock",
+              L"The system clock is more than 24 hours earlier than at the last run, so the "
+              L"remaining trial days are calculated conservatively.\r\nFeatures are not "
+              L"affected."),
+        Entry(L"license.notice.dontShow", L"Don't show again"),
+        Entry(L"license.notice.openLicense", L"Enter License..."),
+        Entry(L"license.notice.close", L"Close"),
     };
     std::vector<LangPack> packs;
     packs.push_back(std::move(english));

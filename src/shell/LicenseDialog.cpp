@@ -283,10 +283,26 @@ void LicenseDialogImpl::Layout() {
 void LicenseDialogImpl::RefreshStatus() {
     const license::LicenseService& service = license::LicenseService::Instance();
     std::wstring text;
-    if (service.State() != license::LicenseState::Free) {
+    if (service.State() == license::LicenseState::Trial) {
         text += core::Tr(L"license.dialog.state.active", L"当前版本：");
         text += EditionLabel(service.EditionValue());
-        text += core::Tr(L"license.dialog.state.activated", L"（已激活）");
+        text += L"（" + core::Tr(L"license.dialog.state.trial", L"试用中") + L"，" +
+                core::Tr(L"license.dialog.state.trialDays", L"还剩 {0} 天",
+                         {std::to_wstring(service.TrialDaysLeft())}) +
+                L"）\r\n";
+        text += core::Tr(L"license.dialog.state.trialHint",
+                         L"试用期内 Pro 能力可用；输入许可即可转为正式授权。");
+    } else if (service.State() != license::LicenseState::Free) {
+        text += core::Tr(L"license.dialog.state.active", L"当前版本：");
+        text += EditionLabel(service.EditionValue());
+        if (service.State() == license::LicenseState::Grace) {
+            text += L"（" +
+                    core::Tr(L"license.dialog.state.grace", L"已到期 · 宽限期还剩 {0} 天",
+                             {std::to_wstring(service.GraceDaysLeft())}) +
+                    L"）";
+        } else {
+            text += core::Tr(L"license.dialog.state.activated", L"（已激活）");
+        }
         text += L"\r\n";
         const license::LicenseInfo& info = service.Info();
         std::wstring holder = infra::WideFromUtf8(info.holder);
@@ -749,12 +765,266 @@ LicenseDialogOutcome LicenseDialogImpl::Show(HWND owner, infra::ThreadPool& pool
     return outcome;
 }
 
+// ---------------- 启动提示（B7，设计 5.3）----------------
+
+constexpr const wchar_t* kNoticeClass = L"notepadccLicenseNotice";
+
+enum : int {
+    kIdNoticeText     = 1551,
+    kIdNoticeDontShow = 1552,
+    kIdNoticeOpen     = 1553,
+    kIdNoticeClose    = 1554,
+};
+
+class LicenseNoticeImpl {
+public:
+    LicenseNoticeOutcome Show(HWND owner, const license::StartupNotice& notice);
+
+private:
+    static LRESULT CALLBACK WndProcThunk(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+    LRESULT WndProc(UINT message, WPARAM wParam, LPARAM lParam);
+
+    int  Scale(int value) const { return ::MulDiv(value, DpiOf(owner_), 96); }
+    HWND Make(const wchar_t* cls, const wchar_t* text, DWORD style, int id);
+    void Layout();
+
+    HWND owner_ = nullptr;
+    HWND hwnd_ = nullptr;
+    HFONT font_ = nullptr;
+    license::StartupNotice notice_;
+    bool done_ = false;
+    bool openLicense_ = false;
+};
+
+HWND LicenseNoticeImpl::Make(const wchar_t* cls, const wchar_t* text, DWORD style, int id) {
+    return ::CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 10, 10, hwnd_,
+                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+                             ::GetModuleHandleW(nullptr), nullptr);
+}
+
+void LicenseNoticeImpl::Layout() {
+    RECT client{};
+    ::GetClientRect(hwnd_, &client);
+    const int gap = Scale(12);
+    const int width = client.right - client.left;
+    const int height = client.bottom - client.top;
+
+    const auto moveItem = [this](int id, int x, int y, int w, int h) {
+        if (HWND item = ::GetDlgItem(hwnd_, id); item != nullptr) {
+            ::MoveWindow(item, x, y, w, h, TRUE);
+        }
+    };
+
+    moveItem(kIdNoticeText, gap, gap, width - gap * 2, height - gap * 3 - Scale(34));
+    moveItem(kIdNoticeDontShow, gap, height - gap - Scale(24), Scale(130), Scale(22));
+    moveItem(kIdNoticeOpen, width - gap - Scale(196), height - gap - Scale(28), Scale(108),
+             Scale(28));
+    moveItem(kIdNoticeClose, width - gap - Scale(80), height - gap - Scale(28), Scale(80),
+             Scale(28));
+}
+
+LRESULT CALLBACK LicenseNoticeImpl::WndProcThunk(HWND hwnd, UINT message, WPARAM wParam,
+                                                 LPARAM lParam) {
+    auto* self = reinterpret_cast<LicenseNoticeImpl*>(::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+        self = static_cast<LicenseNoticeImpl*>(create->lpCreateParams);
+        self->hwnd_ = hwnd;
+        ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+    }
+    if (self == nullptr) {
+        return ::DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+    return self->WndProc(message, wParam, lParam);
+}
+
+LRESULT LicenseNoticeImpl::WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+        case WM_COMMAND:
+            switch (LOWORD(wParam)) {
+                case kIdNoticeOpen:
+                    openLicense_ = true;
+                    done_ = true;
+                    return 0;
+                case kIdNoticeClose:
+                case IDCANCEL:
+                    done_ = true;
+                    return 0;
+                default:
+                    break;
+            }
+            break;
+        case WM_KEYDOWN:
+            if (wParam == VK_ESCAPE) {
+                done_ = true;
+                return 0;
+            }
+            break;
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN: {
+            const HDC dc = reinterpret_cast<HDC>(wParam);
+            ::SetBkMode(dc, TRANSPARENT);
+            return reinterpret_cast<LRESULT>(::GetSysColorBrush(COLOR_BTNFACE));
+        }
+        case WM_SIZE:
+            Layout();
+            return 0;
+        case WM_CLOSE:
+            done_ = true;
+            return 0;
+        case WM_DESTROY:
+            ::SetWindowLongPtrW(hwnd_, GWLP_USERDATA, 0);
+            return 0;
+        default:
+            break;
+    }
+    return ::DefWindowProcW(hwnd_, message, wParam, lParam);
+}
+
+LicenseNoticeOutcome LicenseNoticeImpl::Show(HWND owner, const license::StartupNotice& notice) {
+    owner_ = owner;
+    notice_ = notice;
+
+    // 文案在这里成型：整句走语言包（license.notice.*），占位符按语言替换
+    std::wstring title;
+    std::wstring body;
+    switch (notice_.kind) {
+        case license::LicenseNotice::TrialExpired:
+            title = core::Tr(L"license.notice.titleTrialExpired", L"试用已到期");
+            body = core::Tr(L"license.notice.trialExpired",
+                            L"notepadcc 的 30 天试用已经结束，Pro 能力回到免费版。\r\n"
+                            L"打开、编辑、保存与崩溃恢复都不受影响；输入许可即可重新启用。");
+            break;
+        case license::LicenseNotice::Grace: {
+            title = core::Tr(L"license.notice.titleGrace", L"许可证已到期");
+            std::wstring holder = infra::WideFromUtf8(notice_.holder);
+            if (holder.empty()) {
+                holder = core::Tr(L"license.dialog.state.anonymousHolder", L"（未署名）");
+            }
+            std::wstring until;
+            if (notice_.expiresAt.has_value()) {
+                until = infra::WideFromUtf8(
+                    license::FormatIso8601Utc(*notice_.expiresAt).substr(0, 10));
+            }
+            body = core::Tr(L"license.notice.grace",
+                            L"持有人「{1}」的许可已于 {2} 到期，宽限期还剩 {0} 天。\r\n"
+                            L"宽限期内功能仍可用，请尽快续期。",
+                            {std::to_wstring(notice_.daysLeft), holder, until});
+            break;
+        }
+        case license::LicenseNotice::ClockAnomaly:
+            title = core::Tr(L"license.notice.titleClock", L"系统时间看起来被调整过");
+            body = core::Tr(L"license.notice.clock",
+                            L"检测到系统时间比上次运行回拨了超过 24 小时，试用剩余天数按较保守"
+                            L"的口径计算。\r\n功能不受影响。");
+            break;
+        case license::LicenseNotice::None:
+            return {};
+    }
+
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = &LicenseNoticeImpl::WndProcThunk;
+    wc.hInstance = ::GetModuleHandleW(nullptr);
+    wc.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_BTNFACE + 1));
+    wc.lpszClassName = kNoticeClass;
+    ::RegisterClassExW(&wc);
+
+    RECT ownerRect{};
+    ::GetWindowRect(owner, &ownerRect);
+    const int width = Scale(430);
+    const int height = Scale(216);
+    const int x = ownerRect.left + ((ownerRect.right - ownerRect.left) - width) / 2;
+    const int y = ownerRect.top + ((ownerRect.bottom - ownerRect.top) - height) / 2;
+    hwnd_ = ::CreateWindowExW(WS_EX_DLGMODALFRAME, kNoticeClass, title.c_str(),
+                              WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, width, height, owner,
+                              nullptr, ::GetModuleHandleW(nullptr), this);
+    if (hwnd_ == nullptr) {
+        return {};
+    }
+
+    NONCLIENTMETRICSW metrics{};
+    metrics.cbSize = sizeof(metrics);
+    LOGFONTW logFont{};
+    if (::SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0) != 0) {
+        logFont = metrics.lfMessageFont;
+    } else {
+        ::wcscpy_s(logFont.lfFaceName, L"Microsoft YaHei UI");
+        logFont.lfHeight = -12;
+    }
+    font_ = ::CreateFontIndirectW(&logFont);
+
+    Make(L"STATIC", body.c_str(), SS_LEFT | SS_NOPREFIX, kIdNoticeText);
+    const bool dismissing = notice_.kind != license::LicenseNotice::ClockAnomaly;
+    if (dismissing) {
+        Make(L"BUTTON", core::Tr(L"license.notice.dontShow", L"不再提示").c_str(),
+             WS_TABSTOP | BS_AUTOCHECKBOX, kIdNoticeDontShow);
+        Make(L"BUTTON", core::Tr(L"license.notice.openLicense", L"输入许可(&L)…").c_str(),
+             WS_TABSTOP | BS_PUSHBUTTON, kIdNoticeOpen);
+    }
+    Make(L"BUTTON", core::Tr(L"license.notice.close", L"关闭").c_str(),
+         WS_TABSTOP | (dismissing ? BS_PUSHBUTTON : BS_DEFPUSHBUTTON), kIdNoticeClose);
+
+    if (font_ != nullptr) {
+        ::EnumChildWindows(
+            hwnd_,
+            [](const HWND child, const LPARAM param) -> BOOL {
+                ::SendMessageW(child, WM_SETFONT, static_cast<WPARAM>(param), TRUE);
+                return TRUE;
+            },
+            reinterpret_cast<LPARAM>(font_));
+    }
+    Layout();
+
+    ::EnableWindow(owner_, FALSE);
+    ::ShowWindow(hwnd_, SW_SHOW);
+    Layout();
+    if (HWND closeButton = ::GetDlgItem(hwnd_, kIdNoticeClose); closeButton != nullptr) {
+        ::SetFocus(closeButton);
+    }
+
+    MSG message{};
+    while (!done_ && ::IsWindow(hwnd_) != 0) {
+        const BOOL fetched = ::GetMessageW(&message, nullptr, 0, 0);
+        if (fetched <= 0) {
+            break;
+        }
+        if (::IsDialogMessageW(hwnd_, &message) == 0) {
+            ::TranslateMessage(&message);
+            ::DispatchMessageW(&message);
+        }
+    }
+    ::EnableWindow(owner_, TRUE);
+    ::SetForegroundWindow(owner_);
+
+    LicenseNoticeOutcome outcome;
+    outcome.openLicense = openLicense_;
+    outcome.dontShowAgain = ::IsDlgButtonChecked(hwnd_, kIdNoticeDontShow) == BST_CHECKED;
+    if (font_ != nullptr) {
+        ::DeleteObject(font_);
+        font_ = nullptr;
+    }
+    if (::IsWindow(hwnd_) != 0) {
+        ::DestroyWindow(hwnd_);
+    }
+    hwnd_ = nullptr;
+    return outcome;
+}
+
 }  // namespace
 
 LicenseDialogOutcome LicenseDialog::Show(HWND owner, infra::ThreadPool& pool,
                                          std::string serviceUrl) {
     LicenseDialogImpl dialog;
     return dialog.Show(owner, pool, std::move(serviceUrl));
+}
+
+LicenseNoticeOutcome LicenseNoticeDialog::Show(HWND owner,
+                                               const license::StartupNotice& notice) {
+    LicenseNoticeImpl dialog;
+    return dialog.Show(owner, notice);
 }
 
 }  // namespace npcc::shell

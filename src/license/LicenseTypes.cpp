@@ -103,6 +103,14 @@ std::string FeatureListToString(FeatureMask mask) {
     return out;
 }
 
+FeatureMask ProFeatureMask() {
+    // 设计 2.2：试用 30 天给 Pro 全集；Enterprise 专属的两位不在里面
+    return FeatureBit(Feature::MultiCaret) | FeatureBit(Feature::Compare) |
+           FeatureBit(Feature::DataTools) | FeatureBit(Feature::HugeFile) |
+           FeatureBit(Feature::ScriptPlugin) | FeatureBit(Feature::RemoteEdit) |
+           FeatureBit(Feature::BatchCli) | FeatureBit(Feature::CloudSync);
+}
+
 std::string_view EditionName(Edition edition) {
     switch (edition) {
         case Edition::Pro: return "pro";
@@ -148,6 +156,7 @@ std::string_view LicenseStateName(LicenseState state) {
     switch (state) {
         case LicenseState::Trial: return "trial";
         case LicenseState::Licensed: return "licensed";
+        case LicenseState::Grace: return "grace";
         case LicenseState::Free: break;
     }
     return "free";

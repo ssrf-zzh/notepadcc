@@ -132,12 +132,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     // "机器上正开着一个编辑器"就被转交给别的实例。
     if (options.licenseInfo) {
         license.Initialize(licenseOverride);
+        license.BeginSession();   // 试用记账（B7）：--license-info 要能看到剩余天数
         WriteStdoutUtf8(license.StatusJson());
         npcc::infra::ShutdownLogging();
         return (license.State() == npcc::license::LicenseState::Free) ? 1 : 0;
     }
     if (!options.licenseImport.empty()) {
         license.Initialize(licenseOverride);
+        license.BeginSession();   // 每次启动都记一笔（B7）
         npcc::license::LicenseError importError = npcc::license::LicenseError::None;
         std::wstring importDetail;
         const bool imported = license.Import(options.licenseImport, &importError, &importDetail);
@@ -153,6 +155,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     // 许可初始化（设计 8.3）：只读本地文件 + 验签 + 机器判定，失败仅记日志，
     // 绝不阻断启动。放在建窗口之前，界面一起来就能问到状态。
     license.Initialize(licenseOverride);
+    license.BeginSession();   // 试用双写 + 上次运行时间（B7，设计 5.1 / 5.2）
 
     // 单实例判定必须在建窗口之前：晚一步就可能出现"两个窗口同时起来"。
     // 配置要读一次才知道用户选的是单开还是多开——这里单独加载一份配置，

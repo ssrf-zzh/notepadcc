@@ -44,6 +44,9 @@ std::optional<Feature> FeatureFromName(std::string_view name);
 // 位集合 → 按名字字典序的 "a,b,c"（签发端序列化用；解析端按 ',' 切开）
 std::string FeatureListToString(FeatureMask mask);
 
+// 试用期的能力集（设计 2.2）：Pro 全集——Enterprise 专属的两位不在里面。
+FeatureMask ProFeatureMask();
+
 std::string_view EditionName(Edition edition);
 std::optional<Edition> EditionFromName(std::string_view name);
 
@@ -59,11 +62,13 @@ std::string_view FingerprintModeName(FingerprintMode mode);
 std::optional<FingerprintMode> FingerprintModeFromName(std::string_view name);
 
 // 运行状态（设计 2.1 与第 5 章）：许可校验不过一律回到 Free——Free 是**正常**
-// 状态，不是"出错"。试用与回落状态机（含时钟回拨的保守处理）是 B7，这里先把
-// 状态的形状定下来：试用期（Trial）的能力集按 Pro 计。
+// 状态，不是"出错"。判定顺序（B7）：许可有效 → Licensed；刚过期（7 天宽限内）
+// → Grace（功能仍可用，提示续期）；没有可用许可但试用窗口没到期 → Trial（能力
+// 集按 Pro 计）；其余 Free。
 enum class LicenseState {
     Free,
     Trial,
+    Grace,
     Licensed,
 };
 

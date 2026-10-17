@@ -51,7 +51,7 @@
 | ADR-07 | 文档与视图 | 一文档多视图，视图只读共享 | 支撑"克隆到另一视图"与未来的多分屏 |
 | ADR-08 | 线程模型 | UI 单线程持有全部编辑控件，重活下沉到线程池 | Scintilla 非线程安全，这是硬约束 |
 | ADR-09 | 产品命名 | **notepadcc**（早期设计代号为 codepad++） | 用户指定；全文、代码标识、配置目录与插件 ABI 前缀已同步更名 |
-| ADR-10 | 编译工具链 | MSVC v143（正式发布）与 MinGW-w64 GCC（本地与 CI）双轨，均以 CMake 驱动；MinGW 用 Ninja，MSVC 用 Visual Studio 生成器 | 代码不使用任一编译器专有扩展，两边均已构建通过，单元测试全绿（当前 2231 项，见 README 的能力表）。MSVC 不用 Ninja 的原因：本地化 MSVC 的 `/showIncludes` 前缀在写入 `build.ninja` 时编码错乱，导致头文件依赖全部丢失、增量构建失效；MSBuild 的 tlog 机制与界面语言无关。MSVC 侧另需 `/MT` 静态 CRT 以满足便携要求 |
+| ADR-10 | 编译工具链 | MSVC v143（正式发布）与 MinGW-w64 GCC（本地与 CI）双轨，均以 CMake 驱动；MinGW 用 Ninja，MSVC 用 Visual Studio 生成器 | 代码不使用任一编译器专有扩展，两边均已构建通过，单元测试全绿（当前 2293 项，见 README 的能力表）。MSVC 不用 Ninja 的原因：本地化 MSVC 的 `/showIncludes` 前缀在写入 `build.ninja` 时编码错乱，导致头文件依赖全部丢失、增量构建失效；MSBuild 的 tlog 机制与界面语言无关。MSVC 侧另需 `/MT` 静态 CRT 以满足便携要求 |
 
 **关于 ADR-09 的更名范围**：本次更名是彻底的，不留旧名残留，涉及以下几类实体——
 
@@ -756,7 +756,7 @@ notepadcc/
    - **在浏览器里打开**：Markdown **先生成 HTML** 再交给默认浏览器——直接把 .md 丢给浏览器只会看到源码。生成的 HTML 落在 `config\tmp\preview-<pid>-<n>.html`（临时文件不是用户文档，便携版承诺不往外写）。其它类型（.html、文本）直接打开文件本身，因此要求文档已保存。
    - **预览面板是自绘的**，不是嵌浏览器控件：Windows 上要嵌真引擎，要么用 IE 的 `WebBrowser` 控件（要实现 `IOleClientSite`/`IOleInPlaceSite` 一整套 COM 站点，几百行样板），要么用 WebView2（依赖外部运行库，便携版不能假设它装了）。自绘的代价写明在这里：**没有图片、表格、内嵌 HTML**，只有 Markdown 的结构、字体与配色；换来零依赖、跟主题走，而且"面板上到底显示成什么样"能被跨进程读回来核对（`WM_GETTEXT`，与十六进制视图同一条规矩）。要完整排版就走浏览器那条路。
    - **支持的 Markdown 子集**（写在头文件里）：标题、段落、围栏代码块、有序/无序列表、引用、分隔线、行内粗体斜体行内代码链接与反斜杠转义；**没有**表格、脚注、任务列表、内嵌 HTML、图片、自动链接。挑这一档是因为它们覆盖了写文档时绝大多数用法，而每多一条都要多一套边界规则。
-逻辑全部放在 `edit/TextTools` 里，是**纯函数**：给字节、返回字节，不碰窗口也不做 IO，所以能被单元测试覆盖到边角（2231 项里"行操作与文本转换"这一段占 68 项——测试跑完每段都会报出本段项数，这个数字可以随时核对；自动完成的取词与筛词也是同一套纯函数，单独成段）。两条贯穿所有行操作的约定单独钉了测试：**保留原文的行尾风格**（CRLF 的文本排完序还是 CRLF）、**保留结尾换行与否**（末尾有换行就保留、没有就不加）——这类细节用户一眼就能看出来，也是最容易在重写文本时丢掉的东西。
+逻辑全部放在 `edit/TextTools` 里，是**纯函数**：给字节、返回字节，不碰窗口也不做 IO，所以能被单元测试覆盖到边角（2293 项里"行操作与文本转换"这一段占 68 项——测试跑完每段都会报出本段项数，这个数字可以随时核对；自动完成的取词与筛词也是同一套纯函数，单独成段）。两条贯穿所有行操作的约定单独钉了测试：**保留原文的行尾风格**（CRLF 的文本排完序还是 CRLF）、**保留结尾换行与否**（末尾有换行就保留、没有就不加）——这类细节用户一眼就能看出来，也是最容易在重写文本时丢掉的东西。
    - 面板占右侧一栏（宽度按比例写死，与左侧固定栏同一个态度：没有真正的 DockHost）。十六进制视图会占掉剩下的编辑区——两件事同时开着时是"左边看字节、右边看排版"。
    - **"指定浏览器"没有做**：只调默认浏览器。要指定得加一项配置再在首选项里给入口，属于"配置中心那一批"（见 2.12 记的那些页签）。
 5. **十六进制查看**：内置只读十六进制视图（左侧偏移、中间十六进制、右侧 ASCII），支持跳转与选区联动；转换为可编辑模式时以副本打开，避免误改二进制文件。
@@ -2700,7 +2700,7 @@ void LogF(LogLevel lv, std::wstring_view category, const wchar_t* fmt, ...);
 
 - **判定是纯函数**（`EvaluateLicense`）：验签不过 → Free + 原错误；指纹判定不允许 → Free + `FingerprintMismatch`（`FingerprintMatch` 明细一并带回）；其余 → Licensed。服务层只做“读文件 → 验签 → 判定 → 记账”，判定链因此能在单测里钉死。
 - **导入的门槛是“结构上是真许可”**：`Import(源文件)` 先验签，过了才落盘（`io::WriteFileAtomic`，不留半截文件）；过期 / 未生效 / 指纹不符**不阻止导入**——“是不是真件”与“现在能不能用”分开管，到期日与机器判定交给服务算。
-- **`--license-info` 输出一行 JSON、退出码表意**：可用 0 / 未授权 1；字段 product / state / edition / licenseEdition / holder / seats / expiresAt / features / trialDaysLeft（B7 之前占位 0）/ licenseFile / error。错误名走机器可读的 `LicenseErrorName()`（`fileMissing` / `fingerprintMismatch` / …），与界面文案 `DescribeLicenseError()` 各走各路。
+- **`--license-info` 输出一行 JSON、退出码表意**：可用 0 / 未授权 1；字段 product / state / edition / licenseEdition / holder / seats / expiresAt / features / trialDaysLeft（B7 起是真实的剩余天数）/ licenseFile / error。错误名走机器可读的 `LicenseErrorName()`（`fileMissing` / `fingerprintMismatch` / …），与界面文案 `DescribeLicenseError()` 各走各路。
 - **GUI 子系统也要能写标准输出**：先取 `STD_OUTPUT_HANDLE`（管道与重定向就是它），取不到再 `AttachConsole(ATTACH_PARENT_PROCESS)`；一律按 UTF-8 写（持有人常是中文）。两个无界面命令放在**单实例判定与建窗口之前**——机器上正开着编辑器不该影响企业批量脚本；`--license-import` 成功 0 / 失败 2。
 - **启动即初始化、失败不阻断**（设计 8.3）：主窗口起来之前 `Initialize()`（`--license-file` 可改指路径），失败只记日志（级别随错误走 Info / Warn，category `license`）。
 - 单元测试 +39 项（纯判定四类 / 服务走固定件真实文件 / 状态 JSON 字段 / 乱码导入被拒且不破坏现有许可 / 过期 → Free + Expired / 指纹不符 / 未知能力 / 企业站点 / JSON 转义 / 状态名与错误名）；两个工具链各自 2162 项全绿。
@@ -2714,6 +2714,16 @@ void LogF(LogLevel lv, std::wstring_view category, const wchar_t* fmt, ...);
 - **导入门槛与 B5 完全一致**（`ImportBytes`）：网络来的字节与磁盘上的文件走同一条验签路径——“结构上是真许可”才落盘；`Import(path)` 保持原名（读文件 → `ImportBytes` → 详情追加来源路径），调用方不用改。
 - **界面回归的操作面先钉死**：状态文本 1501、授权码 1513、在线激活 1514、席位 1522、单位名 1524、申请串 1525、复制 1526、保存 1527、导入路径 1531–1534（编号表在 `LicenseDialog.h`，注明“一经发布不再改”）——B9 的第 10 段照这组 ID 操作，不碰对话框内部。
 - 单元测试 +49 项（B6 段 47 项 + 配置中心 2 项：归一化 / 机器名哈希 / JSON 转义与代理对 / 请求体六字段 / 响应全分支 / 错误名与文案 / UUID v4 形状 / 未配置服务地址 / 回环 200 与 400 端到端 / `ImportBytes` 四情形 / 申请串格式与钳位 / `serviceUrl` 往返）；两个工具链各自 2231 项全绿。
+
+**v1.1 泳道 B · B7：试用状态机与启动提示（`license/LicenseStore` / `LicenseService` / `shell/LicenseDialog` / `MainWindow`）（2026-10-17）**。《notepadcc许可与激活设计.md》2.2 与第 5 章落地：`Free --首次运行--> Trial(30 天) --到期--> Free`；`Licensed --到期--> Grace(7 天，功能仍可用) --宽限过--> Free`。判定仍是纯函数，时钟与记录由服务层喂进去，单测不必动机器。
+
+- **状态机与能力集**：`EvaluateSession` 的顺序是"许可有效 → Licensed；刚过期且在 7 天宽限内 → Grace（能力集仍是许可里那几位）；没有可用许可但试用窗口没到期 → Trial（`ProFeatureMask()` 的 8 位，Enterprise 专属的 teamconfig / manageddeploy 不在内）；其余 Free"。指纹不符、过期出宽限都会先落到"没有可用许可"这条兜底上，再按试用窗口决定是否回落到 Trial；`EditionValue()` 在试用期报 Pro，「关于」与状态 JSON 看到的是同一个口径。
+- **双写记录只做"尽力而为"**：首次运行时间同时写 `ConfigRoot()/state.xml` 与 `HKCU\Software\notepadcc\FirstRun`（REG_QWORD），读取取较早值——删掉配置文件重来一次会被注册表挡住；文件读坏按空记录处理并记 Warn，绝不拦启动。`state.xml` 的读写走 `infra::Xml` + `io::SaveXmlFile`（原子写），记录里另有两个"不再提示"标记。`TrialRecord` 的合并是纯函数（`MergeTrialRecords`），注册表那一路留了空 subKey 的测试哨兵：单测在测试机上不留痕。
+- **每次启动写 `lastSeenUtc`，时钟回拨按保守值算**：`now < lastSeenUtc - 24h` 才标记异常；剩余天数按 `max(now, lastSeenUtc)` 算（回拨不白得天数，daysLeft 向上取整并封顶 30）。异常**不禁用任何功能**，只在试用状态提示一次；`EvaluateSession` 在 Trial 兜底时把 `error` 记成 `LicenseError::ClockAnomaly`，日志因此走 Warn（设计第 9 章的错误表），`--license-info` 的 JSON 里也看得到。
+- **启动提示一次、可勾不再提示**：`SelectStartupNotice` 是纯函数，优先级 Grace > TrialExpired > ClockAnomaly，并把"本会话露过"与"勾过不再提示"一并判掉；时钟异常没有"不再提示"（设计 5.2）。界面侧 `LicenseNoticeDialog` 是自绘窗口（控件 1551 提示正文 / 1552 不再提示 / 1553 输入许可 / 1554 关闭），勾选经 `DismissNoticeForever` 写回 `state.xml`，「输入许可…」直接接现有的许可证对话框。到期清单照设计 5.3：打开 / 编辑 / 保存 / 恢复 / 查找不受影响，已设的 Pro 功能不再出现，不加水印、退出不弹框。
+- **模态框串行**：启动提示仍挂在原来的 `kMsgStartupNotice` 上（排在恢复提示之后）。恢复提示的 `MessageBox` 自带消息泵，若此时直接弹许可提示会两个模态框叠罗汉；发现 `recoveryPending_` 还没收尾就挂一次性定时器 `kTimerLicenseNotice` 晚 500 ms 再来，收尾后再露面。没有新增 Windows 消息（附录 C 不用改）。
+- **状态文案**：许可证对话框的试用分支显示「当前版本：Pro（试用中，还剩 N 天）」+ 一句说明；Grace 分支显示「已到期 · 宽限期还剩 N 天」；「关于」同步显示试用 / 宽限的剩余天数。
+- 单元测试 +62 项（纯函数：试用窗口边界 / 回拨 24h 内与 25h / 不白得天数与封顶 / 宽限 7 天边界 / 四态判定与回落 / 提示优先级与三类门禁；存储：双写取较早 / `state.xml` 往返与坏文件 / 空 subKey 哨兵；服务级：首跑落盘 / 到期回落 / 提示记账 / 不再提示写回 / `--license-info` 的 trialDaysLeft 与 clockAnomaly）；两个工具链各自 2293 项全绿。另跑了 B7 专项界面冒烟 30 项（首跑不弹提示、到期提示、输入许可、不再提示、时钟异常、CLI JSON；临时 driver，尚未并入 tools/ui_smoke_test.py），48 段整段回归通过。
 | M4 超越项 | 落实差异化 | 多光标编辑、四分屏、嵌套语法、快捷键迁移预设，视情况推进 LSP 与内置终端 | M3 |
 
 ### 10.2 P0 阶段的任务拆解与依赖
@@ -2914,6 +2924,9 @@ M1 可替代
 | PowerShell 直接调用 GUI 子系统的 exe 拿不到退出码 | `& .\notepadcc.exe --license-info` 的输出会进管道，但 PowerShell **不等待** GUI 进程，`$LASTEXITCODE` 为空（打印顺序都是先 "still=" 后 JSON） | 冒烟包一层 `cmd /c ".\notepadcc.exe --license-info 2>&1"`：重定向的输出一关 cmd 就收尾，`$LASTEXITCODE` 拿到 0 / 1 / 2 三个真实退出码 |
 | PowerShell 里对 [string] 用 `Contains([char])` 的绑定不可靠 | 生成器要断言“导入详情里带 U+2014 破折号”，直觉写 `$s.Contains([char]0x2014)`——Windows PowerShell 5.1 的 `String.Contains()` 只认 string，`[char]` 要么绑不上、要么比出意料之外的结果，看上去像“文档里没有这个字符” | 显式转：`$s.Contains([string][char]0x2014)`；凡“要断言某个码点”，把类型写全，别让重载推导替你决定 |
 | 先落盘的新文件（CRLF）与后打的补丁（LF 上下文）行尾不一致 → Invalid Context | `LicenseDialog.cpp` 经 `Add-FilesFromDisk` 落在磁盘上之后，后续补丁的锚点行按 LF 拼——apply_patch 报 “Invalid Context”，逐字比对却一模一样，看半天像“文字对不上” | 对“先落盘、后修改”的新文件：落盘后先把行尾统一（或生成补丁时对锚点做 CRLF/LF 归一），再打第二个补丁；补丁失败先查行尾，再查文字 |
+| 在 `state.xml` 里手写 `trialNoticeDismissed="true"`，产品读得懂，冒烟脚本对文件的断言却永远对不上 | `infra::Xml::SetAttributeBool` 落盘统一写 `yes` / `no`（读取时 `true` / `false` / `1` / `0` 也认）。B7 的界面回归先按 `"true"` / `"false"` 核对文件，于是"勾了不再提示"明明已经生效（重启也不再弹），文件断言却连报两条失败 | 断言"产品写了什么"要以产品自己的写入器为准：先 `SaveTrialState` 再读，或直接认 `yes` / `no`；别把 XML 布尔的两种写法混着用 |
+| 启动时连发两个会弹模态框的消息，第二个在第一个的消息框里就被派发了 | `kMsgStartupRecovery` 的 `MessageBox` 自带消息泵，排在后面的 `kMsgStartupNotice` 会在用户还没回答恢复提示时就进主窗口的 WndProc；若此时直接弹许可提示，就是两个模态框叠罗汉，而且后者的 `EnableWindow(owner, TRUE)` 会把恢复框的 owner 提前解禁 | 启动阶段要串行的模态框用"前一个还没收尾就挂一次性定时器再来"，不要原消息重投——消息框的泵会把重投的消息立刻再取出来，形成自旋；判据是"模态框叠在一起 / 底层窗口提前能点" |
+| 同一个界面脚本里，先测"试用到期"再测"时钟回拨"，第二个场景怎么改 `state.xml` 都还是到期态 | `BeginSession` 把 HKCU 的 `FirstRun` 与 `state.xml` 的 `firstRunUtc` 取较早值（设计 5.1 的双写）；"到期"场景启动时产品把那个 31 天前的时间写回了注册表，下一个场景合并时又把它取了回来 | 端到端脚本每个场景前都要备份并清掉 `HKCU\Software\notepadcc\FirstRun`（跑完恢复）；纯函数单测不受影响，服务级用例用 `TrialEnvironment{registrySubKey=""}` 明确跳过注册表 |
 
 ## 附录 C：Windows 消息与自定义消息分配
 

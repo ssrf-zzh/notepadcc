@@ -5,6 +5,7 @@
 #include <string>
 
 #include "infra/ThreadPool.h"
+#include "license/LicenseService.h"
 
 namespace npcc::shell {
 
@@ -26,6 +27,17 @@ namespace npcc::shell {
 // true：调用方拿到它后要 RebuildMenu()，让菜单跟着新状态走。
 struct LicenseDialogOutcome {
     bool changed = false;
+};
+
+// 启动提示（B7，设计 5.3）：试用到期 / 宽限 / 时钟异常各露一面。自绘小框，
+// 窗口类 notepadccLicenseNotice；「不再提示」只对前两种有意义（写回 state.xml）。
+struct LicenseNoticeOutcome {
+    bool openLicense = false;      // 点了「输入许可…」：调用方接着开许可证对话框
+    bool dontShowAgain = false;    // 勾了「不再提示」
+};
+class LicenseNoticeDialog {
+public:
+    static LicenseNoticeOutcome Show(HWND owner, const license::StartupNotice& notice);
 };
 
 class LicenseDialog {

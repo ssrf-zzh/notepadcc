@@ -325,6 +325,8 @@ private:
     bool OpenDocumentPath(const std::wstring& path);
     // 打开后留在 loadWarning 里的提示（二进制内容、混合行尾、大文件档）在状态栏露面一次
     void AnnounceActiveLoadWarning();
+    // B7：试用/宽限/时钟回拨的启动提示（设计 5.3 / 9 章），一次会话至多露面一次
+    void AnnounceLicenseNotice();
     void ApplyChromeTheme();
     void ApplyStyleSchemeToAllViews();
     void CommandAutoComplete();
