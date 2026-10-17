@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  notepadcc MSI（WiX 5 / v4 schema）。
+
+  同一份源生成两种包：
+    - per-user：双模式包默认按用户安装，装到 %LOCALAPPDATA%\Programs\notepadcc，
+      不需要管理员；通过 Launch 条件拒绝 ALLUSERS=1，避免误装成整机；
+    - per-machine：装到 %ProgramFiles%\notepadcc，需要管理员提权。
+  程序目录不预建 config\，因此安装版会按既定规则把配置写到 %APPDATA%\notepadcc；
+  便携版仍由 scripts/package.ps1 生成，彼此不混用。
+
+  构建参数（由 scripts/package_msi.ps1 传入）：
+    ProductVersion / SourceExe / SourceReadme / PackageScope / PackageLabel /
+    UpgradeCode / PerUser
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="notepadcc"
+           Manufacturer="notepadcc"
+           Version="$(var.ProductVersion)"
+           UpgradeCode="$(var.UpgradeCode)"
+           Scope="$(var.PackageScope)"
+           Language="2052"
+           Codepage="65001">
+    <SummaryInformation Manufacturer="notepadcc"
+                        Description="notepadcc $(var.ProductVersion)（$(var.PackageLabel)）" />
+    <MajorUpgrade DowngradeErrorMessage="已安装较新的 notepadcc 版本，请先在“应用和功能”中卸载。" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Feature Id="MainFeature" Title="notepadcc" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+    </Feature>
+
+<?if $(var.PerUser) = 1?>
+    <Launch Condition="ALLUSERS &lt;&gt; 1"
+            Message="这是 notepadcc 的按用户安装包；整机安装请使用 per-machine 包。" />
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="LocalProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="notepadcc" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="notepadcc" />
+    </StandardDirectory>
+<?else?>
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="notepadcc" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="notepadcc" />
+    </StandardDirectory>
+<?endif?>
+  </Package>
+
+  <Fragment>
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="MainExecutable" Guid="$(var.MainExecutableGuid)">
+<?if $(var.PerUser) = 1?>
+        <File Id="NotepadccExe" Source="$(var.SourceExe)" />
+        <RegistryValue Root="HKCU" Key="Software\notepadcc\Installer"
+                       Name="MainExecutable" Type="integer" Value="1" KeyPath="yes" />
+<?else?>
+        <File Id="NotepadccExe" Source="$(var.SourceExe)" KeyPath="yes" />
+<?endif?>
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+<?if $(var.PerUser) = 1?>
+        <RemoveFolder Id="RemoveLocalProgramsFolder" Directory="LocalProgramsFolder" On="uninstall" />
+<?endif?>
+      </Component>
+      <Component Id="UserGuide" Guid="$(var.UserGuideGuid)">
+<?if $(var.PerUser) = 1?>
+        <File Id="UserGuideTxt" Source="$(var.SourceReadme)" />
+        <RegistryValue Root="HKCU" Key="Software\notepadcc\Installer"
+                       Name="UserGuide" Type="integer" Value="1" KeyPath="yes" />
+<?else?>
+        <File Id="UserGuideTxt" Source="$(var.SourceReadme)" KeyPath="yes" />
+<?endif?>
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="ApplicationShortcut" Guid="$(var.ShortcutGuid)">
+        <Shortcut Id="StartMenuShortcut"
+                  Name="notepadcc"
+                  Description="notepadcc $(var.ProductVersion)"
+                  Target="[INSTALLFOLDER]notepadcc.exe"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\notepadcc\Installer"
+                       Name="Shortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <ComponentGroup Id="ProductComponents">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="UserGuide" />
+      <ComponentRef Id="ApplicationShortcut" />
+    </ComponentGroup>
+  </Fragment>
+</Wix>

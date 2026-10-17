@@ -852,6 +852,17 @@ notepadcc/
    `portable` 标记的作用是**不依赖命令行开关**：程序目录下放着这个文件就一定走便携模式。这条承诺由界面回归脚本的第 16 段实测——解压到临时目录、**不加 `-portable`** 直接运行、核对 `config\session.xml` 与 `config\logs\notepadcc.log` 都落在程序目录里，并核对 `%APPDATA%\notepadcc` 全程未被创建，最后删目录验证"卸载即删目录"。
 4. **日志**：分 `Error / Warn / Info / Trace` 四级，默认记录 `Info` 以上，滚动保留最近 5 个文件各 4 MB。日志路径可在关于对话框中一键打开。
 
+5. **MSI 安装形态（B10 落地）**：`scripts/package_msi.ps1` 用固定版本 **WiX 5.0.2** 从同一份源生成两份包：
+
+   - **按用户包**（`notepadcc-<版本>-x64-peruser.msi`）：`Scope=perUserOrMachine`，默认按用户安装到 `%LOCALAPPDATA%\Programs\notepadcc`，不需要管理员；带 Launch 条件拒绝 `ALLUSERS=1`，防止被当成整机包误用。
+   - **整机包**（`notepadcc-<版本>-x64-permachine.msi`）：`Scope=perMachine`，安装到 `%ProgramFiles%\notepadcc`，需要管理员提权；开始菜单使用 `ProgramMenuFolder`，在整机上下文里解析到公共开始菜单。
+
+   WiX 5.0.2 的选择理由与获取方式：v6 起引入 OSMF 维护费、v7 起命令行强制接受其 EULA，不适合作为商业项目的默认构建依赖；`scripts/fetch_wix.ps1` 固定下载地址与 SHA-256，用 `msiexec /a` 解到项目下的 `.build-tools\`，不装系统 PATH、不需要管理员。两份 MSI 各自使用独立的 UpgradeCode，当前版本仍为 `1.0.0`。
+
+   `scripts/verify_package.ps1` 的验证链：先确认默认安装目录与开始菜单未被占用，按用户包在普通权限下真实静默安装到默认路径 `%LOCALAPPDATA%\Programs\notepadcc`，核对 `notepadcc.exe` 与构建产物哈希一致、开始菜单快捷方式存在、`HKCU\Software\Microsoft\Installer\Products` 有产品登记、安装日志出现 `Per-User mode`；随后真实静默卸载，核对安装目录、快捷方式、HKCU 登记与 ARP 项全部清理。整机包在当前无管理员会话里用 `msiexec /a` 管理安装，核对解出的文件表与哈希；**真实整机安装未在当前环境执行，需管理员或 CI 在干净虚拟机上补跑**。绿色 zip 同时核对程序、`portable` 标记、说明文件与程序哈希。实测每份 MSI 约 1.62 MB、绿色 zip 约 2.02 MB，均低于 20 MB 的安装包门槛。
+
+   Windows 11 26100 实测：per-user 安装的 ARP 项可能落在 HKLM，但 HKCU 的 Installer 产品登记会写入；因此校验以“安装日志的 Per-User mode + HKCU 产品登记”作为安装范围证据，卸载后两处都必须消失，不能只凭 ARP 所在根键判断安装范围。
+
 ---
 
 ## 3. 核心数据结构
@@ -2439,6 +2450,7 @@ void LogF(LogLevel lv, std::wstring_view category, const wchar_t* fmt, ...);
 | 单实例 | 启动第一个实例 → 再启动一个带文件的实例 → 核对第二个**退出码为 0 且真的退出**、第一个打开了转交过来的文件（标题与编辑器内容）、全机器只有 1 个可见主窗口 → 再加 `--multi-instance` 启动，核对有 2 个主窗口 |
 | 文件关联 | 先读一次机器的既有状态 → 触发"加入打开方式列表" → 用 `winreg` 核对 `HKCU\Software\Classes\.txt\OpenWithProgids` 下确实有 notepadcc、且打开命令带引号的 `"%1"` → **如果这台机器上本来没登记过**就再触发"移除"并核对干净（测试不改动用户既有的设置） |
 | 绿色打包 | 跑 `scripts/package.ps1 -NoBuild` → 解压 zip 到临时目录 → **不加任何开关**直接运行 → 核对 `config\session.xml` 与日志都写在程序目录里、`%APPDATA%\notepadcc` 全程未被创建 → 删目录验证"卸载即删目录" |
+| MSI 安装/卸载 | 跑 `scripts/fetch_wix.ps1` 与 `scripts/package_msi.ps1 -NoBuild` → 先确认默认路径未被占用，普通权限真实静默安装 per-user MSI 到 `%LOCALAPPDATA%\Programs\notepadcc` → 核对 exe 哈希、开始菜单、`HKCU\Software\Microsoft\Installer\Products` 产品登记与安装日志的 `Per-User mode` → 静默卸载并核对目录、快捷方式、HKCU 登记与 ARP 项全部清理 → 用 `msiexec /a` 管理安装 per-machine MSI，核对解出文件与哈希；真实整机安装由管理员/CI 在干净虚拟机上补跑 |
 | 工具菜单 | 对着一个小文件依次做去行尾空白 → 升序排序 → 删除重复行 → 转大写，四步都核对内容；再**连按四次撤销**核对内容与"已修改"标记一起回到起点（一次操作必须正好一步撤销）；接着转大写 → Base64 编码 → **用 Python 独立解码**核对编码结果 → 在程序里解码核对还原；另起一个内容不合法的文件，核对解码失败时弹说明且内容一字节未动 |
 | 文件类型识别与 MIME 工具 | 打开一个开头带 NUL 的文件 → 核对状态栏提示里含“二进制”与“十六进制”、日志里留下“打开提示”底档、并且**编辑控件里的字节数等于文件字节数**（`SCI_GETLENGTH`：被 NUL 截断的话这一步就不会过）→ 用 Python `quopri` 编出一份含中文与软换行的内容喂给“Quoted-Printable 解码”，核对逐字节等于原文 → 把原文再用程序的“编码”处理：核对含大写 `=E4=B8=AD` 与 `=3D`、没有裸的 `" \r\n"`（行尾空白必须编码），且 `quopri` 能把它逐字节解回原文 → 另拿一份含 `=zz` 的文件，核对“无法解码”说明弹出且内容一字节未动 |
 | 护眼模式 | 先核对基线是白底 → 发一次“护眼模式”命令 → 读回**编辑控件真正拿去绘制的那两个值**（`SCI_STYLEGETFORE` / `SCI_STYLEGETBACK`、`COLORREF`）：背景是米色 `#F4E8D4`、前景是暖深灰 `#3B362C`，行号边距底色跟着变成 `#EADBBD`（不能只换正文、边距留一块白的），配置里写下 `eyeCare="yes"` → 重启核对仍然保持 → 再切一次，核对前景与背景**逐字节回到基线值**、配置写回 `eyeCare="no"` |
@@ -2742,6 +2754,17 @@ void LogF(LogLevel lv, std::wstring_view category, const wchar_t* fmt, ...);
 - **篡改拒绝且旧许可不变**：把固定件签名内容的首字符改掉后再导入，等待 `1534` 出现"导入失败"；核对 `1501` 仍是已激活、持有人仍是测试用户、磁盘上的旧许可逐字节未变。这条同时钉住"先验签、后落盘"的顺序。
 - **覆盖边界**：菜单里 Pro 能力的 `queryEnabled` 实接线属于 A5，本版尚未接；本段只验证对话框自身的状态、导入与拒绝路径，不伪造菜单可用性断言。
 - 本轮只改界面回归与文档，不新增生产代码；两个工具链各 2350 项单测全绿，界面回归由 48 段增至 49 段。
+
+**v1.1 泳道 B · B10：MSI 安装包与打包验证（`packaging/notepadcc.wxs`、`scripts/package_msi.ps1`、`scripts/verify_package.ps1`）（2026-10-17）**。在绿色 zip 之外补上企业部署需要的 MSI 双形态，并把“打包”本身纳入可重复验证。
+
+- **工具链固定为 WiX 5.0.2**：v6 起引入 OSMF 维护费、v7 起命令行强制接受其 EULA，不能作为商业项目的默认依赖；`scripts/fetch_wix.ps1` 固定官方下载地址与 SHA-256（`097383B2…74E8D0`），用 `msiexec /a` 解到 `.build-tools\wix-5.0.2\`，不改系统 PATH。
+- **按用户包是双模式包默认按用户**：`Scope=perUserOrMachine` 由 WiX 写入 `ALLUSERS=2` 与 `MSIINSTALLPERUSER=1`，普通权限下日志明确出现 `Package is a dual mode package and is being installed in Per-User mode. No elevation is required.`；安装目录 `%LOCALAPPDATA%\Programs\notepadcc`。另加 Launch 条件 `ALLUSERS <> 1`，拒绝把按用户包当成整机包使用。
+- **Launch 边界有自动断言**：`verify_package.ps1` 先给按用户包传 `ALLUSERS=1`，要求 `msiexec` 返回 `1603`，并核对没有留下安装目录或卸载登记；随后才做正常 per-user 安装。
+- **整机包走独立 UpgradeCode**：`Scope=perMachine`、`ProgramFiles64Folder`、`ProgramMenuFolder`（整机上下文解析到公共开始菜单），需要管理员提权；两份包的 UpgradeCode 不同，避免按用户与整机实例互相覆盖。
+- **打包脚本复用绿色包**：`scripts/package_msi.ps1` 默认同时调用 `scripts/package.ps1`，并把 `-BuildDir` 透传下去；本轮修复了 `CommonProgramsFolder` 不是 WiX 合法标准目录的问题，整机分支统一改用 `ProgramMenuFolder`。
+- **验证链**：先确认默认安装目录与开始菜单未被占用，per-user MSI 在普通权限下真实静默安装到默认路径 `%LOCALAPPDATA%\Programs\notepadcc`，核对 exe 哈希、开始菜单、HKCU 产品登记与安装日志的 `Per-User mode`，再真实卸载并核对目录、快捷方式、HKCU 登记与 ARP 项全部清理；per-machine MSI 在无管理员会话里用 `msiexec /a` 管理安装核对文件表与哈希，真实整机安装留待管理员/CI 在干净虚拟机上补跑；绿色 zip 核对程序、`portable`、`说明.txt` 与程序哈希。
+- **ICE 校验**：两份 MSI 均通过 `wix msi validate`（错误 0）；双模式 per-user 包只剩 ICE91 的两条预期警告（用户目录不随 ALLUSERS 变化），由 Launch 条件拒绝 `ALLUSERS=1` 兜底。组件采用显式 GUID：per-user 的文件组件使用 HKCU 键路径，快捷方式单独成组件，避免 ICE38 / ICE43 / ICE57 的混合作用域问题。
+- **度量**：per-user / per-machine MSI 各约 1.62 MB，绿色 zip 约 2.02 MB，均低于 20 MB 的安装包门槛。本轮不改应用代码，单元测试基线仍为两个工具链各 2350 项；新增的 `scripts/verify_package.ps1` 本轮实测 PASS。
 | M4 超越项 | 落实差异化 | 多光标编辑、四分屏、嵌套语法、快捷键迁移预设，视情况推进 LSP 与内置终端 | M3 |
 
 ### 10.2 P0 阶段的任务拆解与依赖

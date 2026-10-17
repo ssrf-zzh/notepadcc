@@ -13,6 +13,7 @@
 param(
     [string]$Version = "",
     [ValidateSet("msvc", "mingw")][string]$Toolchain = "msvc",
+    [string]$BuildDir = "",
     [switch]$NoBuild
 )
 
@@ -26,14 +27,20 @@ if (-not $Version) {
     $Version = $match.Matches[0].Groups[1].Value
 }
 
-$buildDir = if ($Toolchain -eq "msvc") { "build-msvc" } else { "build" }
-$exePath = Join-Path $root "$buildDir\bin\notepadcc.exe"
+$buildDir = if ($BuildDir) {
+    if ([IO.Path]::IsPathRooted($BuildDir)) { $BuildDir } else { Join-Path $root $BuildDir }
+} elseif ($Toolchain -eq "msvc") {
+    Join-Path $root "build-msvc"
+} else {
+    Join-Path $root "build"
+}
+$exePath = Join-Path $buildDir "bin\notepadcc.exe"
 
 if (-not $NoBuild) {
     if ($Toolchain -eq "msvc") {
-        cmake --build (Join-Path $root $buildDir) --config Release
+        cmake --build $buildDir --config Release
     } else {
-        cmake --build (Join-Path $root $buildDir)
+        cmake --build $buildDir
     }
     if ($LASTEXITCODE -ne 0) { throw "构建失败" }
 }

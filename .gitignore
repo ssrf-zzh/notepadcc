@@ -4,6 +4,8 @@
 /out/
 # 发行打包产物（scripts/package.ps1 生成）
 /dist/
+# 构建期下载的本地工具（WiX 等；不入库）
+/.build-tools/
 *.obj
 *.o
 *.pdb

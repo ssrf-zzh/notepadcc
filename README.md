@@ -69,6 +69,7 @@ HTML 再交给默认浏览器；面板是内置自绘的，跟着你的改动实
 | **单实例**：默认单开。再启动时（例如在资源管理器里双击文件）把路径交给已在跑的实例并让它把窗口提到前面，然后自己退出；首选项"常规"页可切换为允许多开，命令行 `--multi-instance` 可临时覆盖 | 已完成 |
 | **文件关联**：设置菜单提供"加入打开方式列表 / 从打开方式列表移除"，把 notepadcc 登记到 10 个常见文本与源码扩展名下。**不抢默认关联**——Windows 8 起默认关联带哈希保护，程序改不动，硬写会被系统重置；想设为默认由用户在"打开方式 → 始终使用此应用"里选 | 已完成 |
 | **绿色发行打包**：`scripts/package.ps1` 一键产出 `dist\notepadcc-<版本>-portable-x64\` 目录与同名 zip（程序 + `portable` 标记 + 说明），解压即用、不装运行库；配置与会话只写在程序目录下，删掉目录即卸载 | 已完成 |
+| **MSI 安装包**：`scripts/package_msi.ps1` 用固定版本 WiX 5.0.2 从同一份源生成按用户 / 整机两份 MSI；按用户包默认装到 `%LOCALAPPDATA%\Programs\notepadcc`、不需要管理员，整机包装到 `%ProgramFiles%\notepadcc`、需要管理员。`scripts/verify_package.ps1` 会真实静默安装 / 卸载按用户包并核对文件哈希、开始菜单、HKCU 产品登记与清理；整机包在无管理员会话里用 `msiexec /a` 管理安装核对文件表与哈希 | 已完成 |
 | **工具菜单（行操作与文本转换）**：复制/删除/上移/下移当前行，排序（升/降/忽略大小写/按长度）、删除空行、删除重复行（保留首次或最后一次）、反转行序、去行首/行尾空白、加/去行号；转大写/小写、URL 编解码、Base64 编解码、HTML 实体转义与还原。作用于选区（没有选区则整篇），**一次操作正好一步撤销**；保留原文的行尾风格与结尾换行 | 已完成 |
 | **JSON/XML 格式化**（工具菜单）：美化 JSON / 压缩 JSON / 美化 XML。**只动空白，不动内容**——字符串转义（`\u4e2d`）、数字写法（`1.500`、`1e3`）、标签属性、注释、CDATA、DOCTYPE 全部原样搬运；XML 的混合内容（`<p>hello <b>w</b></p>`）整段不重排（往里塞缩进就是改数据）。内容不合法时**不返回半截文本**，弹一句"第 N 行第 M 列：……"并保持文档一个字节不动；成功时作用于选区（没有选区则整篇）且正好一步撤销 | 已完成 |
 | **运行命令**（`F5`）：填一条命令行就能跑外部程序 / 编译命令，支持 `$(FULL_CURRENT_PATH)`、`$(CURRENT_DIRECTORY)`、`$(FILE_NAME)`、`$(NAME_PART)`、`$(EXT_PART)`、`$(CURRENT_WORD)`、`$(CURRENT_LINE)`、`$(NPP_DIRECTORY)`、`$(CURRENT_ENCODING)`、`$(CURRENT_EOL)`（变量名大小写不敏感，**认不出来的变量原样留着**，不会悄悄变空把命令跑偏）；工作目录是当前文件所在目录。勾上"把输出收进一个新文档"就把 stdout/stderr 收成一份新的 `运行输出 N`；填过的命令可"保存为命令"存进 `shortcuts.xml` 的 `<UserDefinedCommands>`，随后出现在"运行"菜单里、也能在"管理快捷键"里绑键（**同一条命令的快捷键只写在 `<Command>` 上**，不与 `<InternalCommands>` 重复）| 已完成 |
@@ -185,6 +186,48 @@ powershell -ExecutionPolicy Bypass -File scripts\package.ps1 -Toolchain mingw -N
 `portable` 标记文件（放在程序旁边就不再读写 `%APPDATA%`）与 `说明.txt`。解压即用，
 删目录即卸载——这一条由界面回归脚本的"绿色打包"段实测：解压到一个临时目录、**不加任何开关**
 直接运行、核对会话与日志都落在程序目录里，并核对 `%APPDATA%\notepadcc` 全程未被创建。
+
+### MSI 安装包
+
+MSI 用 **WiX 5.0.2** 生成。v6 起引入 OSMF 维护费、v7 起命令行强制接受其 EULA，
+不适合作为这个商业项目的默认构建依赖；v5 没有这层收费门槛。工具链按固定 SHA-256 下载，
+用 `msiexec /a` 解到项目下的 `.build-tools\`，不装系统 PATH、不需要管理员：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\fetch_wix.ps1
+powershell -ExecutionPolicy Bypass -File scripts\package_msi.ps1 -BuildDir build-msvc-final -NoBuild
+powershell -ExecutionPolicy Bypass -File scripts\verify_package.ps1 -BuildDir build-msvc-final -Version 1.0.0
+```
+
+产出与 `scripts\package.ps1` 的绿色包放在同一个 `dist\` 下：
+
+```text
+dist\notepadcc-<版本>-x64-peruser.msi       按用户安装，约 1.62 MB
+dist\notepadcc-<版本>-x64-permachine.msi    整机安装，约 1.62 MB
+dist\notepadcc-<版本>-portable-x64.zip      绿色包，约 2.02 MB
+```
+
+静默安装 / 卸载：
+
+```powershell
+msiexec /i dist\notepadcc-1.0.0-x64-peruser.msi /qn /norestart
+msiexec /x dist\notepadcc-1.0.0-x64-peruser.msi /qn /norestart
+
+# 整机包需要管理员权限；也可以在“应用和功能”里卸载
+msiexec /i dist\notepadcc-1.0.0-x64-permachine.msi /qn /norestart
+msiexec /x dist\notepadcc-1.0.0-x64-permachine.msi /qn /norestart
+```
+
+需要自定义目录时追加 `INSTALLFOLDER="D:\Apps\notepadcc"`。按用户包是**双模式包默认按用户**，
+并带一条 Launch 条件拒绝 `ALLUSERS=1`，避免误装成整机；整机包才用于 `Program Files`。
+
+`verify_package.ps1` 的验证边界如实说明：先确认默认安装目录与开始菜单未被占用，按用户包
+在普通权限下真实安装到默认路径 `%LOCALAPPDATA%\Programs\notepadcc`、核对
+`notepadcc.exe` 哈希、开始菜单与 `HKCU\Software\Microsoft\Installer\Products` 产品登记，
+读安装日志里的 `Per-User mode`，再真实卸载并核对目录、快捷方式、HKCU 登记与 ARP 项全部清理；
+整机包在当前无管理员会话里只用 `msiexec /a` 做管理安装，核对解出的文件表与哈希，
+**真实的整机静默安装需要管理员或 CI 在干净虚拟机上补跑**。Windows 11 26100 实测 per-user
+安装的 ARP 项可能落在 HKLM，所以校验不把 ARP 根键当作安装范围的唯一判据。
 
 ```powershell
 build\bin\notepadcc.exe                     # 普通启动（配置在 %APPDATA%\notepadcc）
