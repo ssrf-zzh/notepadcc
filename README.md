@@ -77,7 +77,9 @@ notepadcc.exe --multi-instance 允许多个程序实例
 - 无需另行安装 VC++ 可再发行组件
 
 > [!IMPORTANT]
-> 当前 1.0.0 发布包未做 Authenticode 签名，Windows SmartScreen 可能提示“未知发布者”。
+> 当前 1.0.0 发布包使用自签名证书完成 Authenticode 签名与 RFC 3161 时间戳。
+> 该证书链默认不受 Windows 信任，SmartScreen 仍可能提示“未知发布者”；GitHub 上的
+> 自签名构建仅用于测试与预览，正式发布须改用受信任的 CA 代码签名证书重新构建。
 > 请优先核对 `SHA256SUMS`，并只从本仓库的 Releases 页面下载。
 
 ## 从源码构建
@@ -126,10 +128,24 @@ MSVC 请使用 Visual Studio 生成器；Ninja 构建路径主要用于 MinGW。
 powershell -ExecutionPolicy Bypass -File scripts\package.ps1 -Toolchain msvc -BuildDir build-msvc
 
 # 完整候选发布包（EXE、便携 ZIP、两份 MSI、源码包、校验文件、SBOM 等）
+# 使用证书存储中的 CA 代码签名证书（正式发布）
+powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -Version 1.0.0 -BuildDir build-msvc -SigningThumbprint <sha1-thumbprint>
+
+# 或使用 PFX 文件签名
+powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -Version 1.0.0 -BuildDir build-msvc -PfxPath D:\certs\notepadcc.pfx -PfxPassword <password>
+
+# 自签名测试版：签名有效但证书链不受信任，产物标记为 signed-untrusted（仅用于测试/预览）
+powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -Version 1.0.0 -BuildDir build-msvc -SigningThumbprint <sha1-thumbprint> -AllowUntrustedSignature
+
+# 无证书的本地验收（仅用于测试）
 powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -Version 1.0.0 -BuildDir build-msvc -AllowUnsigned
 ```
 
-正式公开分发前应使用有效的 Authenticode 证书签名，并由发布脚本重新生成校验值。
+发布脚本会先为 EXE 签名，再生成便携 ZIP 与两份 MSI，随后为 MSI 签名；签名算法为
+SHA-256，并使用 RFC 3161 时间戳。写入 `SHA256SUMS` 前会执行 `signtool verify /pa /all`，
+并要求 EXE 与两份 MSI 使用同一张证书。正式证书必须通过信任链校验；自签名证书须显式
+传入 `-AllowUntrustedSignature`，产物在清单和下载页中标记为 `signed-untrusted`，
+不得作为正式可信版本发布。
 
 ## 项目结构
 

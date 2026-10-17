@@ -36,9 +36,13 @@ notepadcc 是自由软件，依据 GNU General Public License 第 3 版（不采
 
 校验与签名
 
-下载后请先核对同目录的 SHA256SUMS 与 release-manifest.json。发布页会同时列出
-每个文件的 SHA-256。若构建环境没有正式 Authenticode 证书，候选包会明确标记为
-“未签名”，不得作为正式版本上传到公开渠道。
+下载后请先核对同目录的 SHA256SUMS 与 release-manifest.json，发布页同时列出每个文件的
+SHA-256。正式版本使用受信任的 Authenticode 代码签名证书，采用 SHA-256 摘要与 RFC 3161
+时间戳；发布脚本会验证 EXE 与两份 MSI 的签名链后才写入校验值。
+
+本候选包使用自签名证书完成了 Authenticode 签名与时间戳，签名本身有效，但证书链不受
+Windows 信任，SmartScreen 可能仍提示“未知发布者”。该候选包仅用于测试与预览，不得
+作为正式可信版本发布。正式发布须改用受信任的 CA 代码签名证书重新构建。
 
 已知边界
 

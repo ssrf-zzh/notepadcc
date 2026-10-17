@@ -8,17 +8,27 @@
       LICENSE, NOTICE, sbom.cdx.json, licenses\,
       index.html (static download page)
 
-    Production usage with a certificate in CurrentUser\My:
+    Production usage with a CA-issued certificate in CurrentUser\My:
       powershell -ExecutionPolicy Bypass -File scripts\release.ps1 `
         -Version 1.0.0 -BuildDir build-msvc-final `
         -SigningThumbprint <sha1-thumbprint>
+
+    Or with a PFX file:
+      powershell -ExecutionPolicy Bypass -File scripts\release.ps1 `
+        -Version 1.0.0 -BuildDir build-msvc-final `
+        -PfxPath D:\certs\notepadcc.pfx -PfxPassword <password>
+
+    Self-signed acceptance (always marked signed-untrusted, even if locally trusted):
+      powershell -ExecutionPolicy Bypass -File scripts\release.ps1 `
+        -Version 1.0.0 -BuildDir build-msvc-final `
+        -SigningThumbprint <sha1-thumbprint> -AllowUntrustedSignature
 
     Local acceptance without a certificate must be explicit:
       powershell -ExecutionPolicy Bypass -File scripts\release.ps1 `
         -Version 1.0.0 -BuildDir build-msvc-final -AllowUnsigned
 
-    The unsigned result is marked as a candidate in the manifest and download
-    page. It must not be published as the official release.
+    Unsigned and untrusted results are marked as candidates in the manifest and
+    download page. They must not be published as the official release.
 #>
 param(
     [string]$Version = "",
@@ -29,8 +39,10 @@ param(
     [string]$SigningThumbprint = "",
     [string]$PfxPath = "",
     [string]$PfxPassword = "",
+    [string]$SignToolPath = "",
     [string]$TimestampUrl = "http://timestamp.digicert.com",
     [switch]$AllowUnsigned,
+    [switch]$AllowUntrustedSignature,
     [switch]$RequireSignature,
     [switch]$SkipPackage
 )
@@ -47,6 +59,17 @@ function Get-CMakeVersion {
 }
 
 function Find-SignTool {
+    if ($SignToolPath) {
+        $candidate = if ([IO.Path]::IsPathRooted($SignToolPath)) {
+            $SignToolPath
+        } else {
+            Join-Path $root $SignToolPath
+        }
+        if (-not (Test-Path -LiteralPath $candidate)) {
+            throw "signtool.exe was not found at $candidate."
+        }
+        return $candidate
+    }
     $command = Get-Command signtool.exe -ErrorAction SilentlyContinue
     if ($command) { return $command.Source }
     $kitRoot = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
@@ -61,12 +84,25 @@ function Find-SignTool {
     throw "signtool.exe was not found. Install the Windows SDK or put signtool on PATH."
 }
 
+function Get-SignatureState([string]$Path) {
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    return [pscustomobject]@{
+        Status = [string]$signature.Status
+        StatusMessage = $signature.StatusMessage
+        SignatureType = [string]$signature.SignatureType
+        SignerSubject = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { "" }
+        SignerThumbprint = if ($signature.SignerCertificate) { $signature.SignerCertificate.Thumbprint } else { "" }
+        Timestamped = [bool]$signature.TimeStamperCertificate
+    }
+}
+
 function Invoke-SignTool([string]$SignTool, [string]$Path) {
-    $arguments = @("sign", "/fd", "SHA256", "/tr", $TimestampUrl, "/td", "SHA256")
+    $arguments = @("sign", "/fd", "SHA256")
+    if ($TimestampUrl) { $arguments += @("/tr", $TimestampUrl, "/td", "SHA256") }
     if ($SigningThumbprint) {
         $arguments += @("/sha1", $SigningThumbprint)
     } else {
-        $arguments += @("/f", $PfxPath, "/a")
+        $arguments += @("/f", $PfxPath)
         if ($PfxPassword) { $arguments += @("/p", $PfxPassword) }
     }
     $arguments += $Path
@@ -75,9 +111,45 @@ function Invoke-SignTool([string]$SignTool, [string]$Path) {
     if ($LASTEXITCODE -ne 0) { throw "signtool sign failed for $Path (exit $LASTEXITCODE)" }
 }
 
-function Test-SignTool([string]$SignTool, [string]$Path) {
+function Test-SignTool([string]$SignTool, [string]$Path, [switch]$AllowUntrusted) {
     & $SignTool verify /pa /all $Path | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw "signtool verify failed for $Path (exit $LASTEXITCODE)" }
+    $exitCode = $LASTEXITCODE
+    $state = Get-SignatureState $Path
+    if ($exitCode -eq 0) {
+        if ($state.Status -ne "Valid") {
+            throw "signtool accepted $Path but Get-AuthenticodeSignature reports $($state.Status)."
+        }
+    } else {
+        if (-not $AllowUntrusted) {
+            throw "signtool verify failed for $Path (exit $exitCode): $($state.StatusMessage)"
+        }
+        if ($state.Status -notin @("NotTrusted", "UnknownError")) {
+            throw "Signature on $Path is not merely untrusted: $($state.Status) - $($state.StatusMessage)"
+        }
+    }
+    if ($state.SignatureType -ne "Authenticode") {
+        throw "Signature on $Path is not an Authenticode signature."
+    }
+    if (-not $state.SignerThumbprint) {
+        throw "Signature on $Path has no signer certificate."
+    }
+    if ($SigningThumbprint) {
+        $expectedThumbprint = ($SigningThumbprint -replace '\s', '').ToUpperInvariant()
+        if ($state.SignerThumbprint.ToUpperInvariant() -ne $expectedThumbprint) {
+            throw "Signature on $Path uses $($state.SignerThumbprint), not the requested certificate $expectedThumbprint."
+        }
+    }
+    if ($TimestampUrl -and -not $state.Timestamped) {
+        throw "Signature on $Path is not timestamped."
+    }
+    if ($exitCode -ne 0) {
+        Write-Warning "Signature on $Path is cryptographically valid but its certificate chain is not trusted."
+    }
+    return [pscustomobject]@{
+        Trusted = ($exitCode -eq 0)
+        SignerSubject = $state.SignerSubject
+        SignerThumbprint = $state.SignerThumbprint
+    }
 }
 
 function Remove-SafeDirectory([string]$Path, [string]$AllowedParent) {
@@ -123,6 +195,18 @@ $signingRequested = [bool]($SigningThumbprint -or $PfxPath)
 if ($SigningThumbprint -and $PfxPath) {
     throw "Use either -SigningThumbprint or -PfxPath, not both."
 }
+if ($PfxPath -and -not [IO.Path]::IsPathRooted($PfxPath)) {
+    $PfxPath = Join-Path $root $PfxPath
+}
+if ($PfxPath -and -not (Test-Path -LiteralPath $PfxPath)) {
+    throw "PFX file was not found: $PfxPath"
+}
+if ($AllowUntrustedSignature -and -not $signingRequested) {
+    throw "-AllowUntrustedSignature requires -SigningThumbprint or -PfxPath."
+}
+if ($RequireSignature -and $AllowUntrustedSignature) {
+    throw "-RequireSignature cannot be combined with -AllowUntrustedSignature."
+}
 if (-not $signingRequested -and ($RequireSignature -or -not $AllowUnsigned)) {
     throw "No signing certificate supplied. Use -AllowUnsigned only for a candidate that will not be published."
 }
@@ -135,10 +219,16 @@ $exePath = Join-Path $buildPath "bin\notepadcc.exe"
 if (-not (Test-Path -LiteralPath $exePath)) { throw "Missing $exePath; build the MSVC release first." }
 
 $signTool = $null
+$signingTrusted = $false
+$signerSubject = ""
+$signerThumbprint = ""
 if ($signingRequested) {
     $signTool = Find-SignTool
     Invoke-SignTool $signTool $exePath
-    Test-SignTool $signTool $exePath
+    $exeSignature = Test-SignTool $signTool $exePath -AllowUntrusted:$AllowUntrustedSignature
+    $signingTrusted = $exeSignature.Trusted
+    $signerSubject = $exeSignature.SignerSubject
+    $signerThumbprint = $exeSignature.SignerThumbprint
 }
 
 if (-not $SkipPackage) {
@@ -159,8 +249,17 @@ $perMachineMsi = Join-Path $dist "notepadcc-$Version-x64-permachine.msi"
 if ($signTool) {
     Invoke-SignTool $signTool $perUserMsi
     Invoke-SignTool $signTool $perMachineMsi
-    Test-SignTool $signTool $perUserMsi
-    Test-SignTool $signTool $perMachineMsi
+    $perUserSignature = Test-SignTool $signTool $perUserMsi -AllowUntrusted:$AllowUntrustedSignature
+    $perMachineSignature = Test-SignTool $signTool $perMachineMsi -AllowUntrusted:$AllowUntrustedSignature
+    if ($perUserSignature.SignerThumbprint -ne $signerThumbprint -or
+        $perMachineSignature.SignerThumbprint -ne $signerThumbprint) {
+        throw "The MSI signatures do not use the same certificate as the executable."
+    }
+    $signingTrusted = $signingTrusted -and $perUserSignature.Trusted -and $perMachineSignature.Trusted
+}
+
+if ($AllowUntrustedSignature) {
+    $signingTrusted = $false
 }
 
 Copy-Checked $exePath (Join-Path $releaseDir "notepadcc.exe")
@@ -230,7 +329,11 @@ $sbomArguments = @(
 foreach ($artifact in $artifacts) { $sbomArguments += @("--artifact", $artifact) }
 Invoke-Python $sbomArguments
 
-$signingStatus = if ($signTool) { "signed" } else { "unsigned" }
+$signingStatus = if ($signTool) {
+    if ($signingTrusted) { "signed" } else { "signed-untrusted" }
+} else {
+    "unsigned"
+}
 $signingMethod = if ($SigningThumbprint) { "signtool-certificate-store" } elseif ($PfxPath) { "signtool-pfx" } else { "none" }
 $releaseDate = Get-Date -Format "yyyy-MM-dd"
 $renderArguments = @(
@@ -245,7 +348,11 @@ $renderArguments = @(
     "--signing-status", $signingStatus,
     "--signing-method", $signingMethod
 )
-if ($signTool) { $renderArguments += @("--timestamp-url", $TimestampUrl) }
+if ($signTool) {
+    $renderArguments += @("--timestamp-url", $TimestampUrl)
+    $renderArguments += @("--signer-subject", $signerSubject)
+    $renderArguments += @("--signer-thumbprint", $signerThumbprint)
+}
 if ($dirtyTracked) { $renderArguments += "--dirty-tracked" }
 Invoke-Python $renderArguments
 
@@ -266,4 +373,6 @@ Write-Host "[ok] SBOM: CycloneDX 1.5"
 Write-Host "[ok] Signing status: $signingStatus"
 if ($signingStatus -eq "unsigned") {
     Write-Warning "This is an unsigned candidate. Do not publish it as the official release."
+} elseif ($signingStatus -eq "signed-untrusted") {
+    Write-Warning "The signature chain is not trusted. Do not publish this candidate as the official release."
 }
