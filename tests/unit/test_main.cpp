@@ -47,6 +47,7 @@
 #include "license/LicenseTypes.h"
 #include "license/LicenseVerifier.h"
 #include "license/Fingerprint.h"
+#include "license/LicenseService.h"
 #include "LicenseFixtures.h"
 #include "infra/SingleInstance.h"
 #include "infra/FileAssociation.h"
@@ -7829,6 +7830,177 @@ int main() {
               "本机对本机签出的短码：两种模式都放行");
         std::printf("    [info] 本机短码 %s（主板 UUID %s）\n", realCode.c_str(),
                     real.values[3].empty() ? "读不到" : real.values[3].c_str());
+    }
+    Section("许可服务（判定 / 导入 / --license-info）（B5）");
+    {
+        using npcc::license::Edition;
+        using npcc::license::EvaluateLicense;
+        using npcc::license::Feature;
+        using npcc::license::FeatureBit;
+        using npcc::license::Fingerprint;
+        using npcc::license::FingerprintMode;
+        using npcc::license::FingerprintVerdict;
+        using npcc::license::Format;
+        using npcc::license::JsonEscape;
+        using npcc::license::LicenseError;
+        using npcc::license::LicenseErrorName;
+        using npcc::license::LicenseService;
+        using npcc::license::LicenseState;
+        using npcc::license::LicenseStateName;
+        using npcc::license::LicenseVerifyResult;
+
+        // ---- 纯判定：验签通过之后，"能不能用"由机器与时间窗决定 ----
+        Fingerprint bound_machine;
+        bound_machine.values = {"guid-a", "1234ABCD", "Fake CPU @ 1.00GHz", "board-1"};
+        LicenseVerifyResult licensed;
+        licensed.info.schema = 1;
+        licensed.info.product = "notepadcc";
+        licensed.info.edition = Edition::Pro;
+        licensed.info.fingerprintMode = FingerprintMode::Tolerant;
+        licensed.info.fingerprint = Format(bound_machine);
+        licensed.info.features = FeatureBit(Feature::MultiCaret) | FeatureBit(Feature::Compare);
+        const auto bound = EvaluateLicense(licensed, bound_machine);
+        Check(bound.state == LicenseState::Licensed && bound.error == LicenseError::None &&
+                  bound.fingerprint.Allows(),
+              "绑本机的许可 → Licensed");
+
+        Fingerprint other_machine;
+        other_machine.values = {"guid-b", "9999FFFF", "Another CPU @ 2.00GHz", "board-9"};
+        LicenseVerifyResult elsewhere = licensed;
+        elsewhere.info.fingerprint = Format(other_machine);
+        const auto foreign = EvaluateLicense(elsewhere, bound_machine);
+        Check(foreign.state == LicenseState::Free &&
+                  foreign.error == LicenseError::FingerprintMismatch && !foreign.fingerprint.Allows(),
+              "绑别人的机器 → Free + FingerprintMismatch");
+
+        LicenseVerifyResult site;
+        site.info.schema = 1;
+        site.info.product = "notepadcc";
+        site.info.edition = Edition::Enterprise;
+        site.info.fingerprintMode = FingerprintMode::None;
+        const auto siteResult = EvaluateLicense(site, bound_machine);
+        Check(siteResult.state == LicenseState::Licensed &&
+                  siteResult.fingerprint.verdict == FingerprintVerdict::NotBound,
+              "站点许可（mode=none）→ 不判机器直接放行");
+
+        LicenseVerifyResult expired = licensed;
+        expired.error = LicenseError::Expired;
+        const auto expiredResult = EvaluateLicense(expired, bound_machine);
+        Check(expiredResult.state == LicenseState::Free && expiredResult.error == LicenseError::Expired,
+              "过期 → Free 且错误是 Expired（不重复判指纹）");
+
+        // ---- 服务：拿固定件走一遍真实文件路径 ----
+        const std::filesystem::path serviceDir =
+            std::filesystem::temp_directory_path() / "npcc_license_service_test";
+        std::filesystem::remove_all(serviceDir);
+        std::filesystem::create_directories(serviceDir);
+        const std::filesystem::path licensePath = serviceDir / "license.dat";
+        const std::filesystem::path proPath = serviceDir / "pro.lic";
+        const std::filesystem::path junkPath = serviceDir / "junk.lic";
+
+        LicenseError fileError = LicenseError::None;
+        std::wstring fileDetail;
+        Check(npcc::license::SaveLicenseFile(proPath, npcc::test::kLicensePro, &fileError, &fileDetail),
+              "准备：写出一份 Pro 许可（固定件）");
+        Check(npcc::license::SaveLicenseFile(junkPath, "这不是一张许可", &fileError, &fileDetail),
+              "准备：写出一份乱码文件");
+
+        LicenseService& service = LicenseService::Instance();
+        service.Initialize(&licensePath);
+        Check(service.State() == LicenseState::Free && service.LastError() == LicenseError::FileMissing,
+              "没有许可文件 → Free + FileMissing");
+        const std::string freeJson = service.StatusJson();
+        Check(freeJson.find("\"state\":\"free\"") != std::string::npos &&
+                  freeJson.find("\"error\":\"fileMissing\"") != std::string::npos,
+              "--license-info：没有许可时照样给出可读状态");
+        Check(freeJson.find("\"expiresAt\":null") != std::string::npos &&
+                  freeJson.find("\"features\":[]") != std::string::npos,
+              "没有许可：expiresAt 是 null、features 是空数组");
+
+        Check(service.Import(proPath, &fileError, &fileDetail), "导入 Pro 许可成功");
+        Check(std::filesystem::exists(licensePath), "导入会把许可落到许可位置");
+        Check(service.State() == LicenseState::Licensed && service.EditionValue() == Edition::Pro,
+              "导入后立即生效（Pro）");
+        Check(service.Has(Feature::MultiCaret) && service.Has(Feature::Compare) &&
+                  service.Has(Feature::DataTools),
+              "features 里写了的三项都授权");
+        Check(!service.Has(Feature::HugeFile) && !service.Has(Feature::RemoteEdit),
+              "没写进 features 的能力不授权");
+        Check(service.Info().holder == "测试用户" && service.Info().seats == 5,
+              "持有人与席位数从许可里来");
+        const std::string proJson = service.StatusJson();
+        Check(proJson.find("\"state\":\"licensed\"") != std::string::npos &&
+                  proJson.find("\"edition\":\"pro\"") != std::string::npos,
+              "--license-info：已激活时 state / edition 都是机器可读的");
+        Check(proJson.find("\"expiresAt\":\"2030-01-01T00:00:00Z\"") != std::string::npos,
+              "expiresAt 输出 ISO8601");
+        Check(proJson.find("\"features\":[\"compare\",\"datatools\",\"multicaret\"]") !=
+                  std::string::npos,
+              "features 按名字字典序输出");
+        Check(proJson.find("\"holder\":\"测试用户\"") != std::string::npos,
+              "中文持有人名原样输出（不需要 \\u 转义）");
+        Check(proJson.find("\"trialDaysLeft\":0") != std::string::npos &&
+                  proJson.find("license.dat") != std::string::npos,
+              "trialDaysLeft（B7 状态机）与许可文件路径都在");
+
+        Check(!service.Import(junkPath, &fileError, &fileDetail) && fileError != LicenseError::None,
+              "乱码文件不能导入");
+        Check(service.State() == LicenseState::Licensed && service.LastError() == LicenseError::None,
+              "导入失败不影响已经生效的许可");
+
+        Check(npcc::license::SaveLicenseFile(licensePath, npcc::test::kLicenseExpired, &fileError,
+                                             &fileDetail),
+              "准备：换成过期许可");
+        Check(!service.Reload() && service.State() == LicenseState::Free &&
+                  service.LastError() == LicenseError::Expired,
+              "过期 → Free + Expired");
+        Check(service.Info().holder == "测试用户" && !service.Has(Feature::MultiCaret),
+              "过期的许可仍然带着持有人信息，但一个能力都不授权");
+
+        Check(npcc::license::SaveLicenseFile(licensePath, npcc::test::kLicenseFingerprintBound,
+                                             &fileError, &fileDetail),
+              "准备：换成绑别的机器的许可");
+        Check(!service.Reload() && service.LastError() == LicenseError::FingerprintMismatch,
+              "指纹不符 → Free + FingerprintMismatch（验签本身是通过的）");
+
+        const std::filesystem::path foreignPath = serviceDir / "foreign.lic";
+        Check(npcc::license::SaveLicenseFile(foreignPath, npcc::test::kLicenseFingerprintBound,
+                                             &fileError, &fileDetail),
+              "准备：另存一份绑别的机器的许可");
+        Check(service.Import(foreignPath, &fileError, &fileDetail) &&
+                  service.State() == LicenseState::Free,
+              "绑别的机器的许可也导入得进来，但不会激活（结构上是真许可）");
+
+        Check(npcc::license::SaveLicenseFile(licensePath, npcc::test::kLicenseUnknownFeature,
+                                             &fileError, &fileDetail),
+              "准备：换成带未知能力的许可");
+        Check(service.Reload() && service.Has(Feature::MultiCaret) && !service.Has(Feature::DataTools),
+              "未知能力不影响认识的位（量子价值不授权，混搭也不连坐）");
+        Check(service.Info().unknownFeatures.size() == 1 &&
+                  service.Info().unknownFeatures[0] == "quantumworth",
+              "未知能力列在 unknownFeatures 里等着给人看");
+
+        Check(npcc::license::SaveLicenseFile(licensePath, npcc::test::kLicenseEnterpriseSite,
+                                             &fileError, &fileDetail),
+              "准备：换成企业站点许可");
+        Check(service.Reload() && service.EditionValue() == Edition::Enterprise &&
+                  service.Info().seats == 0,
+              "企业站点许可 → Enterprise，席位数 0 表示不限量");
+
+        // ---- JSON 转义与名字 ----
+        CheckEqual(JsonEscape("a\"b\\c\nd"), "a\\\"b\\\\c\\nd", "引号、反斜杠、换行按 JSON 转义");
+        CheckEqual(JsonEscape("某某科技"), "某某科技", "中文原样输出");
+        CheckEqual(JsonEscape(std::string("\x01", 1)), "\\u0001", "控制字符转成 \\uXXXX");
+        Check(LicenseStateName(LicenseState::Licensed) == "licensed" &&
+                  LicenseStateName(LicenseState::Free) == "free" &&
+                  LicenseStateName(LicenseState::Trial) == "trial",
+              "状态名（脚本按这三个词判断）");
+        Check(LicenseErrorName(LicenseError::FingerprintMismatch) == "fingerprintMismatch" &&
+                  LicenseErrorName(LicenseError::None) == "none" &&
+                  LicenseErrorName(LicenseError::Expired) == "expired",
+              "错误名（与 DescribeLicenseError 的中文文案各走各路）");
+
+        std::filesystem::remove_all(serviceDir);
     }
     Section("远程编辑：站点校验与远程路径（M3 第十一块）");
     {

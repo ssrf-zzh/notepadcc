@@ -142,6 +142,15 @@ std::optional<FingerprintMode> FingerprintModeFromName(std::string_view name) {
     return std::nullopt;
 }
 
+std::string_view LicenseStateName(LicenseState state) {
+    switch (state) {
+        case LicenseState::Trial: return "trial";
+        case LicenseState::Licensed: return "licensed";
+        case LicenseState::Free: break;
+    }
+    return "free";
+}
+
 std::wstring DescribeLicenseError(LicenseError error) {
     switch (error) {
         case LicenseError::None: return L"许可有效";
@@ -179,6 +188,25 @@ LicenseLogLevel LicenseErrorLevel(LicenseError error) {
             // 格式不对、验签不过、密钥不认识、schema 太新、时钟异常：值得 Warn
             return LicenseLogLevel::Warn;
     }
+}
+
+std::string_view LicenseErrorName(LicenseError error) {
+    switch (error) {
+        case LicenseError::None: return "none";
+        case LicenseError::FileMissing: return "fileMissing";
+        case LicenseError::IoError: return "ioError";
+        case LicenseError::MalformedContainer: return "malformedContainer";
+        case LicenseError::ProductMismatch: return "productMismatch";
+        case LicenseError::SignatureInvalid: return "signatureInvalid";
+        case LicenseError::KeyUnknown: return "keyUnknown";
+        case LicenseError::SchemaTooNew: return "schemaTooNew";
+        case LicenseError::Expired: return "expired";
+        case LicenseError::NotYetValid: return "notYetValid";
+        case LicenseError::FingerprintMismatch: return "fingerprintMismatch";
+        case LicenseError::ClockAnomaly: return "clockAnomaly";
+        case LicenseError::ActivationNetworkFailed: return "activationNetworkFailed";
+    }
+    return "unknown";
 }
 
 std::optional<std::int64_t> ParseIso8601Utc(std::string_view text) {

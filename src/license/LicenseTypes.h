@@ -58,6 +58,17 @@ enum class FingerprintMode {
 std::string_view FingerprintModeName(FingerprintMode mode);
 std::optional<FingerprintMode> FingerprintModeFromName(std::string_view name);
 
+// 运行状态（设计 2.1 与第 5 章）：许可校验不过一律回到 Free——Free 是**正常**
+// 状态，不是"出错"。试用与回落状态机（含时钟回拨的保守处理）是 B7，这里先把
+// 状态的形状定下来：试用期（Trial）的能力集按 Pro 计。
+enum class LicenseState {
+    Free,
+    Trial,
+    Licensed,
+};
+
+std::string_view LicenseStateName(LicenseState state);
+
 // 许可错误（设计 9 的错误表）。文案分两路：DescribeLicenseError 给用户看的
 // 一句话，LicenseErrorLevel 决定日志级别——"没有许可""过期"这类是 Info，
 // 只有真异常才 Warn，Free 是正常状态，不该把日志刷满。
@@ -84,6 +95,10 @@ enum class LicenseLogLevel {
 
 std::wstring DescribeLicenseError(LicenseError error);
 LicenseLogLevel LicenseErrorLevel(LicenseError error);
+
+// 错误名的机器可读写法（--license-info 的 JSON、日志与脚本比对用）。
+// 用户看的文案走 DescribeLicenseError，两者不要互相替代。
+std::string_view LicenseErrorName(LicenseError error);
 
 // 解析出来的许可信息。签发端（tools/licgen，B12）也用同一个类型来序列化——
 // 两端共用一套字段，避免格式漂移（设计 3.4）。
