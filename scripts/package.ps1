@@ -66,6 +66,14 @@ New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
 Copy-Item -LiteralPath $exePath -Destination (Join-Path $stage "notepadcc.exe")
 Copy-Item -LiteralPath (Join-Path $root "LICENSE") -Destination (Join-Path $stage "LICENSE.txt")
+Copy-Item -LiteralPath (Join-Path $root "NOTICE") -Destination (Join-Path $stage "NOTICE.txt")
+$stageLicenses = Join-Path $stage "licenses"
+New-Item -ItemType Directory -Path $stageLicenses -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $root "third_party\scintilla\License.txt") -Destination (Join-Path $stageLicenses "Scintilla-License.txt")
+Copy-Item -LiteralPath (Join-Path $root "third_party\lexilla\License.txt") -Destination (Join-Path $stageLicenses "Lexilla-License.txt")
+Copy-Item -LiteralPath (Join-Path $root "third_party\pcre2\LICENCE.md") -Destination (Join-Path $stageLicenses "PCRE2-LICENCE.md")
+Copy-Item -LiteralPath (Join-Path $root "third_party\pcre2\deps\sljit\LICENSE") -Destination (Join-Path $stageLicenses "SLJIT-LICENSE.txt")
+Copy-Item -LiteralPath (Join-Path $root "licenses\MSVC-RUNTIME-NOTICE.txt") -Destination (Join-Path $stageLicenses "MSVC-RUNTIME-NOTICE.txt")
 # 便携标记：文件名就叫 portable，内容写一句人话，方便用户自己看懂
 Set-Content -LiteralPath (Join-Path $stage "portable") -Encoding UTF8 -Value @"
 这个文件的存在表示 notepadcc 以「便携模式」运行。
@@ -99,6 +107,7 @@ notepadcc $Version（便携版 x64）
 Set-Content -LiteralPath (Join-Path $stage "源代码说明.txt") -Encoding UTF8 -Value @"
 notepadcc $Version 按 GNU General Public License v3.0 only（GPL-3.0-only）发布。
 许可证全文见同目录的 LICENSE.txt。
+第三方组件信息见 NOTICE.txt，完整许可文本见 licenses\ 目录。
 
 本程序对应的完整源代码在同一个发行目录的 notepadcc-$Version-source.zip 中提供。
 转发本绿色包时必须同时提供该源码包；如果只拿到了绿色包，请向分发者索取对应源码。
